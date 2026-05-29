@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Standalone smoke test for mcp-knowledge-graph. No other component required.
+
+Part A: record entities + relations, query them back, recall_about.
+Part B: boot the server, /health, exercise the tools over real MCP transport.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+TEST_PORT = int(os.environ.get("SMOKE_PORT", "19103"))
+_TMP = tempfile.mkdtemp(prefix="kg-smoke-")
+TEST_DB = os.path.join(_TMP, "graph.db")
+os.environ["KG_DB_PATH"] = TEST_DB
+
+
+def _ok(msg: str) -> None:
+    print(f"  ok: {msg}")
+
+
+def _fail(msg: str) -> None:
+    print(f"  FAIL: {msg}")
+    sys.exit(1)
+
+
+def part_a() -> None:
+    print("[A] core logic (throwaway DB)")
+    import kg_core
+
+    kg_core.record_entity("decision", "use-sqlite-vec",
+                          {"why": "zero-infra vector store", "date": "2026-05-29"})
+    kg_core.record_entity("file", "rag_core.py", {"lang": "python"})
+    kg_core.record_relation("use-sqlite-vec", "implemented_in", "rag_core.py")
+    # merge props on existing entity
+    kg_core.record_entity("decision", "use-sqlite-vec", {"status": "active"})
+
+    q = kg_core.query_graph(subject="use-sqlite-vec")
+    if not any(r["dst"] == "rag_core.py" for r in q["relations"]):
+        _fail(f"relation not found via query_graph: {q}")
+    _ok(f"query_graph(subject) -> {[ (r['rel'], r['dst']) for r in q['relations'] ]}")
+
+    qt = kg_core.query_graph(type="decision")
+    if not any(e["name"] == "use-sqlite-vec" and e["props"].get("status") == "active"
+               for e in qt["entities"]):
+        _fail(f"prop merge / type query failed: {qt}")
+    _ok("query_graph(type='decision') returns merged props")
+
+    rec = kg_core.recall_about("rag_core.py")
+    if not rec["found"] or not any(r["src"] == "use-sqlite-vec" for r in rec["incoming"]):
+        _fail(f"recall_about missing incoming relation: {rec}")
+    _ok(f"recall_about('rag_core.py') incoming -> {[r['src'] for r in rec['incoming']]}")
+
+
+async def _mcp_check(port: int) -> None:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    async with streamablehttp_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            names = {t.name for t in (await session.list_tools()).tools}
+            expected = {"record_entity", "record_relation", "query_graph", "recall_about"}
+            if not expected.issubset(names):
+                _fail(f"missing tools; got {names}")
+            _ok(f"tools advertised: {sorted(names)}")
+            await session.call_tool("record_entity", {"type": "bug", "name": "bug-42"})
+            await session.call_tool("record_relation",
+                                    {"a": "bug-42", "rel": "fixed_in", "b": "commit-abc"})
+            res = await session.call_tool("recall_about", {"name": "bug-42"})
+            data = res.structuredContent or (json.loads(res.content[0].text) if res.content else {})
+            if isinstance(data, dict) and "result" in data and "outgoing" not in data:
+                data = data["result"]
+            outs = [r["dst"] for r in data.get("outgoing", [])]
+            if "commit-abc" not in outs:
+                _fail(f"recall_about over MCP missing relation; got {outs}")
+            _ok(f"recall_about('bug-42') over MCP -> fixed_in {outs}")
+
+
+def _wait_health(port: int, timeout: float = 30.0) -> None:
+    url = f"http://127.0.0.1:{port}/health"
+    deadline = time.monotonic() + timeout
+    last = ""
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as r:
+                if json.loads(r.read()).get("status") == "ok":
+                    _ok(f"/health up on :{port}")
+                    return
+        except Exception as e:  # noqa: BLE001
+            last = str(e)
+        time.sleep(0.4)
+    _fail(f"server health never came up on :{port} ({last})")
+
+
+def part_b() -> None:
+    print(f"[B] server over MCP streamable-http (:{TEST_PORT})")
+    env = dict(os.environ, MCP_KG_PORT=str(TEST_PORT), MCP_BIND_HOST="127.0.0.1",
+               KG_DB_PATH=TEST_DB)
+    proc = subprocess.Popen([sys.executable, str(HERE / "server.py")], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        _wait_health(TEST_PORT)
+        asyncio.run(_mcp_check(TEST_PORT))
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+if __name__ == "__main__":
+    part_a()
+    part_b()
+    print("mcp-knowledge-graph smoke test PASSED")

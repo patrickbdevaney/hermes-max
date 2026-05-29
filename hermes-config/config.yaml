@@ -1,0 +1,84 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# hermes-max — Tier-0 reference overlay for ~/.hermes/config.yaml
+#
+# This file is a REFERENCE, not a drop-in replacement. It documents the
+# recommended native-Hermes settings to WIRE/TUNE (Tier 0 of the spec) plus the
+# exact mcp_servers block that `scripts/register-mcp.sh` injects into your LIVE
+# config. Verify these values against ~/.hermes/config.yaml; register-mcp.sh
+# only writes the mcp_servers block (and, with --sync-model-url, model.base_url)
+# — it does not overwrite the rest of your config.
+#
+# Never fork Hermes. Everything below is a NATIVE surface (config keys).
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── The single port story ─────────────────────────────────────────────────
+# model.base_url must equal $VLLM_BASE_URL. register-mcp.sh --sync-model-url
+# sets this for you (dev = Tailscale IP, prod = localhost). Never hardcode.
+model:
+  default: /model
+  provider: custom
+  base_url: http://YOUR_TAILSCALE_IP:8001/v1   # ← prod: http://localhost:8001/v1
+  api_mode: chat_completions
+
+# ── The five hermes-max MCP servers (injected by register-mcp.sh) ──────────
+# Independent processes over streamable-http on localhost. Killing any one
+# degrades exactly one tool; Hermes keeps running (anti-Frankenstein gate).
+mcp_servers:
+  hermes-max-verify:
+    url: http://127.0.0.1:9101/mcp
+    enabled: true
+    timeout: 120
+  hermes-max-codebase-rag:
+    url: http://127.0.0.1:9102/mcp
+    enabled: true
+    timeout: 120
+  hermes-max-knowledge-graph:
+    url: http://127.0.0.1:9103/mcp
+    enabled: true
+    timeout: 120
+  hermes-max-observability:
+    url: http://127.0.0.1:9104/mcp
+    enabled: true
+    timeout: 120
+  hermes-max-escalation:        # process runs; routing is OFF until ESCALATION_ENABLED=true
+    url: http://127.0.0.1:9105/mcp
+    enabled: true
+    timeout: 120
+
+# ── Tier-0 native capabilities to keep ON / tuned (already mostly set) ──────
+memory:
+  memory_enabled: true          # 3-layer memory + FTS5 cross-session recall
+  user_profile_enabled: true
+  memory_char_limit: 2200       # generous, per spec
+skills:
+  guard_agent_created: true     # keep guard on initially
+  creation_nudge_interval: 20   # let the self-improving skill library grow
+delegation:
+  orchestrator_enabled: true    # planner/coder/reviewer without a custom framework
+  max_concurrent_children: 3
+  max_iterations: 100
+kanban:
+  auto_decompose: true          # native task decomposition for >5-file tasks
+lsp:
+  enabled: true                 # go-to-def/refs/diagnostics across the codebase
+checkpoints:
+  enabled: true                 # long-task resumability
+curator:
+  enabled: true                 # nightly skill curation
+  interval_hours: 168
+web:
+  search_backend: http://localhost:8080   # SearXNG
+security:
+  tirith_enabled: true          # native security layer (Lane-1 posture)
+  redact_secrets: true
+
+# ── Hooks (optional; see hermes-config/hooks/) ─────────────────────────────
+# The verify GATE is enforced primarily by the workflow-task-finish skill. The
+# optional pre_tool_call hook below adds a belt-and-suspenders block on
+# destructive terminal commands for unattended overnight runs. Opt-in: copy the
+# script to ~/.hermes/agent-hooks/ and uncomment.
+# hooks:
+#   pre_tool_call:
+#     - matcher: "terminal"
+#       command: "~/.hermes/agent-hooks/block-destructive.sh"
+#       timeout: 5
