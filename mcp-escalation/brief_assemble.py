@@ -94,9 +94,19 @@ async def _mcp_async(url: str, tool: str, args: dict) -> Any:
 
 
 def _mcp(port: str, tool: str, args: dict) -> dict | None:
-    try:
+    # Run on a dedicated worker thread with its own loop, so the call works
+    # whether or not the caller is already inside a running event loop (FastMCP
+    # tool handlers are). A bare asyncio.run() in-loop raises and the brief
+    # section would silently come back empty in the live server.
+    import concurrent.futures
+
+    def _runner() -> dict | None:
         return asyncio.run(asyncio.wait_for(
             _mcp_async(f"http://{HOST}:{port}/mcp", tool, args), timeout=MCP_TIMEOUT))
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_runner).result(timeout=MCP_TIMEOUT + 30)
     except Exception:  # noqa: BLE001 - server down/absent -> section simply empty
         return None
 

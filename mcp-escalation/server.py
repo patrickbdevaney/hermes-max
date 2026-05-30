@@ -9,6 +9,8 @@ agent stays on the free local model — which is the default behavior anyway.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -38,6 +40,21 @@ mcp = FastMCP(
 )
 
 
+def _threaded(fn):
+    """Run a sync @mcp.tool() body on a worker thread so it never blocks the event
+    loop. FastMCP (1.27) calls sync tool handlers directly in the single event-loop
+    thread, so any long tool (running tests, indexing a repo, an LLM/cloud call,
+    fetching+distilling a page) stalls EVERY other request — including GET /health,
+    which is what made a live server show DOWN while it was actively serving the
+    agent. asyncio.to_thread offloads the body so /health and concurrent calls stay
+    responsive; functools.wraps preserves the typed signature for the schema, and
+    the body runs in a thread with no running loop (so MCP-to-MCP asyncio.run works).
+    """
+    @functools.wraps(fn)
+    async def _aw(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return _aw
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "mcp-escalation", "port": PORT,
@@ -45,6 +62,7 @@ async def health(_: Request) -> JSONResponse:
 
 
 @mcp.tool()
+@_threaded
 def escalate(task: str, tier: str = "cheap", context: dict | None = None) -> dict:
     """Route a hard, self-contained subproblem to an escalation tier.
 
@@ -59,6 +77,7 @@ def escalate(task: str, tier: str = "cheap", context: dict | None = None) -> dic
 
 
 @mcp.tool()
+@_threaded
 def classify_difficulty(signals: dict | None = None) -> dict:
     """Tag a task/subtask easy/medium/hard from cheap signals (file_count,
     novelty, prior_failures, lines_changed, cross_module). This is the SHARED
@@ -68,6 +87,7 @@ def classify_difficulty(signals: dict | None = None) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def record_outcome(task: str, signals: dict | None = None, difficulty: str | None = None,
                    outcome: str = "unknown", escalated: bool = False,
                    tier: str | None = None) -> dict:
@@ -80,6 +100,7 @@ def record_outcome(task: str, signals: dict | None = None, difficulty: str | Non
 
 
 @mcp.tool()
+@_threaded
 def should_escalate(signals: dict | None = None) -> dict:
     """Auto-trigger check: escalate when verifier-guided search exhausted N
     without green, OR backtracking exhausted approaches, OR confidence is low on
@@ -88,6 +109,7 @@ def should_escalate(signals: dict | None = None) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def route(task: str, difficulty: str | None = None, signals: dict | None = None,
           context: dict | None = None) -> dict:
     """Tiered routing for a hard kernel: easy/medium stay on the primary local
@@ -103,6 +125,7 @@ def route(task: str, difficulty: str | None = None, signals: dict | None = None,
 # and returns a graceful proceed_local signal when a role is OFF or capped. With
 # no cloud keys set these all return proceed_local and the driver stays local.
 @mcp.tool()
+@_threaded
 def conductor_steer(prompt: str, max_tokens: int | None = None) -> dict:
     """Get a CHEAP cloud NUDGE on an ambiguous-but-not-deep blocker. Walks the
     steer chain (default: DeepSeek-V4-Flash@DeepInfra -> Cerebras -> Groq ->
@@ -113,6 +136,7 @@ def conductor_steer(prompt: str, max_tokens: int | None = None) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def conductor_synthesize(prompt: str, max_tokens: int | None = None) -> dict:
     """Get a DEEP decomposition / novel-architecture directive on a genuinely-hard,
     AMBIGUOUS blocker (no cheap verifiable oracle). Walks the synth chain (default:
@@ -124,6 +148,7 @@ def conductor_synthesize(prompt: str, max_tokens: int | None = None) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def parallel_draft_pool(prompt: str, n: int | None = None,
                         max_tokens: int | None = None) -> dict:
     """Fan a draft brief out across the FREE/cheap parallel_draft POOL concurrently
@@ -137,6 +162,7 @@ def parallel_draft_pool(prompt: str, n: int | None = None,
 
 
 @mcp.tool()
+@_threaded
 def conductor_status() -> dict:
     """Report which conductor ROLES are active (>=1 present key), the resolved
     present chain per role, the present draft-pool members, the USD caps + today's
@@ -146,6 +172,7 @@ def conductor_status() -> dict:
 
 
 @mcp.tool()
+@_threaded
 def conductor_cost_report() -> dict:
     """Per-day + per-month conductor spend, broken down by provider and by role,
     plus call count — the honest cost ledger feeding the Stage-5 report."""
@@ -154,6 +181,7 @@ def conductor_cost_report() -> dict:
 
 # ── brief-assembler (Stage 2) ─────────────────────────────────────────────────
 @mcp.tool()
+@_threaded
 def brief_assemble(task_id: str, current_blocker: str, decision_needed: str,
                    profile: str = "full", repo: str | None = None,
                    query: str | None = None, directives: str | None = None,
@@ -173,6 +201,7 @@ def brief_assemble(task_id: str, current_blocker: str, decision_needed: str,
 
 
 @mcp.tool()
+@_threaded
 def brief_request_more(task_id: str, section: str, query: str = "", k: int = 8,
                        offset: int = 0, repo: str | None = None) -> dict:
     """Progressive disclosure: pull MORE of a section the brief capped, when the
@@ -184,6 +213,7 @@ def brief_request_more(task_id: str, section: str, query: str = "", k: int = 8,
 
 # ── advisory-with-verify-gate authority (Stage 3) ─────────────────────────────
 @mcp.tool()
+@_threaded
 def directive_verify(directive: dict, repo: str | None = None, task_id: str | None = None,
                      second_directive: dict | None = None, run_static: bool = True) -> dict:
     """GATE a cloud directive BEFORE executing it — the cloud is smart but BLIND.
@@ -199,6 +229,7 @@ def directive_verify(directive: dict, repo: str | None = None, task_id: str | No
 
 
 @mcp.tool()
+@_threaded
 def compare_directives(a: dict, b: dict) -> dict:
     """Cheap agreement check between two synth opinions (file-set overlap +
     first-step similarity). agree=False => escalate to Opus or surface to human."""
@@ -207,6 +238,7 @@ def compare_directives(a: dict, b: dict) -> dict:
 
 # ── invocation policy (Stage 5) ───────────────────────────────────────────────
 @mcp.tool()
+@_threaded
 def conductor_plan(signals: dict | None = None, verifiable: bool = False,
                    blast_radius: str | None = None, synth_failures: int = 0,
                    opinions_disagree: bool = False) -> dict:
@@ -226,6 +258,7 @@ def conductor_plan(signals: dict | None = None, verifiable: bool = False,
 
 
 @mcp.tool()
+@_threaded
 def conductor_record_outcome(subtask: str, tier: str, outcome: str,
                              signals: dict | None = None, difficulty: str | None = None,
                              cost_usd: float = 0.0) -> dict:
@@ -239,6 +272,7 @@ def conductor_record_outcome(subtask: str, tier: str, outcome: str,
 
 
 @mcp.tool()
+@_threaded
 def conductor_frequency_report() -> dict:
     """Honest invocation-frequency + cost report: spend by provider/role (ledger)
     + tier counts (KG), checked against the per-project targets (synth<=15,

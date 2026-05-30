@@ -183,9 +183,38 @@ async def _mcp_call_async(url: str, tool: str, args: dict) -> Any:
             return data
 
 
+def _run_coro(coro: Any) -> Any:
+    """Run a coroutine whether or not an event loop is already running in this
+    thread. FastMCP runs tool handlers inside a live loop, so a bare asyncio.run()
+    here raises "cannot be called from a running event loop"; the swallowed error
+    made ingest_doc's rag/kg store silently no-op in the live server while passing
+    main-thread smoke tests. When a loop is running, complete the coroutine on a
+    dedicated worker thread with its own loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    import threading
+    box: dict[str, Any] = {}
+    def _worker() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            box["v"] = loop.run_until_complete(coro)
+        except BaseException as e:  # noqa: BLE001
+            box["e"] = e
+        finally:
+            loop.close()
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join()
+    if "e" in box:
+        raise box["e"]
+    return box.get("v")
+
+
 def _mcp_call(url: str, tool: str, args: dict) -> dict[str, Any]:
     try:
-        return {"ok": True, "result": asyncio.run(_mcp_call_async(url, tool, args))}
+        return {"ok": True, "result": _run_coro(_mcp_call_async(url, tool, args))}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 

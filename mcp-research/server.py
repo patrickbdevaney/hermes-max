@@ -18,7 +18,10 @@ unset -> authority-only; $VLLM_BASE_URL unset -> deterministic plan/queries/synt
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import os
+from typing import Any, Callable
 
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
@@ -56,6 +59,24 @@ mcp = FastMCP(
 )
 
 
+def _threaded(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a sync tool body on a worker thread so it NEVER blocks the event loop.
+
+    FastMCP (1.27) calls sync @mcp.tool() handlers directly in the single event-
+    loop thread, so a long tool (deep_research runs for minutes) stalls EVERY
+    other request — including GET /health. That is the real reason mcp-research
+    showed DOWN while it was alive and actively serving the agent: status.sh's
+    `curl /health` timed out against a loop busy inside deep_research. Offloading
+    the body with asyncio.to_thread keeps the loop free to answer liveness and
+    concurrent tool calls. functools.wraps preserves the typed signature so
+    FastMCP still derives the correct input schema; the body now runs in a thread
+    with no running loop, so research_core's MCP-to-MCP calls work too."""
+    @functools.wraps(fn)
+    async def _aw(*args: Any, **kwargs: Any) -> Any:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return _aw
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> JSONResponse:
     """LIVENESS — is this process up and answering HTTP? Returns 200 immediately
@@ -85,6 +106,7 @@ async def ready(_: Request) -> JSONResponse:
 
 
 @mcp.tool()
+@_threaded
 def plan_research(question: str) -> dict:
     """Decompose a research question into 2-5 complementary sub-goals + an ordered
     roadmap, written to external PLAN.md state so the plan itself is checkable
@@ -94,6 +116,7 @@ def plan_research(question: str) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def develop_queries(subgoal: str, n: int = 4) -> dict:
     """Generate diverse, COMPLEMENTARY search queries for a sub-goal (varied
     abstraction/angle), deduped by n-gram similarity — the direct counter to
@@ -102,6 +125,7 @@ def develop_queries(subgoal: str, n: int = 4) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def explore(queries: list, seen_urls: list | None = None,
             max_sources_per_query: int = 3, max_total: int = 8,
             category: str | None = None) -> dict:
@@ -114,6 +138,7 @@ def explore(queries: list, seen_urls: list | None = None,
 
 
 @mcp.tool()
+@_threaded
 def verify_claims(claims: list, min_sources: int = 2) -> dict:
     """Cross-check each material claim against >= min_sources INDEPENDENT sources
     (distinct domains). Flags single-sourced/conflicting instead of asserting them —
@@ -123,6 +148,7 @@ def verify_claims(claims: list, min_sources: int = 2) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def synthesize(question: str, verified_findings: list, plan: dict | None = None) -> dict:
     """Compile a structured, CITATION-BACKED report from verified findings, labeling
     well-supported vs single-sourced vs conflicting, preserving quotes/code verbatim,
@@ -132,6 +158,7 @@ def synthesize(question: str, verified_findings: list, plan: dict | None = None)
 
 
 @mcp.tool()
+@_threaded
 def deep_research(question: str, max_loops: int = 3, max_total_sources: int = 8,
                   category: str | None = None, compound: bool = True) -> dict:
     """End-to-end deep research: plan -> (develop -> explore -> verify) x bounded
@@ -143,6 +170,7 @@ def deep_research(question: str, max_loops: int = 3, max_total_sources: int = 8,
 
 # ── Stage 1: structured source fan-out (alongside the SearXNG web layer) ──────
 @mcp.tool()
+@_threaded
 def multi_source_search(query: str) -> dict:
     """Structured source fan-out: classify the query -> route to the right free
     APIs (arXiv / Semantic Scholar / GitHub / HN / Stack Exchange) with bounded
@@ -153,6 +181,7 @@ def multi_source_search(query: str) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def classify_query(query: str) -> dict:
     """Lightweight keyword router: maps a query to a source set + per-source budget
     (crypto/protocol, applied-ML, library-how-to, or general). Always includes
@@ -161,6 +190,7 @@ def classify_query(query: str) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def arxiv_search(query: str, days_back: int | None = None,
                  categories: list | None = None, limit: int = 8) -> dict:
     """arXiv Atom API (keyless). days_back is OPTIONAL — omit it to reach seminal
@@ -170,6 +200,7 @@ def arxiv_search(query: str, days_back: int | None = None,
 
 
 @mcp.tool()
+@_threaded
 def semantic_scholar_search(query: str, limit: int = 10) -> dict:
     """Semantic Scholar relevance search (keyless 5k/5min pool). Returns papers
     with abstracts, authors, year, and citation counts. Attribution required when
@@ -178,6 +209,7 @@ def semantic_scholar_search(query: str, limit: int = 10) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def semantic_scholar_citations(paper_id: str, direction: str = "references",
                                limit: int = 25) -> dict:
     """Citation-graph traversal. direction='references' -> backward (what this
@@ -188,6 +220,7 @@ def semantic_scholar_citations(paper_id: str, direction: str = "references",
 
 
 @mcp.tool()
+@_threaded
 def github_search(query: str, search_type: str = "repositories", limit: int = 10) -> dict:
     """GitHub REST search over repositories / code / issues. Presence-gated on
     GITHUB_TOKEN — absent => no-op {"skipped": true} (web layer still answers).
@@ -196,6 +229,7 @@ def github_search(query: str, search_type: str = "repositories", limit: int = 10
 
 
 @mcp.tool()
+@_threaded
 def hn_search(query: str, limit: int = 10, tags: str = "story") -> dict:
     """Hacker News search via Algolia (keyless). Practitioner signal — what people
     actually adopt/discuss. Degrades to an error string if Algolia is unreachable."""
@@ -203,6 +237,7 @@ def hn_search(query: str, limit: int = 10, tags: str = "story") -> dict:
 
 
 @mcp.tool()
+@_threaded
 def stackexchange_search(query: str, site: str = "stackoverflow", limit: int = 10) -> dict:
     """Stack Exchange Q&A search (keyless 300/day; STACKEXCHANGE_KEY -> 10k/day).
     Vote/tag-ranked answers; routed for library/how-to queries. Degrades cleanly."""
@@ -211,6 +246,7 @@ def stackexchange_search(query: str, site: str = "stackoverflow", limit: int = 1
 
 # ── Stage 2: crypto / standards adapters (keyless; the domain edge) ───────────
 @mcp.tool()
+@_threaded
 def ethresearch_search(query: str, limit: int = 8) -> dict:
     """Search ethresear.ch (Ethereum research forum, Discourse) — NO auth, public
     read via .json. Returns frontier-research topics with blurbs + canonical URLs.
@@ -219,12 +255,14 @@ def ethresearch_search(query: str, limit: int = 8) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def ethresearch_topic(topic_id: int, slug: str = "") -> dict:
     """Fetch one ethresear.ch topic's FULL concatenated post text (no auth)."""
     return sources.ethresearch_topic(topic_id, slug)
 
 
 @mcp.tool()
+@_threaded
 def eip_erc(query: str, limit: int = 6) -> dict:
     """Read ethereum/EIPs + ethereum/ERCs FULL spec text. Naming a number
     (EIP-4844, ERC-20) fetches the raw markdown KEYLESS with front-matter parsed
@@ -233,6 +271,7 @@ def eip_erc(query: str, limit: int = 6) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def ietf_rfc(query: str, limit: int = 5) -> dict:
     """IETF RFC full text (keyless, RFC-Editor). Naming an RFC number fetches its
     full text. Routed only when a query mentions rfc/ietf (optional per spec)."""
@@ -241,6 +280,7 @@ def ietf_rfc(query: str, limit: int = 5) -> dict:
 
 # ── Stage 3: on-disk corpus + provenance + lazy distillation ──────────────────
 @mcp.tool()
+@_threaded
 def ingest_research(namespace: str, source_type: str, content: str,
                     meta: dict | None = None, index: bool = True) -> dict:
     """Write FULL untruncated content to the on-disk markdown corpus
@@ -253,6 +293,7 @@ def ingest_research(namespace: str, source_type: str, content: str,
 
 
 @mcp.tool()
+@_threaded
 def distill_for_query(query: str, chunks: list, source_type: str = "web",
                       max_tokens: int = 1500) -> dict:
     """Lazily distill ONLY the retrieved chunks, at QUERY time. Dense technical
@@ -263,6 +304,7 @@ def distill_for_query(query: str, chunks: list, source_type: str = "web",
 
 
 @mcp.tool()
+@_threaded
 def resolve_source(source: str) -> dict:
     """Resolve a RAG chunk's `source` (a corpus relpath) back to its backing on-disk
     document: full content + parsed front-matter provenance. The seam the Stage-5
@@ -272,6 +314,7 @@ def resolve_source(source: str) -> dict:
 
 # ── Stage 4: extraction ladder + dedup/authority/citation-graph ───────────────
 @mcp.tool()
+@_threaded
 def extract_url(url: str, prefer: list | None = None) -> dict:
     """Extraction ladder: Trafilatura (fast, static) -> Crawl4AI (JS, via mcp-docs)
     -> Jina Reader (blocked/complex/PDF). Picks the order by page type and falls
@@ -280,6 +323,7 @@ def extract_url(url: str, prefer: list | None = None) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def semantic_dedup(items: list, threshold: float = 0.92) -> dict:
     """Collapse NEAR-duplicate sources by embedding cosine (not just URL/n-gram),
     keeping the most AUTHORITATIVE instance of each cluster — so paraphrased SEO
@@ -288,6 +332,7 @@ def semantic_dedup(items: list, threshold: float = 0.92) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def authority_rank(items: list) -> dict:
     """Rank sources by composite authority = domain authority + log(citation_count)
     + recency. Surfaces an arXiv primary over a blog summary; anchors to seminal
@@ -296,6 +341,7 @@ def authority_rank(items: list) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def citation_edges(paper: dict, refs: list | None = None, cites: list | None = None) -> dict:
     """Turn a paper + its Semantic Scholar references (backward) / citations
     (forward) into normalized {src, rel:'cites', dst} edges with provenance, ready
@@ -305,6 +351,7 @@ def citation_edges(paper: dict, refs: list | None = None, cites: list | None = N
 
 # ── Stage 5: KG provenance + decomposed verification gate ─────────────────────
 @mcp.tool()
+@_threaded
 def kg_add_episode(namespace: str, summary: str, source_id: str,
                    entities: list | None = None, edges: list | None = None) -> dict:
     """Land a finished research finding into the KG: an episode entity + its
@@ -314,6 +361,7 @@ def kg_add_episode(namespace: str, summary: str, source_id: str,
 
 
 @mcp.tool()
+@_threaded
 def kg_add_fact_edge(a: str, rel: str, b: str, source_id: str,
                      valid_from: str | None = None, valid_until: str | None = None) -> dict:
     """Record a fact edge (a)-[rel]->(b) with its source_id + temporal validity. rel
@@ -323,6 +371,7 @@ def kg_add_fact_edge(a: str, rel: str, b: str, source_id: str,
 
 
 @mcp.tool()
+@_threaded
 def kg_ingest_citation_edges(edges: list, source_id: str) -> dict:
     """Bulk-record citation_edges() output as `cites` fact edges carrying source_id
     (the Stage-4 citation graph -> KG)."""
@@ -330,6 +379,7 @@ def kg_ingest_citation_edges(edges: list, source_id: str) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def kg_mark_superseded(old: str, new: str, source_id: str, as_of: str | None = None) -> dict:
     """Mark `old` superseded by `new` (fast-moving fields): records new-[supersedes]
     ->old and stamps old.valid_until so the graph says which is current — instead of
@@ -338,6 +388,7 @@ def kg_mark_superseded(old: str, new: str, source_id: str, as_of: str | None = N
 
 
 @mcp.tool()
+@_threaded
 def verify_findings(findings: list, min_sources: int = 2) -> dict:
     """Decomposed verification gate (grounding, not generation): each claim's
     sources are RESOLVED to stored chunks and the claim is ENTAILMENT-checked against
@@ -348,6 +399,7 @@ def verify_findings(findings: list, min_sources: int = 2) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def verify_claim(claim: str, sources: list, min_sources: int = 2) -> dict:
     """Verify ONE claim by decomposed retrieval — resolve each source to its stored
     chunk, entail, count independent support. Returns status + resolvable source IDs
@@ -356,6 +408,7 @@ def verify_claim(claim: str, sources: list, min_sources: int = 2) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def decompose_question(question: str, hyde: bool = False) -> dict:
     """Echo-chamber fix: break a question into complementary sub-questions, each with
     diverse search paraphrases + per-source query syntax (arXiv fields != GitHub
@@ -366,6 +419,7 @@ def decompose_question(question: str, hyde: bool = False) -> dict:
 
 # ── Stage 6: Banyan content-evolution (CONTENT only — never machinery) ────────
 @mcp.tool()
+@_threaded
 def banyan_select(c: float = 1.414) -> dict:
     """Pick the next RESEARCH direction for an unattended cycle (UCB1 is scoped to
     RESEARCH/search ONLY — do NOT use it to pick a code/build subtask; use
@@ -376,6 +430,7 @@ def banyan_select(c: float = 1.414) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def build_select_subtask(subtasks: list[dict], in_progress: str | None = None) -> dict:
     """Pick the next BUILD/coding subtask WITHOUT UCB1 — the build loop needs
     sustained focus, so this is finish-what-you-started then dependency-order
@@ -386,6 +441,7 @@ def build_select_subtask(subtasks: list[dict], in_progress: str | None = None) -
 
 
 @mcp.tool()
+@_threaded
 def banyan_update(namespace: str, utility_sample: float, gain: float) -> dict:
     """After a research/skill task: visit_count++, running utility (0.8 history /
     0.2 new), append marginal gain (last 20). Drives the explore-exploit balance."""
@@ -393,6 +449,7 @@ def banyan_update(namespace: str, utility_sample: float, gain: float) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def banyan_detect_saturation(namespace: str, new_texts: list | None = None) -> dict:
     """Two-signal saturation: embedding-drift (new research too similar to the
     corpus centroid => retreading) + marginal-gain decline. On saturation: flag,
@@ -401,6 +458,7 @@ def banyan_detect_saturation(namespace: str, new_texts: list | None = None) -> d
 
 
 @mcp.tool()
+@_threaded
 def banyan_generate_standing_tasks(namespace: str) -> dict:
     """When a namespace queue empties, generate standing RESEARCH tasks (content)
     so unattended cycles never idle (e.g. 'what's new in {ns} since {last_ingest}')."""
@@ -408,6 +466,7 @@ def banyan_generate_standing_tasks(namespace: str) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def banyan_set_directive(text: str, namespace: str | None = None) -> dict:
     """Operator drops a directive that preempts UCB1 on the next cycle (supervised
     steer). Absent a directive, the loop self-directs via Banyan (unattended explore)."""
@@ -415,6 +474,7 @@ def banyan_set_directive(text: str, namespace: str | None = None) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def banyan_next_action() -> dict:
     """Top of an unattended cycle: directive interrupt OR Banyan self-direction,
     with the chosen namespace's next standing task. Selection only — never runs
@@ -423,6 +483,7 @@ def banyan_next_action() -> dict:
 
 
 @mcp.tool()
+@_threaded
 def banyan_write_skill(name: str, content: str, tasks_done: int = 0,
                        days_active: int = 0, skills_count: int = 0) -> dict:
     """Write/refine a markdown SKILL into the skill library (CONTENT). Gated by the

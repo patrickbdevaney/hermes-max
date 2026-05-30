@@ -13,6 +13,8 @@ it never takes Hermes down.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -45,6 +47,21 @@ mcp = FastMCP(
 )
 
 
+def _threaded(fn):
+    """Run a sync @mcp.tool() body on a worker thread so it never blocks the event
+    loop. FastMCP (1.27) calls sync tool handlers directly in the single event-loop
+    thread, so any long tool (running tests, indexing a repo, an LLM/cloud call,
+    fetching+distilling a page) stalls EVERY other request — including GET /health,
+    which is what made a live server show DOWN while it was actively serving the
+    agent. asyncio.to_thread offloads the body so /health and concurrent calls stay
+    responsive; functools.wraps preserves the typed signature for the schema, and
+    the body runs in a thread with no running loop (so MCP-to-MCP asyncio.run works).
+    """
+    @functools.wraps(fn)
+    async def _aw(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return _aw
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "mcp-watchdog", "port": PORT,
@@ -52,6 +69,7 @@ async def health(_: Request) -> JSONResponse:
 
 
 @mcp.tool()
+@_threaded
 def check_spiral(recent_thinking_text: str, ngram: int | None = None) -> dict:
     """Detect a reasoning/CoT spiral in supplied recent reasoning text.
 
@@ -64,6 +82,7 @@ def check_spiral(recent_thinking_text: str, ngram: int | None = None) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def check_stall(tool_name: str, elapsed_s: float, expecting_heartbeat: bool = False,
                 last_heartbeat_age_s: float | None = None,
                 per_tool_budget_s: float | None = None,
@@ -83,6 +102,7 @@ def check_stall(tool_name: str, elapsed_s: float, expecting_heartbeat: bool = Fa
 
 
 @mcp.tool()
+@_threaded
 def tool_budget(tool_name: str) -> dict:
     """Return the per-tool adaptive budget for a tool: expected-duration class, soft
     budget, HARD ceiling (env-overridable via BUDGET_<TOOL>_S), heartbeat timeout,
@@ -91,6 +111,7 @@ def tool_budget(tool_name: str) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def estimate_duration(tool_name: str, inputs: dict | None = None) -> dict:
     """Look-ahead: BEFORE running a variable-duration tool, estimate how long it
     SHOULD take so neither legitimately-long work is killed nor a doomed run is
@@ -102,6 +123,7 @@ def estimate_duration(tool_name: str, inputs: dict | None = None) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def record_heartbeat(task_id: str, tool_name: str, progress: str | None = None,
                      done: int | None = None, total: int | None = None) -> dict:
     """Stamp a liveness heartbeat for an in-flight long-running tool (per file-batch
@@ -112,6 +134,7 @@ def record_heartbeat(task_id: str, tool_name: str, progress: str | None = None,
 
 
 @mcp.tool()
+@_threaded
 def check_progress(task_id: str, signals: dict | None = None, n: int = 3) -> dict:
     """Progress-delta since the last call for this task. signals carries
     monotonic observables {files_touched, tests_passing, checkpoints, turn}.
@@ -120,6 +143,7 @@ def check_progress(task_id: str, signals: dict | None = None, n: int = 3) -> dic
 
 
 @mcp.tool()
+@_threaded
 def start_task_budget(task_id: str, wall_clock_s: float | None = None,
                       max_turns: int | None = None, usd_cap: float | None = None) -> dict:
     """Begin per-task budget tracking (wall-clock seconds / turns / USD). Any
@@ -128,6 +152,7 @@ def start_task_budget(task_id: str, wall_clock_s: float | None = None,
 
 
 @mcp.tool()
+@_threaded
 def check_budget(task_id: str, turns_used: int | None = None, usd_spent: float | None = None,
                  elapsed_s_override: float | None = None) -> dict:
     """Report whether any per-task budget limit is exceeded and which. On

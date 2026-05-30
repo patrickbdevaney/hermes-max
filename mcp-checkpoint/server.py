@@ -14,6 +14,8 @@ still do all its work, just without checkpoint/revert. It never takes Hermes dow
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -41,12 +43,28 @@ mcp = FastMCP(
 )
 
 
+def _threaded(fn):
+    """Run a sync @mcp.tool() body on a worker thread so it never blocks the event
+    loop. FastMCP (1.27) calls sync tool handlers directly in the single event-loop
+    thread, so any long tool (running tests, indexing a repo, an LLM/cloud call,
+    fetching+distilling a page) stalls EVERY other request — including GET /health,
+    which is what made a live server show DOWN while it was actively serving the
+    agent. asyncio.to_thread offloads the body so /health and concurrent calls stay
+    responsive; functools.wraps preserves the typed signature for the schema, and
+    the body runs in a thread with no running loop (so MCP-to-MCP asyncio.run works).
+    """
+    @functools.wraps(fn)
+    async def _aw(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return _aw
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "mcp-checkpoint", "port": PORT})
 
 
 @mcp.tool()
+@_threaded
 def checkpoint(label: str, verify: bool = True, repo_path: str | None = None, init: bool = False) -> dict:
     """Create a verified-green checkpoint commit of the project working tree.
 
@@ -66,6 +84,7 @@ def checkpoint(label: str, verify: bool = True, repo_path: str | None = None, in
 
 
 @mcp.tool()
+@_threaded
 def revert_to_last_green(repo_path: str | None = None) -> dict:
     """Recover from a stuck/drifted state: stash any dirty tree (nothing is
     lost), then `git reset --hard` to the last [hermes-max checkpoint] commit.
@@ -77,12 +96,14 @@ def revert_to_last_green(repo_path: str | None = None) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def list_checkpoints(n: int = 10, repo_path: str | None = None) -> dict:
     """List the n most recent verified-green checkpoints (SHA, label, time)."""
     return checkpoint_core.list_checkpoints(n, repo_path)
 
 
 @mcp.tool()
+@_threaded
 def checkpoint_status(repo_path: str | None = None) -> dict:
     """Report current branch, clean/dirty, the last green checkpoint SHA, and
     how many commits the tree is ahead of it."""
@@ -90,6 +111,7 @@ def checkpoint_status(repo_path: str | None = None) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def snapshot_state(task_id: str, plan: str = "", notes: str = "",
                    repo_path: str | None = None) -> dict:
     """Snapshot the agent's REASONING context (PLAN.md text + decision notes)
@@ -100,6 +122,7 @@ def snapshot_state(task_id: str, plan: str = "", notes: str = "",
 
 
 @mcp.tool()
+@_threaded
 def restore_state(task_id: str, repo_path: str | None = None, write_plan: bool = True) -> dict:
     """Restore the snapshotted reasoning context (plan + notes) for a task after
     a revert/reset, so the agent re-grounds on the real PLAN instead of a lossy

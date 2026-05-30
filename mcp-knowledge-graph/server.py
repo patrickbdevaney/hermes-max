@@ -10,6 +10,8 @@ can't recall/record structured knowledge that session).
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -35,6 +37,21 @@ mcp = FastMCP(
 )
 
 
+def _threaded(fn):
+    """Run a sync @mcp.tool() body on a worker thread so it never blocks the event
+    loop. FastMCP (1.27) calls sync tool handlers directly in the single event-loop
+    thread, so any long tool (running tests, indexing a repo, an LLM/cloud call,
+    fetching+distilling a page) stalls EVERY other request — including GET /health,
+    which is what made a live server show DOWN while it was actively serving the
+    agent. asyncio.to_thread offloads the body so /health and concurrent calls stay
+    responsive; functools.wraps preserves the typed signature for the schema, and
+    the body runs in a thread with no running loop (so MCP-to-MCP asyncio.run works).
+    """
+    @functools.wraps(fn)
+    async def _aw(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return _aw
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "mcp-knowledge-graph", "port": PORT,
@@ -42,6 +59,7 @@ async def health(_: Request) -> JSONResponse:
 
 
 @mcp.tool()
+@_threaded
 def record_entity(type: str, name: str, props: dict | None = None) -> dict:
     """Upsert an entity (e.g. type='decision'|'bug'|'file'|'service', name=...).
     Props merge into any existing props."""
@@ -49,6 +67,7 @@ def record_entity(type: str, name: str, props: dict | None = None) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def record_relation(a: str, rel: str, b: str, props: dict | None = None) -> dict:
     """Record a directed relation (a)-[rel]->(b), e.g. ('bug-42','fixed_in','commit-abc').
     Missing endpoints are auto-created as stub entities."""
@@ -56,6 +75,7 @@ def record_relation(a: str, rel: str, b: str, props: dict | None = None) -> dict
 
 
 @mcp.tool()
+@_threaded
 def query_graph(
     subject: str | None = None,
     rel: str | None = None,
@@ -70,6 +90,7 @@ def query_graph(
 
 
 @mcp.tool()
+@_threaded
 def recall_about(name: str) -> dict:
     """Return everything about an entity: its record plus incoming and outgoing
     relations (each annotated with the neighbor's type)."""
@@ -77,6 +98,7 @@ def recall_about(name: str) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def core_memory_get() -> dict:
     """Read the agent-curated CORE MEMORY — the always-in-context, size-bounded
     block of highest-signal facts (conventions, gotchas, the architecture
@@ -86,6 +108,7 @@ def core_memory_get() -> dict:
 
 
 @mcp.tool()
+@_threaded
 def core_memory_append(fact: str) -> dict:
     """Append ONE high-signal fact to core memory. Rejected if it would overflow
     the char limit (prune with core_memory_replace first) — protect the window."""
@@ -93,6 +116,7 @@ def core_memory_append(fact: str) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def core_memory_replace(old: str | None = None, new: str | None = None,
                         block: str | None = None) -> dict:
     """Deliberately edit core memory: substring-replace (old→new) for a targeted

@@ -27,6 +27,8 @@ conductor.yaml
 # corpus and research artifacts
 corpus/
 dry_run_trace.md
+deep_research_trace.md
+eval_battery_report.md
 emergent_eval_report.md
 replacements.txt
 

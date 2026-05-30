@@ -16,6 +16,8 @@ degrades gracefully.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -42,6 +44,21 @@ mcp = FastMCP(
 )
 
 
+def _threaded(fn):
+    """Run a sync @mcp.tool() body on a worker thread so it never blocks the event
+    loop. FastMCP (1.27) calls sync tool handlers directly in the single event-loop
+    thread, so any long tool (running tests, indexing a repo, an LLM/cloud call,
+    fetching+distilling a page) stalls EVERY other request — including GET /health,
+    which is what made a live server show DOWN while it was actively serving the
+    agent. asyncio.to_thread offloads the body so /health and concurrent calls stay
+    responsive; functools.wraps preserves the typed signature for the schema, and
+    the body runs in a thread with no running loop (so MCP-to-MCP asyncio.run works).
+    """
+    @functools.wraps(fn)
+    async def _aw(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return _aw
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "mcp-codebase-rag", "port": PORT,
@@ -49,6 +66,7 @@ async def health(_: Request) -> JSONResponse:
 
 
 @mcp.tool()
+@_threaded
 def index_repo(path: str, batch_size: int | None = None, full: bool = False) -> dict:
     """Index (or re-index) a repository directory into the hybrid store — robust init.
 
@@ -66,6 +84,7 @@ def index_repo(path: str, batch_size: int | None = None, full: bool = False) -> 
 
 
 @mcp.tool()
+@_threaded
 def scan_repo(path: str) -> dict:
     """Pre-flight scan ONLY (no indexing): report what index_repo WOULD do — file
     count by language, total bytes, oversize skips, and a look-ahead duration
@@ -77,6 +96,7 @@ def scan_repo(path: str) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def search_code(query: str, k: int = 8) -> dict:
     """Hybrid search (BM25 + dense + graph via RRF, then optional cross-encoder
     rerank) over indexed code.
@@ -90,6 +110,7 @@ def search_code(query: str, k: int = 8) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def index_document(text: str, namespace: str, source: str = "", title: str = "") -> dict:
     """Ingest a distilled document (markdown) into the hybrid store under a
     `namespace` (e.g. 'docs/fastapi'), co-retrievable with code via search_code.
@@ -99,18 +120,21 @@ def index_document(text: str, namespace: str, source: str = "", title: str = "")
 
 
 @mcp.tool()
+@_threaded
 def get_symbol_context(symbol: str, k: int = 5) -> dict:
     """Return the full chunk(s) defining a named symbol (function/class/etc.)."""
     return rag_core.get_symbol_context(symbol, k)
 
 
 @mcp.tool()
+@_threaded
 def find_similar(snippet: str, k: int = 8) -> dict:
     """Find code most similar to a snippet (dense if available, else lexical)."""
     return rag_core.find_similar(snippet, k)
 
 
 @mcp.tool()
+@_threaded
 def retrieve_related(symbol: str, hops: int = 1, k: int = 20) -> dict:
     """Graph/AST-aware retrieval: the multi-hop neighbors of a symbol — what it
     calls (callees), what calls it (callers), and imports. Most real fixes need
@@ -121,6 +145,7 @@ def retrieve_related(symbol: str, hops: int = 1, k: int = 20) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def repo_map(token_budget: int = 2000, repo: str | None = None) -> dict:
     """A PageRank-ranked, token-budgeted map of the repo's symbols (Aider-style
     repo map) — the highest-leverage symbols first. Use it to orient on an

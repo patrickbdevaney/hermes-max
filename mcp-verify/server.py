@@ -10,6 +10,8 @@ degrades gracefully — it never takes the harness down.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -34,12 +36,28 @@ mcp = FastMCP(
 )
 
 
+def _threaded(fn):
+    """Run a sync @mcp.tool() body on a worker thread so it never blocks the event
+    loop. FastMCP (1.27) calls sync tool handlers directly in the single event-loop
+    thread, so any long tool (running tests, indexing a repo, an LLM/cloud call,
+    fetching+distilling a page) stalls EVERY other request — including GET /health,
+    which is what made a live server show DOWN while it was actively serving the
+    agent. asyncio.to_thread offloads the body so /health and concurrent calls stay
+    responsive; functools.wraps preserves the typed signature for the schema, and
+    the body runs in a thread with no running loop (so MCP-to-MCP asyncio.run works).
+    """
+    @functools.wraps(fn)
+    async def _aw(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return _aw
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "mcp-verify", "port": PORT})
 
 
 @mcp.tool()
+@_threaded
 def verify(path: str, language: str = "auto") -> dict:
     """Run lint -> typecheck -> unit tests on a file or directory.
 
@@ -56,6 +74,7 @@ def verify(path: str, language: str = "auto") -> dict:
 
 
 @mcp.tool()
+@_threaded
 def quick_check(path: str, language: str = "auto") -> dict:
     """Fast incremental check — lint + typecheck only, NO tests.
 
@@ -67,6 +86,7 @@ def quick_check(path: str, language: str = "auto") -> dict:
 
 
 @mcp.tool()
+@_threaded
 def deep_verify(path: str, language: str = "auto", difficulty: str = "medium",
                 layers: list | None = None) -> dict:
     """Full gate PLUS difficulty-gated deeper layers — closes silent-wrong-answer.

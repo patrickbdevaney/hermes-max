@@ -12,6 +12,8 @@ and degrades gracefully when absent — nothing hard-fails.
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -39,6 +41,21 @@ mcp = FastMCP(
 )
 
 
+def _threaded(fn):
+    """Run a sync @mcp.tool() body on a worker thread so it never blocks the event
+    loop. FastMCP (1.27) calls sync tool handlers directly in the single event-loop
+    thread, so any long tool (running tests, indexing a repo, an LLM/cloud call,
+    fetching+distilling a page) stalls EVERY other request — including GET /health,
+    which is what made a live server show DOWN while it was actively serving the
+    agent. asyncio.to_thread offloads the body so /health and concurrent calls stay
+    responsive; functools.wraps preserves the typed signature for the schema, and
+    the body runs in a thread with no running loop (so MCP-to-MCP asyncio.run works).
+    """
+    @functools.wraps(fn)
+    async def _aw(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return _aw
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> JSONResponse:
     """LIVENESS — process up + HTTP answering, returned immediately with NO
@@ -60,6 +77,7 @@ async def ready(_: Request) -> JSONResponse:
 
 
 @mcp.tool()
+@_threaded
 def search_docs(query: str, category: str | None = None, limit: int = 8) -> dict:
     """Search the self-hosted SearXNG for candidate documentation URLs. Optional
     category (e.g. 'science', 'it', 'files') maps to SearXNG categories. Returns
@@ -68,6 +86,7 @@ def search_docs(query: str, category: str | None = None, limit: int = 8) -> dict
 
 
 @mcp.tool()
+@_threaded
 def fetch_clean(url: str) -> dict:
     """Fetch a URL and return clean, RAG-optimised markdown. Extraction ladder is
     fastest-first: trafilatura (local, in-process) then Crawl4AI (the JS-rendering
@@ -76,6 +95,7 @@ def fetch_clean(url: str) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def ingest_doc(url_or_markdown: str, topic: str) -> dict:
     """Fetch (if a URL) → distil with the local chat model → store the high-signal
     note in mcp-codebase-rag under docs/<topic> (co-retrievable with code) AND
@@ -84,6 +104,7 @@ def ingest_doc(url_or_markdown: str, topic: str) -> dict:
 
 
 @mcp.tool()
+@_threaded
 def research_topic(topic: str, n: int = 3, category: str | None = None) -> dict:
     """Learn a novel framework on demand: search official docs → ingest the top N
     → return a distilled brief. After this, search_code('<topic> ...') returns the

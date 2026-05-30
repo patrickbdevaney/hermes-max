@@ -14,6 +14,8 @@ agent writes the single best patch itself — it never crashes Hermes.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -42,6 +44,21 @@ mcp = FastMCP(
 )
 
 
+def _threaded(fn):
+    """Run a sync @mcp.tool() body on a worker thread so it never blocks the event
+    loop. FastMCP (1.27) calls sync tool handlers directly in the single event-loop
+    thread, so any long tool (running tests, indexing a repo, an LLM/cloud call,
+    fetching+distilling a page) stalls EVERY other request — including GET /health,
+    which is what made a live server show DOWN while it was actively serving the
+    agent. asyncio.to_thread offloads the body so /health and concurrent calls stay
+    responsive; functools.wraps preserves the typed signature for the schema, and
+    the body runs in a thread with no running loop (so MCP-to-MCP asyncio.run works).
+    """
+    @functools.wraps(fn)
+    async def _aw(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return _aw
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "mcp-search", "port": PORT,
@@ -49,6 +66,7 @@ async def health(_: Request) -> JSONResponse:
 
 
 @mcp.tool()
+@_threaded
 def generate_and_select(task_spec: str, n: int = 0, language: str = "python",
                         target_path: str = "solution.py", tests: dict | None = None,
                         base_files: dict | None = None,
@@ -70,6 +88,7 @@ def generate_and_select(task_spec: str, n: int = 0, language: str = "python",
 
 
 @mcp.tool()
+@_threaded
 def parallel_draft(task_spec: str, language: str = "python",
                    target_path: str = "solution.py", tests: dict | None = None,
                    base_files: dict | None = None, n: int = 0,
