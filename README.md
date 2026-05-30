@@ -184,7 +184,86 @@ a hard fail:
 | deep-research (`mcp-research`) | SearXNG/Crawl4AI down ⇒ fewer/no sources; reranker absent ⇒ **authority-only** ranking; chat model unset ⇒ **deterministic** plan/queries/synthesis (cited bullet brief) |
 | dspy / gepa | `run-evolution.sh` is a no-op (exit 0) with install hint |
 | escalation cloud tier | OFF by default; local tier tried first; never required |
+| conductor role (steer/synth/escalate) | a role with **no present key** is OFF ⇒ driver proceeds local-only |
+| conductor rung fails (429/5xx/cap) | **silently falls** to the next present rung (logged one-liner); none ⇒ `proceed_local` |
+| parallel_draft pool | absent free keys aren't drafted; RPM/TPM-exhausted sources skipped; zero keys ⇒ **N=1-local** |
 | Phoenix (OTLP) | spans dropped silently; servers run unaffected |
+
+## The Conductor — optional, presence-gated cloud help (never a backend swap)
+
+The conductor adds OPTIONAL cloud assistance **as stateless tools** on top of the
+finished local harness. The local Qwen driver does **all** high-volume execution
+and orchestration at **$0**; cloud models are invoked rarely, behind tools, for
+cents-or-free, ONLY for work the local model can't do alone, and ONLY for the
+providers the operator actually configured. **With zero cloud keys set, every rung
+is OFF and the system is the bare local harness — nothing breaks.**
+
+**Four layers (the separation that keeps it from being a mess).** (1) **BASE** —
+the harness on local vLLM (`$VLLM_BASE_URL`, **never** touched by cloud roles).
+(2) **ROLES** — `steer` (frequent cheap nudges), `synthesize` (rare deep
+decomposition), `parallel_draft` (verifier-selected best-of-N on VERIFIABLE
+subtasks), `escalate` (the rarest Opus kernel). A role is ACTIVE iff ≥1 provider in
+its chain has a key. (3) **CHAINS/POOLS** — each role has an ordered provider chain
+(unordered pool for parallel_draft); at call time skip absent rungs, use the first
+present one, silently fall-with-log on failure. (4) **TOOL, NOT SWAP** — the Hermes
+loop runs on local Qwen the whole time; cloud models are draft generators / advisors
+behind MCP tools. The backend model is **never** hot-swapped.
+
+**Presence-gating — as many or as few keys as you have.** Keys (`.env`) only ENABLE
+rungs; they never set order. Order lives in the registry defaults or an optional
+`conductor.yaml` (precedence: **hardcoded defaults < conductor.yaml**; env supplies
+keys only). `conductor_status` shows which roles are active and the resolved chains.
+
+**Default chains (US-hosted-first by construction).**
+- **synthesize**: DeepInfra → Fireworks → Together → DeepSeek → Kimi → Opus. US hosts
+  sit ABOVE direct-provider-hosted DeepSeek-direct and SG-hosted Kimi *by design*, so a present
+  DeepInfra key is always preferred. Default model **DeepSeek-V4-Pro**.
+- **steer**: DeepSeek-V4-Flash@DeepInfra → Cerebras → Groq → Gemini-Flash —
+  **cheap-reliable-first**: the paid V4-Flash (hundredths of a cent, 1M ctx, cache,
+  reliable) BEFORE the fragile free tiers (corrected from the operator's own pricing).
+- **parallel_draft pool** (unordered, for diversity): Cerebras GLM-4.7 + gpt-oss-120b,
+  Groq gpt-oss-120b + qwen3-32b + llama-4-scout, + optional DeepInfra V4-Flash anchor.
+
+**The division of labour:** *slop-draft the verifiable, synthesize the ambiguous,
+escalate the frontier-novel.* parallel_draft fires ONLY when there's an objective
+test oracle (the verifier, not a model, selects the winner); ambiguous decisions go
+to synthesize (no oracle ⇒ can't select); Opus fires ONLY when synth fails verify
+twice or two opinions disagree on a high-blast-radius change. Cloud directives are
+**advisory** — `directive_verify` checks every assumption against real repo state,
+confirms the APIs exist, and requires concrete tests before anything executes.
+
+### ⚠ API brittleness — why the design is local-first with silent-fallback cloud
+
+**No free tier is production-durable, and this is the whole point of the design.**
+Free tiers and model availability are volatile and subjective; an endpoint vanishing
+must degrade the system gracefully, never break it. Verified live (2026-05):
+
+- **Groq** hollowed out its frontier catalog post-Nvidia-acquisition; what remains
+  (gpt-oss-120B/20B, qwen3-32B, llama-4-scout) is useful only as draft diversity, and
+  its free-tier **TPM is tiny and per-model** (gpt-oss-120B 8K, qwen3-32B 6K). In our
+  own Stage-0 eval Groq **429'd after one full-brief call and 413'd qwen3-32B**. The
+  conductor pre-flight-checks per-model TPM (header-fed) and **caps Groq draft input to
+  ~3.5K tokens** so it stays usable — proven live: the same brief that 429'd now runs.
+- **Gemini 2.5 Pro** left the free tier 2026-04; **2.5 Flash is ~20 RPD** on this
+  console — a tracked last-resort steer only.
+- **Cerebras** is a real free asset (GLM-4.7 + gpt-oss-120B, ~30K TPM) but **preview**
+  and can change. Stage-0: gpt-oss-120B at **1.4s**, both models **35/35** quality —
+  the preferred free draft source.
+- **DeepSeek-direct** is cheapest at source but direct provider endpoint and (for this
+  operator) **unfunded** — it sits below the US hosts and its 402 just falls through.
+- **DeepInfra** is the paid default: DeepSeek **V4-Flash $0.10/$0.20**, **V4-Pro
+  $1.30/$2.60** per 1M (cached far less), no-train, US. Stage-0: V4-Pro **$0.0035/brief**,
+  V4-Flash **$0.00022/brief**.
+
+The response to all of this is structural: a **local-viable foundation + presence-
+gated optional cloud + silent fallback + this honest README**. Realistic heavy month
+≈ **$3–8** (Opus dominates despite its rarity); parallel_draft can run on **free keys
+alone**, and with **no keys at all** it's the bare local harness.
+
+See `scripts/eval-synthesis.sh` (rank candidates on your own work),
+`scripts/conductor-report.sh` (honest frequency + cost vs targets: synth ≤ ~15/
+project, Opus ≤ ~3), the `workflow-conductor` skill (the invocation ladder), and
+`conductor.yaml.example` (override chains/models).
 
 ## Deploy profiles — one codebase, two targets
 
