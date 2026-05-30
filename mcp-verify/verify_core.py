@@ -327,6 +327,17 @@ DIFFICULTY_LAYERS = {
     "hard": ["property", "mutation", "fuzz"],
 }
 
+# Per-repo MUTATION-TESTING feature flag (Stage 2 sanctioned addition). OFF by
+# default — turn it on ONLY for a repo whose eval shows a WEAK TEST ORACLE (the
+# suite stays green on a deliberately-bad change). Enable globally with
+# VERIFY_MUTATION_ENABLED=1, or per-repo by dropping an empty `.hermes-mutation`
+# marker file at the repo root. When off, the difficulty-derived mutation layer is
+# reported as explicitly-skipped (visible in the trace), never silently dropped.
+# An explicit `layers=["mutation"]` request is an operator override and runs anyway.
+MUTATION_ENABLED = os.environ.get("VERIFY_MUTATION_ENABLED", "").strip().lower() in (
+    "1", "true", "yes", "on")
+MUTATION_MARKER = ".hermes-mutation"
+
 
 def _layer_property(py: str, path: str) -> dict[str, Any]:
     """Property-based testing (hypothesis). If hypothesis is installed, re-run
@@ -341,6 +352,21 @@ def _layer_property(py: str, path: str) -> dict[str, Any]:
         r = _skip("no tests collected for property run")
     r.update(name="property", tool="hypothesis", advisory=False)
     return r
+
+
+def _mutation_enabled(path: str) -> bool:
+    """Per-repo gate for mutation testing: global env flag OR a .hermes-mutation
+    marker at/above the target, stopping at the repo root (.git)."""
+    if MUTATION_ENABLED:
+        return True
+    p = Path(path)
+    root = p if p.is_dir() else p.parent
+    for d in [root, *root.parents]:
+        if (d / MUTATION_MARKER).exists():
+            return True
+        if (d / ".git").exists():
+            break
+    return False
 
 
 def _layer_mutation(py: str, path: str) -> dict[str, Any]:
@@ -402,13 +428,20 @@ def deep_verify(path: str, language: str = "auto", difficulty: str = "medium",
         return base
 
     want = layers if layers is not None else DIFFICULTY_LAYERS.get(difficulty, ["property"])
+    explicit = layers is not None  # explicit layers= is an operator override
     py = _project_python(os.path.abspath(os.path.expanduser(path)))
     abspath = base["path"]
     extra: list[dict[str, Any]] = []
     if "property" in want:
         extra.append(_layer_property(py, abspath))
     if "mutation" in want:
-        extra.append(_layer_mutation(py, abspath))
+        if explicit or _mutation_enabled(abspath):
+            extra.append(_layer_mutation(py, abspath))
+        else:  # feature-flagged OFF for this repo — show it, don't silently drop
+            s = _skip("mutation testing OFF (feature-flagged; enable per-repo via "
+                      "VERIFY_MUTATION_ENABLED=1 or a .hermes-mutation marker)")
+            s.update(name="mutation", tool="mutmut", advisory=True)
+            extra.append(s)
     if "fuzz" in want:
         extra.append(_layer_fuzz(py, abspath))
 
