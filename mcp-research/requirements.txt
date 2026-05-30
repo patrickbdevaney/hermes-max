@@ -1,4 +1,7 @@
 mcp>=1.2.0
 httpx>=0.27
+# trafilatura is rung 1 of the extraction ladder (fast local CPU extraction); with
+# it installed the ladder starts at trafilatura before falling back to Crawl4AI.
+trafilatura>=1.8
 opentelemetry-sdk>=1.20
 opentelemetry-exporter-otlp-proto-grpc>=1.20

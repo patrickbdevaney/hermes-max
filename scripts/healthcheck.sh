@@ -12,12 +12,14 @@ hmx_load_env
 echo "═══ hermes-max healthcheck ═══"
 echo "DEPLOY_PROFILE=${HMX_PROFILE}  (active servers: ${HMX_ACTIVE_SERVERS[*]})"
 DOWN=0
+# Each server gets a startup grace (retry up to HMX_HEALTH_RETRIES, HMX_HEALTH_GAP_S
+# apart) before being declared DOWN — fixes the race where a slow-importing server
+# (mcp-research builds its source registry on startup) shows DOWN if polled too early.
 for name in "${HMX_ACTIVE_SERVERS[@]}"; do
-  url="$(hmx_health_url "$name")"
-  if body="$(curl -fsS -m 5 "${url}" 2>/dev/null)"; then
+  if body="$(hmx_health_get "$name")"; then
     echo "  ✓ ${HMX_DIR[$name]}  ($(hmx_port "$name"))  ${body}"
   else
-    echo "  ✗ ${HMX_DIR[$name]}  ($(hmx_port "$name"))  DOWN"
+    echo "  ✗ ${HMX_DIR[$name]}  ($(hmx_port "$name"))  DOWN (after ${HMX_HEALTH_RETRIES:-3} attempts)"
     DOWN=1
   fi
 done

@@ -53,9 +53,9 @@ def search_docs(query: str, category: str | None = None, limit: int = 8) -> dict
 
 @mcp.tool()
 def fetch_clean(url: str) -> dict:
-    """Fetch a URL and return clean, RAG-optimised markdown via the self-hosted
-    Crawl4AI (trafilatura local fallback). The sovereign replacement for a
-    Firecrawl/Tavily extract call — no API key."""
+    """Fetch a URL and return clean, RAG-optimised markdown. Extraction ladder is
+    fastest-first: trafilatura (local, in-process) then Crawl4AI (the JS-rendering
+    fallback). The sovereign replacement for a Firecrawl/Tavily extract — no API key."""
     return docs_core.fetch_clean(url)
 
 

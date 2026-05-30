@@ -217,6 +217,23 @@ hmx_start_one() {
   echo $! >"${pidfile}"
 }
 
+# Health GET WITH A STARTUP GRACE (Fix 4): retry before declaring a server down,
+# so a server that does external-connectivity setup on startup (e.g. mcp-research)
+# isn't reported DOWN just because it was polled a beat too early. Tries
+# HMX_HEALTH_RETRIES times (default 3), HMX_HEALTH_GAP_S apart (default 3s) ≈ a 10s
+# grace. A healthy server returns on the first attempt with no delay. Echoes the
+# health body on success; returns 0/1.
+hmx_health_get() {
+  local name="$1" url body
+  url="$(hmx_health_url "$name")"
+  local tries="${HMX_HEALTH_RETRIES:-3}" gap="${HMX_HEALTH_GAP_S:-3}" i=1
+  while :; do
+    if body="$(curl -fsS -m 5 "${url}" 2>/dev/null)"; then printf '%s' "${body}"; return 0; fi
+    [ "${i}" -ge "${tries}" ] && return 1
+    i=$((i + 1)); sleep "${gap}"
+  done
+}
+
 # Poll a server's /health until ok or timeout. Returns 0/1.
 hmx_wait_health() {
   local name="$1" timeout="${2:-15}" url; url="$(hmx_health_url "${name}")"

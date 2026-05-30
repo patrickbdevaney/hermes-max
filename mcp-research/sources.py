@@ -44,7 +44,9 @@ except Exception:  # noqa: BLE001
     otel_emit = _NoOtel()  # type: ignore
 
 # ── env (all optional — keyless sources work without any of these) ────────────
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+# GITHUB_TOKEN is the canonical name; GITHUB_ACCESS_TOKEN is accepted as a fallback
+# (GitHub PAT installs commonly export the latter). GITHUB_TOKEN wins if both set.
+GITHUB_TOKEN = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_ACCESS_TOKEN") or "").strip()
 SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
 STACKEXCHANGE_KEY = os.environ.get("STACKEXCHANGE_KEY", "").strip()
 
@@ -260,7 +262,7 @@ def github_search(query: str, search_type: str = "repositories",
         return {"ok": True, "source": "github", "results": []}
     if not GITHUB_TOKEN:
         return {"ok": True, "source": "github", "skipped": True, "results": [],
-                "error": "GITHUB_TOKEN absent — github_search skipped (web layer covers it)"}
+                "error": "GITHUB_TOKEN/GITHUB_ACCESS_TOKEN absent — github_search skipped (web layer covers it)"}
     search_type = search_type if search_type in ("repositories", "code", "issues") else "repositories"
     limit = max(1, min(int(limit), 50))
     r = _get_json(f"{GITHUB_API}/search/{search_type}",
@@ -640,7 +642,7 @@ def source_stats() -> dict[str, Any]:
     return {
         "arxiv": "keyless (Atom API)",
         "semantic_scholar": "keyed (1 RPS)" if SEMANTIC_SCHOLAR_API_KEY else "keyless (5k/5min pool)",
-        "github": "PAT (30 req/min)" if GITHUB_TOKEN else "SKIPPED (no GITHUB_TOKEN)",
+        "github": "PAT (30 req/min)" if GITHUB_TOKEN else "SKIPPED (no GITHUB_TOKEN/GITHUB_ACCESS_TOKEN)",
         "hn": "keyless (Algolia)",
         "stackexchange": "keyed (10k/day)" if STACKEXCHANGE_KEY else "keyless (300/day)",
         "ethresearch": "keyless (Discourse .json)",

@@ -42,21 +42,92 @@ except Exception:  # noqa: BLE001 - optional; we fall back to heuristic chunking
 
 # ── config ──────────────────────────────────────────────────────────────────
 DB_PATH = os.path.expanduser(os.environ.get("RAG_INDEX_PATH", "~/.hermes-max/rag/index.db"))
-EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "").rstrip("/")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "/model")
 EMBED_TIMEOUT = float(os.environ.get("EMBED_TIMEOUT", "30"))
 EMBED_BATCH = int(os.environ.get("EMBED_BATCH", "64"))
 # Reranker (Stage 1.2): an OPTIONAL cross-encoder that re-orders the fused
-# top-pool before returning. Blank RERANK_BASE_URL ⇒ no rerank (fused order is
-# returned unchanged). Independent of embeddings: rerank can sharpen even a
-# BM25+graph result set. The endpoint is Cohere/Jina/vLLM-rerank shaped:
+# top-pool before returning. No rerank endpoint ⇒ fused order returned unchanged.
+# Independent of embeddings: rerank can sharpen even a BM25+graph result set.
 #   POST {RERANK_BASE_URL}/rerank {model, query, documents:[...]}
 #     -> {"results": [{"index": i, "relevance_score": s}, ...]}
-RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "").rstrip("/")
 RERANK_MODEL = os.environ.get("RERANK_MODEL", "/model")
 RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "30"))
 # How many fused candidates to hand the cross-encoder (it then picks the top k).
 RERANK_POOL = int(os.environ.get("RERANK_POOL", "24"))
+
+# ── embed/rerank endpoint resolution (auto-detect the local serves) ──────────
+# EMBED_BASE_URL / RERANK_BASE_URL may be set explicitly in .env, OR left blank and
+# auto-detected when the serve-embed.sh (:8002) / serve-rerank.sh (:8003) servers
+# are up — so `hm up` on gpu_local just works without editing .env. The URL is
+# normalized to hit the OpenAI-style /v1 path (vLLM serves only /v1; local_serve
+# serves both), so a bare `http://127.0.0.1:8002` is accepted and works on either
+# backend. Auto-detect is gated by RAG_EMBED_AUTODETECT (default on); set it to 0
+# to pin BM25-only deterministically (the smoke tests do).
+# Explicit endpoint (env or monkeypatched in tests). Empty ⇒ try auto-detect.
+EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "").strip()
+RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "").strip()
+_EMBED_AUTODETECT = os.environ.get("RAG_EMBED_AUTODETECT", "1").strip().lower() not in ("0", "false", "no")
+_EMBED_PROBE_URL = os.environ.get("EMBED_AUTODETECT_URL", "http://127.0.0.1:8002")
+_RERANK_PROBE_URL = os.environ.get("RERANK_AUTODETECT_URL", "http://127.0.0.1:8003")
+_PROBE_TIMEOUT = float(os.environ.get("RAG_PROBE_TIMEOUT_S", "1.0"))
+_PROBE_NEG_TTL = float(os.environ.get("RAG_PROBE_NEG_TTL_S", "30"))
+
+
+def _normalize_openai_base(u: str) -> str:
+    """A bare host:port (no path) gets `/v1` appended so the request hits the
+    OpenAI-style /v1/embeddings|/v1/rerank route (works on vLLM AND local_serve).
+    An explicit path (…/v1, …/openai) is left as-is."""
+    from urllib.parse import urlparse
+    u = (u or "").strip().rstrip("/")
+    if not u:
+        return ""
+    p = urlparse(u)
+    return u + "/v1" if (not p.path or p.path == "") else u
+
+
+def _server_up(base_url: str) -> bool:
+    probe = base_url.rstrip("/")
+    for path in ("/health", "/v1/models"):
+        try:
+            with httpx.Client(timeout=_PROBE_TIMEOUT) as c:
+                if c.get(f"{probe}{path}").status_code < 500:
+                    return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+# resolution cache: positive is sticky; negative re-probes after _PROBE_NEG_TTL.
+_resolved: dict[str, tuple[str, float]] = {}
+
+
+def _resolve_base(kind: str, env_val: str, probe_url: str) -> str:
+    if env_val:
+        return _normalize_openai_base(env_val)
+    if not _EMBED_AUTODETECT:
+        return ""
+    import time as _t
+    cached = _resolved.get(kind)
+    now = _t.time()
+    if cached is not None:
+        url, ts = cached
+        if url or (now - ts) < _PROBE_NEG_TTL:
+            return url
+    url = _normalize_openai_base(probe_url) if _server_up(probe_url) else ""
+    _resolved[kind] = (url, now)
+    return url
+
+
+def embed_base_url() -> str:
+    """Resolved embeddings endpoint (explicit EMBED_BASE_URL → auto-detected serve
+    on :8002 → ""). Reads the module global so tests can monkeypatch it."""
+    return _resolve_base("embed", EMBED_BASE_URL, _EMBED_PROBE_URL)
+
+
+def rerank_base_url() -> str:
+    """Resolved rerank endpoint (explicit RERANK_BASE_URL → auto-detected serve on
+    :8003 → ""). Reads the module global so tests can monkeypatch it."""
+    return _resolve_base("rerank", RERANK_BASE_URL, _RERANK_PROBE_URL)
 MAX_FILE_BYTES = int(os.environ.get("RAG_MAX_FILE_BYTES", str(1_500_000)))
 MAX_CHUNK_CHARS = int(os.environ.get("RAG_MAX_CHUNK_CHARS", "6000"))
 RERANK_DOC_CHARS = int(os.environ.get("RERANK_DOC_CHARS", "2000"))
@@ -263,7 +334,7 @@ def chunk_file(path: str, lang: str) -> list[Chunk]:
 
 # ── embeddings ──────────────────────────────────────────────────────────────
 def embeddings_configured() -> bool:
-    return bool(EMBED_BASE_URL)
+    return bool(embed_base_url())
 
 
 def embed_texts(texts: list[str]) -> list[list[float]] | None:
@@ -272,7 +343,8 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
     Returning None (rather than raising) is what lets the whole server degrade
     to BM25-only without any caller having to know embeddings exist.
     """
-    if not EMBED_BASE_URL or not texts:
+    base = embed_base_url()
+    if not base or not texts:
         return None
     vectors: list[list[float]] = []
     try:
@@ -280,7 +352,7 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
             for i in range(0, len(texts), EMBED_BATCH):
                 batch = texts[i: i + EMBED_BATCH]
                 resp = client.post(
-                    f"{EMBED_BASE_URL}/embeddings",
+                    f"{base}/embeddings",
                     json={"model": EMBED_MODEL, "input": batch},
                 )
                 resp.raise_for_status()
@@ -293,7 +365,7 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
 
 # ── reranker (cross-encoder; optional, highest-precision-per-token step) ──────
 def rerank_configured() -> bool:
-    return bool(RERANK_BASE_URL)
+    return bool(rerank_base_url())
 
 
 def rerank(query: str, documents: list[str]) -> list[int] | None:
@@ -303,13 +375,14 @@ def rerank(query: str, documents: list[str]) -> list[int] | None:
     endpoint is unset/unreachable/misshaped — in which case the caller keeps the
     fused order (graceful degradation; rerank only ever sharpens, never breaks).
     """
-    if not RERANK_BASE_URL or not documents:
+    base = rerank_base_url()
+    if not base or not documents:
         return None
     docs = [d[:RERANK_DOC_CHARS] for d in documents]
     try:
         with httpx.Client(timeout=RERANK_TIMEOUT) as client:
             resp = client.post(
-                f"{RERANK_BASE_URL}/rerank",
+                f"{base}/rerank",
                 json={"model": RERANK_MODEL, "query": query, "documents": docs},
             )
             resp.raise_for_status()
@@ -973,6 +1046,8 @@ def stats() -> dict[str, Any]:
             "dense_available": bool(vec_ok and embeddings_configured() and _vec_table_exists(con)),
             "embeddings_configured": embeddings_configured(),
             "rerank_configured": rerank_configured(),
+            "embed_endpoint": embed_base_url() or None,
+            "rerank_endpoint": rerank_base_url() or None,
             "retrieval_mode": (
                 ("hybrid" if (vec_ok and embeddings_configured() and _vec_table_exists(con)) else "bm25")
                 + ("+graph" if graph.get("graph_available") else "")

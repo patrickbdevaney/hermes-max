@@ -103,6 +103,7 @@ def rag_call(snippet: str) -> dict:
     py = REPO / "mcp-codebase-rag" / ".venv" / "bin" / "python"
     py = str(py) if py.exists() else sys.executable
     env = dict(os.environ, RAG_INDEX_PATH=RAG_DB, EMBED_BASE_URL="",
+               RAG_EMBED_AUTODETECT="0",  # isolated dry-run: pin BM25, no live probe
                PYTHONPATH=str(REPO / "mcp-codebase-rag"))
     code = ("import sys, json, rag_core\n" + snippet +
             "\nprint('@@JSON@@' + json.dumps(_out))\n")

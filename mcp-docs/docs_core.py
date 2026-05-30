@@ -1,8 +1,9 @@
 """Sovereign documentation ingestion: SearXNG → Crawl4AI → local distil → RAG/KG.
 
 The whole loop is self-hosted — no Firecrawl/Tavily/Exa key. SearXNG ($SEARXNG_URL)
-finds candidate URLs; Crawl4AI ($CRAWL4AI_URL) turns a page into clean markdown
-(trafilatura is the local fallback if Crawl4AI is down); the local chat model
+finds candidate URLs; a page is turned into clean markdown by trafilatura first
+(local, in-process, fastest) and Crawl4AI ($CRAWL4AI_URL) only as the JS-rendering
+fallback; the local chat model
 ($VLLM_BASE_URL) distils it to a high-signal technical note; the note lands in
 mcp-codebase-rag under a `docs/<topic>` namespace (co-retrievable with code) and
 its APIs land in mcp-knowledge-graph (framework→api). Every external dependency
@@ -78,7 +79,7 @@ def search_docs(query: str, category: str | None = None, limit: int = 8) -> dict
     return {"ok": True, "query": query, "category": category, "count": len(results), "results": results}
 
 
-# ── fetch + clean (Crawl4AI, trafilatura fallback) ────────────────────────────
+# ── fetch + clean (trafilatura first, Crawl4AI fallback) ──────────────────────
 def _crawl4ai_md(url: str) -> str | None:
     try:
         with httpx.Client(timeout=CRAWL_TIMEOUT) as c:
@@ -107,15 +108,21 @@ def _trafilatura_md(url: str) -> str | None:
 
 
 def fetch_clean(url: str) -> dict[str, Any]:
-    """Fetch a URL → clean markdown via Crawl4AI; fall back to trafilatura."""
-    md = _crawl4ai_md(url)
-    backend = "crawl4ai"
+    """Fetch a URL → clean markdown. Extraction ladder, FASTEST FIRST:
+      1. trafilatura — local, in-process, no container, sub-second on static HTML;
+                       handles the large majority of documentation pages.
+      2. Crawl4AI    — heavier (a container that renders JS); used ONLY when
+                       trafilatura returns nothing (a JS-heavy / dynamic page).
+    """
+    md = _trafilatura_md(url)
+    backend = "trafilatura"
     if md is None:
-        md = _trafilatura_md(url)
-        backend = "trafilatura"
+        md = _crawl4ai_md(url)
+        backend = "crawl4ai"
     if md is None:
-        return {"ok": False, "url": url, "error": "both Crawl4AI and trafilatura failed",
-                "hint": f"is Crawl4AI up? ./crawl4ai.sh ({CRAWL4AI_URL})"}
+        return {"ok": False, "url": url,
+                "error": "both trafilatura and Crawl4AI failed",
+                "hint": f"is Crawl4AI up for JS-heavy pages? ./crawl4ai.sh ({CRAWL4AI_URL})"}
     return {"ok": True, "url": url, "backend": backend, "chars": len(md), "markdown": md}
 
 

@@ -31,6 +31,7 @@ TEST_DB = os.path.join(_TMP, "index.db")
 # Pin determinism BEFORE importing rag_core (it reads env at import time).
 os.environ["RAG_INDEX_PATH"] = TEST_DB
 os.environ["EMBED_BASE_URL"] = ""
+os.environ["RAG_EMBED_AUTODETECT"] = "0"  # pin BM25 — don't probe a live :8002/:8003
 
 
 def _ok(msg: str) -> None:

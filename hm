@@ -38,6 +38,31 @@ _dispatch() {
   exec "$@"
 }
 
+_port_up() { timeout 1 bash -c ">/dev/tcp/127.0.0.1/$1" 2>/dev/null; }
+
+# Start the embed (:8002) + rerank (:8003) serves, backgrounded, if not already up.
+# DEFAULT ON for the gpu_local profile (the model serves the dense lane + reranker);
+# opt out with HM_WITH_EMBED=0 / HM_WITH_RERANK=0. On lean_cloud they stay off.
+_start_serves() {
+  local profile="${DEPLOY_PROFILE:-gpu_local}"
+  local want_embed="${HM_WITH_EMBED:-}" want_rerank="${HM_WITH_RERANK:-}"
+  if [ "${profile}" = "gpu_local" ]; then
+    [ -z "${want_embed}" ]  && want_embed=1
+    [ -z "${want_rerank}" ] && want_rerank=1
+  fi
+  mkdir -p "${LOG_DIR}"
+  if [ "${want_embed}" = "1" ]; then
+    if _port_up "${EMBED_PORT:-8002}"; then echo "  • embed already up on :${EMBED_PORT:-8002}"
+    else echo "  • starting embed serve on :${EMBED_PORT:-8002} (background)"
+         nohup "${REPO_ROOT}/serve-embed.sh" >>"${LOG_DIR}/embed.log" 2>&1 & fi
+  fi
+  if [ "${want_rerank}" = "1" ]; then
+    if _port_up "${RERANK_PORT:-8003}"; then echo "  • rerank already up on :${RERANK_PORT:-8003}"
+    else echo "  • starting rerank serve on :${RERANK_PORT:-8003} (background)"
+         nohup "${REPO_ROOT}/serve-rerank.sh" >>"${LOG_DIR}/rerank.log" 2>&1 & fi
+  fi
+}
+
 usage() {
   sed -n '3,26p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
 }
@@ -83,6 +108,8 @@ EOF
   fi
   # bring servers up if not already healthy (backgrounded inside start-all)
   "${SCRIPTS}/healthcheck.sh" >/dev/null 2>&1 || "${SCRIPTS}/start-all.sh" || true
+  # embed + rerank serves (gpu_local default) so the cockpit's status pane shows them
+  _start_serves || true
   # pane 1 (large): an interactive shell ready for `hermes`
   tmux new-session -d -s "${TMUX_SESSION}" -n cockpit -x 220 -y 50
   tmux send-keys -t "${TMUX_SESSION}" \
@@ -108,12 +135,9 @@ case "${cmd}" in
   up)
     if [ -n "${HM_PRINT:-}" ]; then echo "${SCRIPTS}/start-all.sh"; exit 0; fi
     "${SCRIPTS}/start-all.sh" "$@"
-    # embed/rerank are optional gpu_local serves — started on request only (they
-    # need CUDA + a model; auto-spawning them on a constrained box is unsafe).
-    if [ -n "${HM_WITH_EMBED:-}" ]; then "${REPO_ROOT}/serve-embed.sh" & fi
-    if [ -n "${HM_WITH_RERANK:-}" ]; then "${REPO_ROOT}/serve-rerank.sh" & fi
-    [ -z "${HM_WITH_EMBED:-}${HM_WITH_RERANK:-}" ] && \
-      echo "  (embed/rerank serves: HM_WITH_EMBED=1 / HM_WITH_RERANK=1 hm up, or ./serve-embed.sh)"
+    # embed (:8002) + rerank (:8003) serves auto-start with the stack on gpu_local
+    # (the dense lane + reranker); opt out with HM_WITH_EMBED=0 / HM_WITH_RERANK=0.
+    _start_serves
     ;;
   down)        _dispatch "${SCRIPTS}/stop-all.sh" "$@" ;;
   restart)     _dispatch "${SCRIPTS}/restart.sh" "$@" ;;
