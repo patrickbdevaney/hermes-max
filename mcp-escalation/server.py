@@ -64,6 +64,18 @@ def classify_difficulty(signals: dict | None = None) -> dict:
 
 
 @mcp.tool()
+def record_outcome(task: str, signals: dict | None = None, difficulty: str | None = None,
+                   outcome: str = "unknown", escalated: bool = False,
+                   tier: str | None = None) -> dict:
+    """Record a finished task's (signals → difficulty → outcome) as a labelled
+    example for the weekly GEPA run. Call it at task end — especially when a task
+    escalated and the higher tier solved it — so the difficulty classifier learns
+    from real outcomes and the local model handles more over time (the compounding
+    flywheel). Best-effort; never blocks."""
+    return escalation_core.record_outcome(task, signals, difficulty, outcome, escalated, tier)
+
+
+@mcp.tool()
 def should_escalate(signals: dict | None = None) -> dict:
     """Auto-trigger check: escalate when verifier-guided search exhausted N
     without green, OR backtracking exhausted approaches, OR confidence is low on

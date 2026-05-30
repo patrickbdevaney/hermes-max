@@ -1,0 +1,5 @@
+dspy>=3.2
+gepa>=0.0.1
+mcp>=1.2.0
+opentelemetry-sdk>=1.20
+opentelemetry-exporter-otlp-proto-grpc>=1.20

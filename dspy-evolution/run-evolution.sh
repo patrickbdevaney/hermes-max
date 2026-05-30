@@ -1,124 +1,78 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# dspy-evolution — weekly wrapper around the OFFICIAL hermes-agent-self-evolution
-# module (DSPy + GEPA). Evolves the most-used skills/prompts against accumulated
-# session history. Designed to run under Hermes native cron with --no-agent, so
-# its stdout becomes the weekly digest delivered to the operator.
+# dspy-evolution — the COMPOUNDING loop. Runs GEPA (reflective prompt evolution)
+# OUT-OF-PROCESS in its OWN venv against accumulated traces, and writes evolved
+# prompt variants by FILE PATH under ~/.hermes/skills/hermes-max/ (never imports
+# Hermes, never overwrites a prior variant). Designed for weekly Hermes cron.
 #
-# It NEVER hard-fails the cron: if the self-evolution package isn't installed
-# (it ships as a separate repo, not bundled with Hermes v0.15.1), this prints
-# install instructions and exits 0.
+# Gating (honest): only counts REAL traces (escalation outcomes + session store).
+# With fewer than MIN_REAL_TRACES it is a graceful no-op ("needs more traces") —
+# optimising on no data is meaningless. Pass --seed to force a demo run on the
+# built-in seed set (exercises the machinery; clearly flagged as seed).
 #
-# Config (all optional, with sane defaults):
-#   DSPY_PYTHON        interpreter that has hermes-agent-self-evolution installed
-#                      (default: python3)
-#   DSPY_EVOLVE_CMD    full command to run the evolution (overrides autodetect)
-#   DSPY_EVOLVE_ARGS   extra args appended to the autodetected command
-#   DSPY_TIMEOUT       max seconds for the evolution run (default: 3600)
-#   HERMES_HOME        Hermes home (default: ~/.hermes) — source of session data
+#   bash run-evolution.sh           # scheduled mode: gated on real traces
+#   bash run-evolution.sh --seed    # force a run (seed set) to demonstrate
+#
+# Config (all optional): VLLM_BASE_URL (the local model — task & reflection LM),
+#   MAX_METRIC_CALLS (GEPA budget, default 50), MIN_REAL_TRACES (gate, default 10),
+#   DSPY_TIMEOUT (default 3600).
+# Never hard-fails the cron: missing dspy/gepa ⇒ install + exit 0.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+[ -f "${REPO_ROOT}/.env" ] && { set -a; . "${REPO_ROOT}/.env"; set +a; }
 
-# Load the single-port-story env if present (gives VLLM_BASE_URL etc.).
-if [ -f "${REPO_ROOT}/.env" ]; then
-  set -a; . "${REPO_ROOT}/.env"; set +a
-fi
-
-DSPY_PYTHON="${DSPY_PYTHON:-python3}"
+VENV="${SCRIPT_DIR}/.venv"
+PY="${VENV}/bin/python"
+REQ="${SCRIPT_DIR}/requirements.txt"
+MIN_REAL_TRACES="${MIN_REAL_TRACES:-10}"
 DSPY_TIMEOUT="${DSPY_TIMEOUT:-3600}"
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-SESSIONS_DIR="${HERMES_HOME}/sessions"
-SKILLS_DIR="${HERMES_HOME}/skills"
+SEED=0
+[ "${1:-}" = "--seed" ] && SEED=1
 
-LOGDIR="${HOME}/.hermes-max/dspy-evolution"
-mkdir -p "${LOGDIR}"
-STAMP="$(date +%Y%m%d_%H%M%S)"
-LOG="${LOGDIR}/run_${STAMP}.log"
+STAMP="$(date +%Y%m%d_%H%M%S 2>/dev/null || echo run)"
+echo "═══ dspy-evolution @ ${STAMP} ═══"
+echo "VLLM_BASE_URL=${VLLM_BASE_URL:-<unset>}"
 
-echo "=== dspy-evolution weekly run @ ${STAMP} ==="
-echo "log: ${LOG}"
-{
-  echo "VLLM_BASE_URL=${VLLM_BASE_URL:-<unset>}"
-  echo "sessions: ${SESSIONS_DIR}"
-  echo "skills:   ${SKILLS_DIR}"
-} >>"${LOG}" 2>&1
+# ── self-bootstrap the venv (so this works even if Stage-0 bootstrap didn't) ──
+if [ ! -x "${PY}" ]; then
+  echo "→ creating dspy-evolution venv (one-time; dspy+gepa are heavy)…"
+  python3 -m venv "${VENV}"
+  "${PY}" -m pip install -q --upgrade pip >/dev/null 2>&1 || true
+fi
+stamp="${VENV}/.requirements.sha"
+cur="$(sha1sum "${REQ}" | awk '{print $1}')"
+if [ "$(cat "${stamp}" 2>/dev/null)" != "${cur}" ]; then
+  echo "→ installing dspy-evolution requirements…"
+  "${PY}" -m pip install -q -r "${REQ}" && echo "${cur}" >"${stamp}" || true
+fi
 
-# Pick a timeout helper if available (GNU coreutils `timeout`).
+# ── graceful no-op if the packages still aren't importable ────────────────────
+if ! "${PY}" -c "import dspy, gepa" >/dev/null 2>&1; then
+  echo "• dspy/gepa not importable — skipping (no-op, exit 0)."
+  echo "  install: ${PY} -m pip install -r ${REQ}"
+  exit 0
+fi
+
+# ── gate on REAL trace count (unless --seed) ──────────────────────────────────
+REAL="$(PYTHONPATH="${SCRIPT_DIR}" "${PY}" -c 'import traces; print(traces.real_trace_count())' 2>/dev/null || echo 0)"
+echo "real traces available: ${REAL} (gate: ${MIN_REAL_TRACES})"
+if [ "${SEED}" -eq 0 ] && [ "${REAL}" -lt "${MIN_REAL_TRACES}" ]; then
+  echo "• needs more traces (${REAL} < ${MIN_REAL_TRACES}) — graceful no-op (exit 0)."
+  echo "  Escalation outcomes + sessions accumulate over use; re-runs auto-trigger once enough exist."
+  echo "  To demonstrate the machinery now: bash run-evolution.sh --seed"
+  exit 0
+fi
+
+# ── run the bounded GEPA optimisation ─────────────────────────────────────────
 TIMEOUT_BIN="$(command -v timeout || true)"
-run_with_timeout() {
-  if [ -n "${TIMEOUT_BIN}" ]; then
-    "${TIMEOUT_BIN}" "${DSPY_TIMEOUT}" "$@"
-  else
-    "$@"
-  fi
-}
-
-# Detect how to invoke the self-evolution module.
-detect_cmd() {
-  if [ -n "${DSPY_EVOLVE_CMD:-}" ]; then
-    echo "${DSPY_EVOLVE_CMD}"
-    return 0
-  fi
-  # 1) CLI on PATH?
-  if command -v hermes-agent-self-evolution >/dev/null 2>&1; then
-    echo "hermes-agent-self-evolution"
-    return 0
-  fi
-  # 2) importable module?
-  if "${DSPY_PYTHON}" -c "import hermes_agent_self_evolution" >/dev/null 2>&1; then
-    echo "${DSPY_PYTHON} -m hermes_agent_self_evolution"
-    return 0
-  fi
-  # 3) optional first-run install (opt-in; respects the no-lazy-install default)
-  if [ "${DSPY_AUTO_INSTALL:-false}" = "true" ]; then
-    if "${DSPY_PYTHON}" -m pip install -q hermes-agent-self-evolution >/dev/null 2>&1 \
-       && "${DSPY_PYTHON}" -c "import hermes_agent_self_evolution" >/dev/null 2>&1; then
-      echo "${DSPY_PYTHON} -m hermes_agent_self_evolution"
-      return 0
-    fi
-  fi
-  return 1
-}
-
-if ! CMD="$(detect_cmd)"; then
-  cat <<EOF
-dspy-evolution: SKIPPED — hermes-agent-self-evolution is not installed.
-
-This is the official DSPy+GEPA self-evolution module and ships as a SEPARATE
-repo (not bundled with Hermes v0.15.1). To enable weekly evolution:
-
-  git clone <hermes-agent-self-evolution repo>
-  ${DSPY_PYTHON} -m pip install -e <that repo>
-
-Then this weekly cron will optimize your most-used skills/prompts against
-accumulated session history automatically. No action needed now; exiting 0 so
-the schedule stays healthy.
-EOF
-  echo "skipped: package not installed" >>"${LOG}" 2>&1
-  exit 0
-fi
-
-# Default args point the optimizer at the real session history + skills. The
-# package's exact flags may differ across versions; override with
-# DSPY_EVOLVE_ARGS once installed if needed.
-DEFAULT_ARGS="--sessions ${SESSIONS_DIR} --skills ${SKILLS_DIR}"
-ARGS="${DSPY_EVOLVE_ARGS:-${DEFAULT_ARGS}}"
-
-echo "dspy-evolution: running -> ${CMD} ${ARGS}"
-echo "cmd: ${CMD} ${ARGS}" >>"${LOG}" 2>&1
-
-# shellcheck disable=SC2086
-if run_with_timeout ${CMD} ${ARGS} >>"${LOG}" 2>&1; then
-  echo "dspy-evolution: completed OK (details in ${LOG})"
-  tail -n 5 "${LOG}" 2>/dev/null || true
-  exit 0
+echo "→ running GEPA (target: classify_difficulty)…"
+if [ -n "${TIMEOUT_BIN}" ]; then
+  "${TIMEOUT_BIN}" "${DSPY_TIMEOUT}" env PYTHONPATH="${SCRIPT_DIR}" "${PY}" "${SCRIPT_DIR}/evolve.py"
 else
-  rc=$?
-  echo "dspy-evolution: run exited ${rc} — see ${LOG} (cron stays healthy; not failing)"
-  tail -n 10 "${LOG}" 2>/dev/null || true
-  # Exit 0 on purpose: a bad evolution run must not spam the scheduler as failed.
-  exit 0
+  env PYTHONPATH="${SCRIPT_DIR}" "${PY}" "${SCRIPT_DIR}/evolve.py"
 fi
+echo "═══ done (rc=$?) ═══"
+exit 0   # never hard-fail the cron

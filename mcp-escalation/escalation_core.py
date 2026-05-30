@@ -28,6 +28,13 @@ TIMEOUT = float(os.environ.get("ESCALATION_TIMEOUT", "120"))
 STATE_PATH = os.path.expanduser(
     os.environ.get("ESCALATION_STATE_PATH", "~/.hermes-max/escalation/spend.json")
 )
+# The compounding flywheel: every escalation+outcome is appended here as a
+# labelled example; dspy-evolution/traces.py reads it to improve classify_difficulty
+# on the operator's OWN tasks, so the local model handles progressively more of the
+# formerly-escalated band over time.
+OUTCOMES_LOG = os.path.expanduser(
+    os.environ.get("ESCALATION_OUTCOMES_LOG", "~/.hermes-max/escalation/outcomes.jsonl")
+)
 
 # Tier-3 must never be routed through this server.
 FORBIDDEN_TIERS = {"opus", "claude", "claude-code", "claude_code", "tier3", "tier-3", "tier_3"}
@@ -243,6 +250,28 @@ def classify_difficulty(signals: dict | None = None) -> dict[str, Any]:
     difficulty = "hard" if score >= 4 else ("medium" if score >= 2 else "easy")
     return {"ok": True, "difficulty": difficulty, "score": score,
             "reasons": reasons or ["no complexity signals"]}
+
+
+def record_outcome(task: str, signals: dict | None = None, difficulty: str | None = None,
+                   outcome: str = "unknown", escalated: bool = False,
+                   tier: str | None = None) -> dict[str, Any]:
+    """Append a labelled (signals → difficulty → outcome) example to OUTCOMES_LOG —
+    the compounding flywheel. Call this when a task finishes, ESPECIALLY when it
+    escalated and the higher tier solved it: that becomes training signal so the
+    next GEPA run improves classify_difficulty and the local model handles more of
+    the formerly-escalated band. Best-effort; never raises."""
+    sig = signals or {}
+    if not difficulty:
+        difficulty = classify_difficulty(sig).get("difficulty")
+    rec = {"task": task, "signals": sig, "difficulty": difficulty,
+           "outcome": outcome, "escalated": bool(escalated), "tier": tier}
+    try:
+        Path(OUTCOMES_LOG).parent.mkdir(parents=True, exist_ok=True)
+        with _lock, open(OUTCOMES_LOG, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        return {"ok": True, "recorded": rec, "log": OUTCOMES_LOG}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
 def should_escalate(signals: dict | None = None) -> dict[str, Any]:
