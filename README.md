@@ -101,7 +101,7 @@ sed -i 's#^VLLM_BASE_URL=.*#VLLM_BASE_URL=http://localhost:8001/v1#' .env
 scripts/start-all.sh && scripts/register-mcp.sh --sync-model-url && scripts/healthcheck.sh
 ```
 
-## The nine MCP servers
+## The ten MCP servers
 
 Each has its own `README.md`, `requirements.txt`, `server.py`, `smoke_test.py`
 and `healthcheck.sh`, and runs as an independent streamable-http process. The
@@ -141,6 +141,15 @@ one line there; every script picks it up.
   `ingest_doc` / `research_topic` (fetch → distil with the local model → store in
   the RAG `docs/<topic>` namespace + KG `framework→api`). Learn a novel framework
   on demand with **no external API**.
+- **mcp-research** *(:9110)* — **SOTA local deep-research**: the four-stage loop
+  `plan_research` → `develop_queries` → `explore` → `verify_claims` →
+  `synthesize`, with `deep_research` as the bounded orchestrator. Built on the
+  sovereign loop (SearXNG + Crawl4AI/trafilatura + chat model + RAG/KG), engineered
+  against the four named failure modes — echo-chamber (query diversity + URL/n-gram
+  dedup), source-quality bias (authority-aware ranking), planning hallucination
+  (checkable PLAN + intermediate verify), overspawning (hard caps) — each a tested
+  invariant. Citation-backed; compounds the brief + entities into RAG/KG. Runs on
+  **both** deploy profiles.
 
 mcp-knowledge-graph also gains **self-editing core memory** (`core_memory_get` /
 `core_memory_append` / `core_memory_replace`) wired to Hermes's native MEMORY.md —
@@ -172,16 +181,51 @@ a hard fail:
 | SearXNG | `search_docs` reports unavailable (other tools unaffected) |
 | local chat model | `ingest_doc` stores **raw** markdown (no distil) |
 | RAG/KG (for docs) | note/entities not stored, reported (fetch/distil still work) |
+| deep-research (`mcp-research`) | SearXNG/Crawl4AI down ⇒ fewer/no sources; reranker absent ⇒ **authority-only** ranking; chat model unset ⇒ **deterministic** plan/queries/synthesis (cited bullet brief) |
 | dspy / gepa | `run-evolution.sh` is a no-op (exit 0) with install hint |
 | escalation cloud tier | OFF by default; local tier tried first; never required |
 | Phoenix (OTLP) | spans dropped silently; servers run unaffected |
+
+## Deploy profiles — one codebase, two targets
+
+`DEPLOY_PROFILE` (in `.env`) selects how the stack runs. `bootstrap.sh`
+auto-detects and **suggests** a profile (CUDA + RAM + arch + endpoint), never
+silently overriding an explicit `--profile` / `DEPLOY_PROFILE`. Pick by filename —
+two **one-line wrappers** over the single engine, no code duplication:
+
+```bash
+bash bootstrap-gpu.sh     # DEFAULT, maximalist (gpu_local)
+bash bootstrap-lean.sh    # CPU / Mac-mini / VPS  (lean_cloud)
+```
+
+The manifest gates which servers run per profile, so a future **gpu_local-only**
+capability is one `profiles:` line and lean is unaffected — lean is a graceful
+**subset**, never a ceiling on full.
+
+| Capability | `gpu_local` (default) | `lean_cloud` (CPU/Mac/VPS) |
+|---|---|---|
+| Chat model | local vLLM **or** cloud via `$VLLM_BASE_URL` | cloud via `$VLLM_BASE_URL` (assumed) |
+| RAG embeddings | local Qwen3-Embed-0.6B (CUDA) | optional cloud `EMBED_BASE_URL`, else **BM25+graph** |
+| Reranker | local Qwen3-Reranker-0.6B (CUDA) | cloud if set, else fused-no-rerank |
+| RAG graph (tree-sitter+PageRank) | full | **full** (pure-Python, CPU-fine) |
+| Doc extract | Crawl4AI | Crawl4AI if Docker present, else **trafilatura** |
+| Deep research (`mcp-research`) | full | **full** (uses the cloud chat endpoint) |
+| GEPA self-evolution | full (local model) | optional (cloud, rate-limited) — off by default |
+| verify / checkpoint / watchdog / KG | full | **full** (all pure-Python) |
+
+**The lean guarantee:** **no** MCP server `requirements.txt` pulls torch/CUDA —
+every server reaches models over HTTP. The only torch/CUDA touchpoints are the
+optional, gpu_local-only `serve-embed.sh` / `serve-rerank.sh`. `bootstrap.sh`
+asserts this (greps requirements), so a lean box never needs a GPU stack.
 
 ## Tier-2 workflow skills (`skills/`)
 
 `workflow-task-start` (ground in RAG + KG), `workflow-task-finish` (verify gate
 + record to KG), `workflow-stuck` (loop-then-ping circuit breaker),
 `workflow-escalate` (when/when-not to escalate), `workflow-plan` (decompose
-large tasks). Installed into `~/.hermes/skills/hermes-max/` by `register-mcp.sh`.
+large tasks), `workflow-deep-research` (drive `mcp-research`'s `deep_research` for
+current/external knowledge — gate depth on scope, verify before asserting, cite
+every claim). Installed into `~/.hermes/skills/hermes-max/` by `register-mcp.sh`.
 
 ### Long-horizon scaffolding skills
 

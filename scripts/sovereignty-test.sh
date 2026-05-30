@@ -61,6 +61,15 @@ fi
 [ -n "${EMBED_BASE_URL:-}" ] && PASS "embeddings endpoint set (local)" \
   || WARN "EMBED_BASE_URL unset — RAG runs BM25+graph (sovereign, no cloud)"
 
+# 5b. deep-research (mcp-research) reaches ONLY local backends — no cloud key/SDK.
+if [ -d "${REPO_ROOT}/mcp-research" ]; then
+  if grep -rqiE '(FIRECRAWL|TAVILY|EXA|OPENAI|ANTHROPIC)_API_KEY' "${REPO_ROOT}/mcp-research" 2>/dev/null; then
+    BAD "mcp-research references a cloud API key — not sovereign"
+  else
+    PASS "deep-research is sovereign — SearXNG+Crawl4AI/trafilatura+local chat, no cloud key"
+  fi
+fi
+
 # 6. assert NO cloud key is set in the loaded env (they were unset above)
 leaked="$(env | grep -E '^(FIRECRAWL|TAVILY|EXA|OPENAI|ANTHROPIC)_API_KEY=' || true)"
 [ -z "${leaked}" ] && PASS "no cloud API keys present — fully local" \
