@@ -24,6 +24,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 import research_core
+import sources
 
 PORT = int(os.environ.get("MCP_RESEARCH_PORT", "9110"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
@@ -51,7 +52,7 @@ mcp = FastMCP(
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "mcp-research", "port": PORT,
-                         **research_core.stats()})
+                         **research_core.stats(), "sources": sources.source_stats()})
 
 
 @mcp.tool()
@@ -109,6 +110,74 @@ def deep_research(question: str, max_loops: int = 3, max_total_sources: int = 8,
     by max_loops + source cap + wall-clock budget. Compounds the final brief + key
     entities into RAG/KG so a later related run starts ahead. Fully sovereign."""
     return research_core.deep_research(question, max_loops, max_total_sources, category, compound)
+
+
+# ── Stage 1: structured source fan-out (alongside the SearXNG web layer) ──────
+@mcp.tool()
+def multi_source_search(query: str) -> dict:
+    """Structured source fan-out: classify the query -> route to the right free
+    APIs (arXiv / Semantic Scholar / GitHub / HN / Stack Exchange) with bounded
+    per-source budgets -> RRF-fuse the ranked lists. NOT load-bearing — every
+    structured source degrades to empty and the SearXNG web layer (explore /
+    deep_research) always answers. Returns fused candidates + per-source status."""
+    return sources.source_fanout(query)
+
+
+@mcp.tool()
+def classify_query(query: str) -> dict:
+    """Lightweight keyword router: maps a query to a source set + per-source budget
+    (crypto/protocol, applied-ML, library-how-to, or general). Always includes
+    searxng as the catch-all. Returns the chosen category, sources, and budgets."""
+    return sources.classify_query(query)
+
+
+@mcp.tool()
+def arxiv_search(query: str, days_back: int | None = None,
+                 categories: list | None = None, limit: int = 8) -> dict:
+    """arXiv Atom API (keyless). days_back is OPTIONAL — omit it to reach seminal
+    work (no 90-day window). categories targets cs.CR / cs.LG / cs.DC / cs.AI etc.
+    Degrades to an error string if arXiv is unreachable."""
+    return sources.arxiv_search(query, days_back, categories, limit)
+
+
+@mcp.tool()
+def semantic_scholar_search(query: str, limit: int = 10) -> dict:
+    """Semantic Scholar relevance search (keyless 5k/5min pool). Returns papers
+    with abstracts, authors, year, and citation counts. Attribution required when
+    displayed. Pair with semantic_scholar_citations to map a topic's canon+frontier."""
+    return sources.semantic_scholar_search(query, limit)
+
+
+@mcp.tool()
+def semantic_scholar_citations(paper_id: str, direction: str = "references",
+                               limit: int = 25) -> dict:
+    """Citation-graph traversal. direction='references' -> backward (what this
+    paper cites -> seminal); 'citations' -> forward (what cites it -> frontier).
+    paper_id accepts S2 id, 'arXiv:NNNN.NNNNN', 'DOI:...'. The feature that turns
+    search into 'find the canonical + latest work on a topic'."""
+    return sources.semantic_scholar_citations(paper_id, direction, limit)
+
+
+@mcp.tool()
+def github_search(query: str, search_type: str = "repositories", limit: int = 10) -> dict:
+    """GitHub REST search over repositories / code / issues. Presence-gated on
+    GITHUB_TOKEN — absent => no-op {"skipped": true} (web layer still answers).
+    Reaches the specific repo/code/issue that answers a question, not just trends."""
+    return sources.github_search(query, search_type, limit)
+
+
+@mcp.tool()
+def hn_search(query: str, limit: int = 10, tags: str = "story") -> dict:
+    """Hacker News search via Algolia (keyless). Practitioner signal — what people
+    actually adopt/discuss. Degrades to an error string if Algolia is unreachable."""
+    return sources.hn_search(query, limit, tags)
+
+
+@mcp.tool()
+def stackexchange_search(query: str, site: str = "stackoverflow", limit: int = 10) -> dict:
+    """Stack Exchange Q&A search (keyless 300/day; STACKEXCHANGE_KEY -> 10k/day).
+    Vote/tag-ranked answers; routed for library/how-to queries. Degrades cleanly."""
+    return sources.stackexchange_search(query, site, limit)
 
 
 if __name__ == "__main__":

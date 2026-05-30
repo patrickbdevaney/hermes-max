@@ -48,6 +48,37 @@ services.
   — the end-to-end orchestrator. Bounded loops + wall-clock budget. **Compounds**
   the final brief + key entities into RAG/KG so a later related run starts ahead.
 
+## Structured source fan-out (research_engine Stage 1)
+
+Alongside the SearXNG web layer, `mcp-research` reaches free structured sources
+directly — the biggest quality jump per unit effort. A keyword **classifier-router**
+maps a query to a source set + bounded per-source budget; each adapter's ranked list
+is merged with **Reciprocal Rank Fusion** (RRF, `Σ 1/(k+rank)`, k≈60 — pure
+arithmetic, no model), rewarding docs that rank consistently across sources.
+
+| Tool | Source | Key? | Notes |
+|---|---|---|---|
+| `arxiv_search(query, days_back?, categories?, limit)` | arXiv Atom API | **none** | `days_back` OPTIONAL (omit ⇒ seminal work reachable, no 90-day window); `categories` targets `cs.CR`/`cs.LG`/`cs.DC`/`cs.AI` |
+| `semantic_scholar_search(query, limit)` | Semantic Scholar | **none** (5k/5min pool; key ⇒ 1 RPS) | abstracts, authors, **citation counts**; attribution required when displayed |
+| `semantic_scholar_citations(paper_id, direction, limit)` | Semantic Scholar | **none** | **citation-graph traversal** — `references` = backward (seminal), `citations` = forward (frontier). Turns search into "find the canon + latest" |
+| `github_search(query, search_type, limit)` | GitHub REST | **`GITHUB_TOKEN`** (free PAT) | repos/code/issues; **absent ⇒ no-op** (web layer covers it), present ⇒ 30 req/min |
+| `hn_search(query, limit, tags)` | HN Algolia | **none** | practitioner signal (points, comments) |
+| `stackexchange_search(query, site, limit)` | Stack Exchange | **none** (300/day; key ⇒ 10k) | vote/tag-ranked Q&A; routed for library/how-to |
+| `multi_source_search(query)` | (orchestrator) | — | classify → route → RRF-fuse; returns fused candidates + per-source status |
+| `classify_query(query)` | (router) | — | category + source set + budgets; **always includes `searxng`** |
+
+**No source is load-bearing.** Every adapter returns `{ok, results, error}` (string
+errors, never exceptions), is presence-gated (skips cleanly without its token), and
+the router always routes `searxng` so the existing web layer answers even if the
+entire structured layer is down. Asserted in `smoke_sources.py` (no live services).
+
+**Source-limit volatility (why degrade-to-web is the standing hedge):** Bing Search
+API retired Aug-2025, Brave free tier removed Feb-2026, OpenAlex key-gated Feb-2026,
+and Semantic Scholar / arXiv limits change without notice (both return `429` under
+load). The keyless sources are the durable core; optional keys (`GITHUB_TOKEN`,
+`SEMANTIC_SCHOLAR_API_KEY`, `STACKEXCHANGE_KEY`) only lift limits — **no new required
+keys**. See `.env.example` → *DEEP-RESEARCH SOURCE FAN-OUT*.
+
 ## Backends (all local; each degrades gracefully)
 
 | Env var | Default | Down ⇒ |
@@ -74,6 +105,7 @@ model + reranker, but the loop is fully functional without them.
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
 MCP_RESEARCH_PORT=9110 .venv/bin/python server.py
 .venv/bin/python smoke_test.py     # A pure, B degraded, C 4 invariants, D e2e, E boot
+.venv/bin/python smoke_sources.py  # Stage 1: adapter parsing, gating, RRF, routing, degrade
 bash ../scripts/eval-research.sh    # honest quality number on a small fixed set
 ```
 
