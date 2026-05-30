@@ -82,6 +82,22 @@ def part_a() -> None:
         _fail(f"core memory curation round-trip wrong: {g}")
     _ok(f"core memory: append/replace/block + size-bound enforced ({g['chars']}/{g['limit']} chars)")
 
+    # ── backend seam (Stage 4): default embedded; neo4j is OPTIONAL + degrades ──
+    if kg_core.stats().get("backend") != "embedded":
+        _fail("default backend must be embedded")
+    # request neo4j with the driver absent -> must resolve to embedded, never raise
+    kg_core.KG_BACKEND = "neo4j"
+    kg_core._backend_resolved = None  # re-resolve under the new flag
+    resolved = kg_core._backend()
+    if resolved != "embedded":
+        _fail(f"neo4j requested but driver absent must fall back to embedded, got {resolved}")
+    # and the store still works through the fallback (no caller change)
+    if not kg_core.record_entity("decision", "stage4-seam", {"backend": "embedded-fallback"})["ok"]:
+        _fail("ops must still work after neo4j->embedded fallback")
+    kg_core.KG_BACKEND = "embedded"
+    kg_core._backend_resolved = None
+    _ok("backend seam: default=embedded; KG_BACKEND=neo4j w/o driver -> graceful embedded fallback")
+
 
 async def _mcp_check(port: int) -> None:
     from mcp import ClientSession

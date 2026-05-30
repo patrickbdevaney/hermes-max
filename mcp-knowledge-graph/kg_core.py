@@ -4,8 +4,13 @@ This is the persistence layer that beats a cold-start agent: a queryable model
 of YOUR codebase's decisions, bugs, services and structure that survives across
 all sessions. The agent writes facts at task end and reads them at task start.
 
-Deliberately NOT built: Neo4j + Graphiti + Cognee (three services). One file,
-two tables, deterministic queries.
+DEFAULT = the embedded SQLite store (one file, two tables, deterministic queries,
+zero external service). The full Neo4j+Graphiti+Cognee stack is deliberately NOT
+the default. A power user MAY opt into a Neo4j backend (KG_BACKEND=neo4j) — same
+logical schema (entities / edges / props carrying provenance, temporal validity,
+citation edges), so the swap is a backend change, not a schema or caller change.
+The neo4j driver is NOT a base dependency (lazily imported); if it or the server
+is absent, we fall back to embedded. Bootstrap needs no graph DB in the base case.
 """
 
 from __future__ import annotations
@@ -17,6 +22,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 DB_PATH = os.path.expanduser(os.environ.get("KG_DB_PATH", "~/.hermes-max/kg/graph.db"))
+
+# ── backend selection (default embedded; optional Neo4j for power users) ──────
+KG_BACKEND = os.environ.get("KG_BACKEND", "embedded").strip().lower()
+_neo4j = None            # cached kg_neo4j module once resolved
+_backend_resolved: str | None = None  # 'embedded' | 'neo4j', resolved once
 
 # ── self-editing core memory (MemGPT pattern, WIRED TO Hermes's native memory) ─
 # Discovery-first: Hermes already keeps an always-in-context, char-limited
@@ -42,6 +52,29 @@ except Exception:  # noqa: BLE001
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _backend() -> str:
+    """Resolve the active backend ONCE, never raising. 'neo4j' only if explicitly
+    requested AND the optional adapter+driver import and a live connection both
+    succeed; otherwise 'embedded' — the default, zero-dependency, always-available
+    store. A requested-but-unavailable Neo4j cleanly degrades to embedded."""
+    global _neo4j, _backend_resolved
+    if _backend_resolved is not None:
+        return _backend_resolved
+    if KG_BACKEND == "neo4j":
+        try:
+            import kg_neo4j
+            kg_neo4j.connect()  # raises if driver missing / server unreachable
+            _neo4j = kg_neo4j
+            _backend_resolved = "neo4j"
+        except Exception as e:  # noqa: BLE001 — optional backend; fall back, log once
+            otel_emit.record("kg_backend_fallback",
+                             {"requested": "neo4j", "error": str(e)[:160]})
+            _backend_resolved = "embedded"
+    else:
+        _backend_resolved = "embedded"
+    return _backend_resolved
 
 
 def _connect() -> sqlite3.Connection:
@@ -98,6 +131,8 @@ def _rel_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 def record_entity(type: str, name: str, props: dict | None = None) -> dict[str, Any]:
     """Upsert an entity. Props are merged into any existing props (shallow)."""
+    if _backend() == "neo4j":
+        return _neo4j.record_entity(type, name, props)
     props = props or {}
     con = _connect()
     try:
@@ -135,6 +170,8 @@ def _ensure_entity(con: sqlite3.Connection, name: str) -> None:
 def record_relation(a: str, rel: str, b: str, props: dict | None = None) -> dict[str, Any]:
     """Record a directed relation (a)-[rel]->(b). Missing endpoints are created
     as stub entities of type 'entity' so recording never fails on order."""
+    if _backend() == "neo4j":
+        return _neo4j.record_relation(a, rel, b, props)
     props = props or {}
     con = _connect()
     try:
@@ -171,6 +208,8 @@ def query_graph(
     - contains: substring match on entity name.
     Returns matching entities and relations.
     """
+    if _backend() == "neo4j":
+        return _neo4j.query_graph(subject, rel, obj, type, contains, limit)
     con = _connect()
     try:
         relations: list[dict[str, Any]] = []
@@ -217,6 +256,8 @@ def recall_about(name: str) -> dict[str, Any]:
     """Everything known about an entity: its record + outgoing + incoming
     relations, each annotated with the connected entity's type. This is the
     task-start recall call."""
+    if _backend() == "neo4j":
+        return _neo4j.recall_about(name)
     con = _connect()
     try:
         ent = con.execute("SELECT * FROM entities WHERE name=?", (name,)).fetchone()
@@ -249,19 +290,30 @@ def recall_about(name: str) -> dict[str, Any]:
         con.close()
 
 
+def _core_memory_chars() -> int:
+    if not os.path.isfile(HERMES_MEMORY_PATH):
+        return 0
+    try:
+        return len(open(HERMES_MEMORY_PATH).read())
+    except Exception:  # noqa: BLE001
+        return -1
+
+
 def stats() -> dict[str, Any]:
+    backend = _backend()
+    if backend == "neo4j":
+        g = _neo4j.stats()  # {entities, relations, backend, uri, database}
+        return {**g, "backend": "neo4j",
+                "core_memory_path": HERMES_MEMORY_PATH,
+                "core_memory_chars": _core_memory_chars(),
+                "core_memory_limit": CORE_MEMORY_CHAR_LIMIT}
     con = _connect()
     try:
         ne = con.execute("SELECT COUNT(*) AS n FROM entities").fetchone()["n"]
         nr = con.execute("SELECT COUNT(*) AS n FROM relations").fetchone()["n"]
-        core_chars = 0
-        if os.path.isfile(HERMES_MEMORY_PATH):
-            try:
-                core_chars = len(open(HERMES_MEMORY_PATH).read())
-            except Exception:  # noqa: BLE001
-                core_chars = -1
-        return {"entities": ne, "relations": nr, "db_path": DB_PATH,
-                "core_memory_path": HERMES_MEMORY_PATH, "core_memory_chars": core_chars,
+        return {"entities": ne, "relations": nr, "backend": "embedded", "db_path": DB_PATH,
+                "core_memory_path": HERMES_MEMORY_PATH,
+                "core_memory_chars": _core_memory_chars(),
                 "core_memory_limit": CORE_MEMORY_CHAR_LIMIT}
     finally:
         con.close()
