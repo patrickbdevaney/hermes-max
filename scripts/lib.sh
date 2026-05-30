@@ -227,3 +227,21 @@ hmx_wait_health() {
   done
   return 1
 }
+
+# ── store paths (Stage 6 snapshots) ───────────────────────────────────────────
+# The PERMANENT, COMPOUNDING stores. Resolved from .env (same vars the servers
+# read), with the documented defaults and ~ expanded.
+hmx_expand()     { echo "${1/#\~/$HOME}"; }
+hmx_rag_path()   { hmx_expand "${RAG_INDEX_PATH:-$HOME/.hermes-max/rag/index.db}"; }
+hmx_kg_path()    { hmx_expand "${KG_DB_PATH:-$HOME/.hermes-max/kg/graph.db}"; }
+hmx_corpus_dir() { hmx_expand "${RESEARCH_CORPUS_DIR:-$HOME/.hermes-max/corpus}"; }
+hmx_snap_root()  { hmx_expand "${HMX_SNAPSHOT_DIR:-$HOME/.hermes-max/snapshots}"; }
+
+# Copy a SQLite db AND its -wal/-shm sidecars (uncheckpointed state) if present.
+hmx_copy_sqlite() {
+  local src="$1" destdir="$2" f
+  mkdir -p "${destdir}"
+  for f in "${src}" "${src}-wal" "${src}-shm"; do
+    [ -f "${f}" ] && cp -p "${f}" "${destdir}/"
+  done
+}

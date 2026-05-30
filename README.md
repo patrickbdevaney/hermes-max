@@ -84,6 +84,21 @@ confirms every MCP + embed/rerank port is free — idempotent), `restart.sh
 and `status.sh` (the at-a-glance human table — distinct from `healthcheck.sh`,
 which is the pass/fail scripting check). Adding a server is still one manifest
 entry — none of these scripts need editing.
+
+**Store snapshots (Stage 6).** The RAG index + KG db + on-disk corpus are
+**permanent and compounding by default** (long-term accumulated knowledge — that
+is unchanged; with no snapshot calls the stores just keep compounding). To
+**isolate a test session** without losing the real stores:
+
+```bash
+scripts/snapshot-stores.sh baseline   # capture RAG+KG+corpus → ~/.hermes-max/snapshots/baseline
+#   …run the eval; the stores compound…
+scripts/list-snapshots.sh             # list snapshots with timestamps + sizes
+scripts/restore-stores.sh baseline    # swap baseline back (current state auto-backed-up first)
+```
+
+`restore-stores.sh` snapshots the current state to `_pre-restore-<ts>` before
+overwriting, so a restore is itself reversible.
 </details>
 
 Stop the servers with `kill $(cat ~/.hermes-max/run/*.pid)`. Logs are under
