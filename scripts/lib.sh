@@ -14,7 +14,7 @@ HMX_LOG_DIR="${HOME}/.hermes-max/logs"
 # The servers: name -> directory, port env var, default port. mcp-verify is
 # listed first so that, in smoke-test ordering, its venv exists before
 # mcp-checkpoint's smoke test boots a throwaway verify against the real boundary.
-HMX_SERVERS=(verify rag kg observability escalation checkpoint)
+HMX_SERVERS=(verify rag kg observability escalation checkpoint watchdog)
 declare -A HMX_DIR=(
   [verify]="mcp-verify"
   [rag]="mcp-codebase-rag"
@@ -22,6 +22,7 @@ declare -A HMX_DIR=(
   [observability]="mcp-observability"
   [escalation]="mcp-escalation"
   [checkpoint]="mcp-checkpoint"
+  [watchdog]="mcp-watchdog"
 )
 declare -A HMX_PORTVAR=(
   [verify]="MCP_VERIFY_PORT"
@@ -30,6 +31,7 @@ declare -A HMX_PORTVAR=(
   [observability]="MCP_OBSERVABILITY_PORT"
   [escalation]="MCP_ESCALATION_PORT"
   [checkpoint]="MCP_CHECKPOINT_PORT"
+  [watchdog]="MCP_WATCHDOG_PORT"
 )
 declare -A HMX_PORTDEF=(
   [verify]="9101"
@@ -38,6 +40,7 @@ declare -A HMX_PORTDEF=(
   [observability]="9104"
   [escalation]="9105"
   [checkpoint]="9106"
+  [watchdog]="9107"
 )
 
 hmx_load_env() {

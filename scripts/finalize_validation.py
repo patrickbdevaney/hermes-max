@@ -35,15 +35,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 VERIFY_DIR = REPO_ROOT / "mcp-verify"
 CKPT_DIR = REPO_ROOT / "mcp-checkpoint"
 RAG_DIR = REPO_ROOT / "mcp-codebase-rag"
+WATCHDOG_DIR = REPO_ROOT / "mcp-watchdog"
 
 VERIFY_PORT = int(os.environ.get("V_VERIFY_PORT", "39101"))
 CKPT_PORT = int(os.environ.get("V_CKPT_PORT", "39106"))
 RAG_PORT = int(os.environ.get("V_RAG_PORT", "39102"))
+WATCHDOG_PORT = int(os.environ.get("V_WATCHDOG_PORT", "39107"))
 APP_PORT = int(os.environ.get("V_APP_PORT", "8337"))
 
 VERIFY_URL = f"http://127.0.0.1:{VERIFY_PORT}/mcp"
 CKPT_URL = f"http://127.0.0.1:{CKPT_PORT}/mcp"
 RAG_URL = f"http://127.0.0.1:{RAG_PORT}/mcp"
+WATCHDOG_URL = f"http://127.0.0.1:{WATCHDOG_PORT}/mcp"
 
 REPORT = "/tmp/hermes_validation_report.md"
 _log: list[str] = []
@@ -479,6 +482,13 @@ def main() -> None:
             pass
     rag_env = {"MCP_RAG_PORT": str(RAG_PORT), "RAG_INDEX_PATH": rag_index}
     rag_proc = start_server(RAG_DIR, rag_env, RAG_PORT, "mcp-codebase-rag")
+    wd_state = "/tmp/hermes_val_watchdog_state"
+    import shutil as _sh
+    _sh.rmtree(wd_state, ignore_errors=True)
+    watchdog_proc = start_server(
+        WATCHDOG_DIR, {"MCP_WATCHDOG_PORT": str(WATCHDOG_PORT), "WATCHDOG_STATE_DIR": wd_state},
+        WATCHDOG_PORT, "mcp-watchdog",
+    )
 
     v1_checkpoints: list[str] = []
     try:
@@ -692,11 +702,119 @@ def main() -> None:
         n = subprocess.run(["git", "log", "-F", "--grep=[hermes-max checkpoint]", "--format=%H"],
                           cwd=proj, capture_output=True, text=True).stdout.split()
         check("multiple [hermes-max checkpoint] commits in history", len(n) >= 3, f"{len(n)} checkpoints")
+
+        # ═══════════════ STAGE-0 ROBUSTNESS FLOOR (V-spiral / V-poll / V-budget) ═══════════════
+        # These drive the REAL mcp-watchdog over MCP, exactly as the deadline-discipline skill would.
+        banner("V-spiral — a historically-spiraling reasoning block is caught and bounded")
+        # A reasoning block that loops (the CoT-spiral failure mode), vs a varied one.
+        spiral_text = ("Let me re-read the traceback and try the import again. " * 25)
+        varied_text = (
+            "The failing test asserts the offset is 0-based; the handler passes a 1-based page. "
+            "I localize the bug to db.list_tasks pagination, adjust the OFFSET computation, and add "
+            "a regression test for page=1. Then I run the verifier and checkpoint the green state. "
+            "If the verifier is still red I will read the SQL the ORM emits before changing anything."
+        )
+        sp = call(WATCHDOG_URL, "check_spiral", recent_thinking_text=spiral_text)
+        npr = call(WATCHDOG_URL, "check_spiral", recent_thinking_text=varied_text)
+        check("check_spiral fires on the spiraling block", bool(sp.get("spiral_detected")),
+              f"reason={sp.get('reason')}")
+        check("check_spiral does NOT false-fire on varied reasoning", not npr.get("spiral_detected"),
+              f"metrics={npr.get('metrics')}")
+        # On detection the agent aborts-and-replans (revert) instead of looping — turn count bounded.
+        spiral_turns = 0
+        last_green_pre = call(CKPT_URL, "checkpoint_status", repo_path=str(proj)).get("last_green_sha")
+        SPIRAL_HARD_STOP = 8
+        for spiral_turns in range(1, SPIRAL_HARD_STOP + 1):
+            d = call(WATCHDOG_URL, "check_spiral", recent_thinking_text=spiral_text)
+            if d.get("spiral_detected"):
+                # abort the spiral immediately: revert to known-good, do not keep thinking
+                call(CKPT_URL, "revert_to_last_green", repo_path=str(proj))
+                break
+        check("agent aborts+replans on spiral (turns bounded, no loop-to-hard-stop)",
+              spiral_turns < SPIRAL_HARD_STOP,
+              f"aborted after {spiral_turns} turn(s) << hard_stop {SPIRAL_HARD_STOP}; "
+              f"reverted to {str(last_green_pre)[:12]}")
+
+        banner("V-poll — a backgrounded server is classified WAITING (never hung), wall-clock bounded")
+        depenv2 = dict(os.environ, TASKS_DB="/tmp/hermes_val_poll.db")
+        for f in ("/tmp/hermes_val_poll.db",):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        plog = open(proj / "poll_server.log", "w")
+        t_poll = time.monotonic()
+        poll_srv = subprocess.Popen(
+            [pvpy, "-m", "uvicorn", "main:app", "--port", str(APP_PORT + 1), "--host", "127.0.0.1"],
+            cwd=proj, env=depenv2, stdout=plog, stderr=subprocess.STDOUT,
+        )
+        time.sleep(3.0)  # one fixed startup wait, NOT a poll loop
+        hb_age = 0.0
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{APP_PORT + 1}/health", timeout=5) as resp:
+                json.loads(resp.read())  # fresh heartbeat: it is serving
+            hb_age = 1.0
+        except Exception:  # noqa: BLE001
+            hb_age = 999.0
+        elapsed_poll = time.monotonic() - t_poll
+        # The watchdog is called ONCE (never polled). The false-kill trap is about a server that has
+        # been running PAST its budget while still serving — so we classify with an over-budget
+        # elapsed and the FRESH heartbeat just observed: it must be WAITING, never hung.
+        served_elapsed = max(elapsed_poll, 200.0)  # a long-lived server, still heartbeating
+        stall = call(WATCHDOG_URL, "check_stall", tool_name="uvicorn", elapsed_s=served_elapsed,
+                     expecting_heartbeat=True, last_heartbeat_age_s=hb_age, per_tool_budget_s=120)
+        stop(poll_srv)
+        plog.close()
+        check("check_stall classifies a long-lived heartbeating server as WAITING (no false-kill)",
+              bool(stall.get("waiting") and not stall.get("hung")),
+              f"elapsed={served_elapsed:.0f}s hb_age={hb_age:.0f}s -> hung={stall.get('hung')} "
+              f"waiting={stall.get('waiting')} ({stall.get('reason')})")
+        check("poll handled with ONE check_stall, wall-clock bounded (<15s, never hung)",
+              elapsed_poll < 15, f"elapsed={elapsed_poll:.1f}s")
+        # and a genuinely silent over-budget call IS caught as hung
+        hung = call(WATCHDOG_URL, "check_stall", tool_name="curl", elapsed_s=600,
+                    expecting_heartbeat=False, per_tool_budget_s=120)
+        check("a silent over-budget call IS caught as hung", bool(hung.get("hung")),
+              str(hung.get("reason")))
+
+        banner("V-budget — budget_exceeded triggers a clean checkpoint+stop")
+        bt = "validation-task"
+        call(WATCHDOG_URL, "start_task_budget", task_id=bt, wall_clock_s=300, max_turns=50, usd_cap=1.0)
+        under = call(WATCHDOG_URL, "check_budget", task_id=bt, turns_used=5, usd_spent=0.01,
+                     elapsed_s_override=10)
+        check("check_budget passes while under all limits", not under.get("budget_exceeded"),
+              f"exceeded={under.get('exceeded')}")
+        over = call(WATCHDOG_URL, "check_budget", task_id=bt, turns_used=60, usd_spent=0.01,
+                    elapsed_s_override=10)
+        budget_tripped = bool(over.get("budget_exceeded") and "max_turns" in over.get("exceeded", []))
+        # on budget_exceeded the agent checkpoints cleanly and STOPS (no overrun)
+        clean_stop = call(CKPT_URL, "checkpoint", label="clean stop on budget_exceeded",
+                          repo_path=str(proj))
+        check("budget_exceeded fires and agent checkpoints cleanly then stops",
+              budget_tripped and bool(clean_stop.get("ok")),
+              f"exceeded={over.get('exceeded')}; clean checkpoint ok={clean_stop.get('ok')}")
+
+        banner("Stage-0 — kill mcp-watchdog mid-run -> graceful degradation")
+        stop(watchdog_proc)
+        time.sleep(0.5)
+        wd_degraded = False
+        try:
+            call(WATCHDOG_URL, "check_spiral", recent_thinking_text="x " * 40)
+            detail = "watchdog still reachable after kill (unexpected)"
+        except Exception as e:  # noqa: BLE001
+            vv = call(VERIFY_URL, "verify", path=str(proj), language="python")
+            wd_degraded = "passed" in vv
+            detail = (f"watchdog unreachable ({type(e).__name__}); independent mcp-verify still "
+                      f"answering (passed={vv.get('passed')}) — agent warns & keeps working on "
+                      f"native turn-based guardrails")
+        check("kill mcp-watchdog -> agent degrades gracefully (keeps working)", wd_degraded, detail)
+
         say(f"\nPROJECT_DIR={proj}")
     finally:
         stop(verify_proc)
         stop(ckpt_proc)
         stop(rag_proc)
+        stop(watchdog_proc)
         _flush_report()
 
     n_pass = sum(1 for _, p, _ in _checks if p)

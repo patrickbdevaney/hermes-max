@@ -22,9 +22,16 @@ import concurrent.futures
 import json
 import os
 import subprocess
+import time
+from pathlib import Path
 from typing import Any
 
 CHECKPOINT_MARKER = "[hermes-max checkpoint]"
+
+# Agent-state snapshots (Stage 0.5): the REASONING context that git can't hold —
+# the live PLAN.md and decision notes — so a revert restores the plan too, not
+# only the tree. Kept deliberately small (text only) under ~/.hermes-max/state/.
+STATE_DIR = Path(os.path.expanduser(os.environ.get("CHECKPOINT_STATE_DIR", "~/.hermes-max/state")))
 
 VERIFY_PORT = int(os.environ.get("MCP_VERIFY_PORT", "9101"))
 VERIFY_HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
@@ -289,6 +296,84 @@ def list_checkpoints(n: int = 10, repo_path: str | None = None) -> dict:
         sha, when, subj = parts
         checkpoints.append({"sha": sha, "time": when, "label": subj.replace(CHECKPOINT_MARKER, "").strip()})
     return {"ok": True, "count": len(checkpoints), "checkpoints": checkpoints}
+
+
+# ── agent-state snapshot/restore (Stage 0.5) ─────────────────────────────────
+def _state_path(task_id: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in (task_id or "default"))
+    return STATE_DIR / f"{safe}.json"
+
+
+def snapshot_state(task_id: str, plan: str = "", notes: str = "",
+                   repo_path: str | None = None) -> dict:
+    """Snapshot the agent's reasoning context (PLAN.md text + decision notes) so
+    that revert_to_last_green can restore the PLAN, not only the git tree.
+
+    plan/notes are stored verbatim (text only — small). If plan is empty and the
+    repo has a PLAN.md, its contents are captured automatically. Returns the
+    snapshot path. Never raises on a write error — returns ok=False instead.
+    """
+    repo = _resolve_repo(repo_path)
+    if not plan:
+        plan_md = os.path.join(repo, "PLAN.md")
+        if os.path.isfile(plan_md):
+            try:
+                plan = Path(plan_md).read_text()[:200_000]
+            except OSError:
+                plan = ""
+    snap = {
+        "task_id": task_id,
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "repo": repo,
+        "last_green_sha": _last_green_sha(repo) if _is_git_repo(repo) else "",
+        "plan": plan or "",
+        "notes": notes or "",
+    }
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        p = _state_path(task_id)
+        tmp = str(p) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(snap, f, indent=2)
+        os.replace(tmp, p)
+    except OSError as e:
+        return {"ok": False, "error": f"could not write state snapshot: {e}"}
+    return {"ok": True, "task_id": task_id, "path": str(p), "last_green_sha": snap["last_green_sha"],
+            "plan_chars": len(snap["plan"]), "notes_chars": len(snap["notes"])}
+
+
+def restore_state(task_id: str, repo_path: str | None = None, write_plan: bool = True) -> dict:
+    """Restore a previously snapshotted reasoning context for task_id.
+
+    Returns the stored plan + notes so the agent can re-ground after a reset.
+    If write_plan is True and a repo PLAN.md path is resolvable, the plan text is
+    written back to PLAN.md so the file source-of-truth matches the snapshot.
+    """
+    p = _state_path(task_id)
+    if not p.exists():
+        return {"ok": False, "error": f"no state snapshot for task '{task_id}'"}
+    try:
+        snap = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        return {"ok": False, "error": f"could not read state snapshot: {e}"}
+    wrote_plan = False
+    if write_plan and snap.get("plan"):
+        repo = _resolve_repo(repo_path) if repo_path else snap.get("repo")
+        if repo and os.path.isdir(repo) and not _is_protected(repo):
+            try:
+                Path(os.path.join(repo, "PLAN.md")).write_text(snap["plan"])
+                wrote_plan = True
+            except OSError:
+                wrote_plan = False
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "saved_at": snap.get("saved_at"),
+        "last_green_sha": snap.get("last_green_sha"),
+        "plan": snap.get("plan", ""),
+        "notes": snap.get("notes", ""),
+        "plan_restored_to_file": wrote_plan,
+    }
 
 
 def checkpoint_status(repo_path: str | None = None) -> dict:

@@ -107,6 +107,7 @@ def part_a() -> None:
     # Point checkpoint_core at our throwaway verify server BEFORE importing it.
     os.environ["MCP_VERIFY_PORT"] = str(VERIFY_PORT)
     os.environ["MCP_BIND_HOST"] = "127.0.0.1"
+    os.environ["CHECKPOINT_STATE_DIR"] = tempfile.mkdtemp(prefix="checkpoint-state-")
     import checkpoint_core
 
     verify_proc = _start_verify()
@@ -163,6 +164,26 @@ def part_a() -> None:
         if not (st.get("ok") and st.get("last_green_sha") == green_sha and st.get("dirty") is False):
             _fail(f"status after revert unexpected: {st}")
         _ok(f"status clean at last green: {st['last_green_label']}")
+
+        # 6. agent-state snapshot/restore round-trip (Stage 0.5).
+        plan_text = "# PLAN\n- [x] add()\n- [ ] subtract()\n"
+        (Path(tmpdir) / "PLAN.md").write_text(plan_text)
+        snap = checkpoint_core.snapshot_state("smoke-task", notes="chose SQLite over JSON",
+                                              repo_path=tmpdir)
+        if not (snap.get("ok") and snap.get("plan_chars") == len(plan_text)):
+            _fail(f"snapshot_state did not capture PLAN.md: {snap}")
+        # clobber the plan to prove restore brings it back
+        (Path(tmpdir) / "PLAN.md").write_text("CORRUPTED")
+        rs = checkpoint_core.restore_state("smoke-task", repo_path=tmpdir)
+        if not (rs.get("ok") and rs.get("plan") == plan_text and rs.get("notes") == "chose SQLite over JSON"):
+            _fail(f"restore_state did not round-trip plan+notes: {rs}")
+        if (Path(tmpdir) / "PLAN.md").read_text() != plan_text or not rs.get("plan_restored_to_file"):
+            _fail(f"restore_state did not rewrite PLAN.md: {rs}")
+        _ok("snapshot_state/restore_state round-trip (plan + notes restored, PLAN.md rewritten)")
+        rs_missing = checkpoint_core.restore_state("no-such-task")
+        if rs_missing.get("ok"):
+            _fail(f"restore_state on missing task should error cleanly: {rs_missing}")
+        _ok("restore_state on missing task returns a clean error (no crash)")
     finally:
         verify_proc.terminate()
         try:
@@ -198,7 +219,8 @@ async def _mcp_check(port: int) -> None:
         async with ClientSession(read, write) as session:
             await session.initialize()
             names = {t.name for t in (await session.list_tools()).tools}
-            expected = {"checkpoint", "revert_to_last_green", "list_checkpoints", "checkpoint_status"}
+            expected = {"checkpoint", "revert_to_last_green", "list_checkpoints", "checkpoint_status",
+                        "snapshot_state", "restore_state"}
             if not expected.issubset(names):
                 _fail(f"missing tools; want {expected}, got {names}")
             _ok(f"tools advertised: {sorted(names)}")

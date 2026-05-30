@@ -89,5 +89,23 @@ def checkpoint_status(repo_path: str | None = None) -> dict:
     return checkpoint_core.checkpoint_status(repo_path)
 
 
+@mcp.tool()
+def snapshot_state(task_id: str, plan: str = "", notes: str = "",
+                   repo_path: str | None = None) -> dict:
+    """Snapshot the agent's REASONING context (PLAN.md text + decision notes)
+    alongside the git checkpoint, so a later revert can restore the plan — not
+    just the tree. If plan is empty, the repo's PLAN.md is captured. Pair this
+    with checkpoint() after a green subtask so a stuck-reset is lossless."""
+    return checkpoint_core.snapshot_state(task_id, plan, notes, repo_path)
+
+
+@mcp.tool()
+def restore_state(task_id: str, repo_path: str | None = None, write_plan: bool = True) -> dict:
+    """Restore the snapshotted reasoning context (plan + notes) for a task after
+    a revert/reset, so the agent re-grounds on the real PLAN instead of a lossy
+    summary. With write_plan=True, PLAN.md is rewritten to match the snapshot."""
+    return checkpoint_core.restore_state(task_id, repo_path, write_plan)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
