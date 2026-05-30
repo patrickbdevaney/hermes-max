@@ -126,16 +126,20 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "billing_region": "US", "trains_on_data": True,
         "price": {"steer": {"in": 0.0, "out": 0.0}},
     },
-    # ── the escalate rung — Opus (no key for THIS operator => role OFF) ───────
+    # ── the FRONTIER escalate rung — Opus 4.8 (eligible ONLY in --frontier mode + ANTHROPIC_API_KEY) ─
     "anthropic": {  # OpenAI-compat layer at /v1/chat/completions.
         "base_url": "https://api.anthropic.com/v1",
         "env_key_name": "ANTHROPIC_API_KEY",
         "openai_compatible": True,
-        "models": {"synth": "claude-opus-4-8", "escalate": "claude-opus-4-8"},
-        "max_ctx": 200_000, "rpm": None, "rpd": None, "tpd": None,
+        # Opus is the FRONTIER escalate rung ONLY — deliberately NOT a synth rung,
+        # so it can never fire as a synth fallthrough; the three-gated frontier
+        # flow (frontier_core) is the only path to it.
+        "models": {"escalate": "claude-opus-4-8"},
+        "max_ctx": 1_000_000, "rpm": None, "rpd": None, "tpd": None,
         "billing_region": "US", "trains_on_data": False,
-        "price": {"synth": {"in": 15.0, "out": 75.0},
-                  "escalate": {"in": 15.0, "out": 75.0}},
+        # Opus 4.8 REGULAR pricing (verified May 2026): $5/M in, $25/M out. (Fast
+        # mode $10/$50 is intentionally NOT used — cost, not latency, is the bound.)
+        "price": {"escalate": {"in": 5.0, "out": 25.0}},
     },
 }
 
@@ -146,6 +150,10 @@ PROVIDERS: dict[str, dict[str, Any]] = {
 # `free` mode). Derived once in load_config() so adding a provider needs only its
 # id here if it's free; everything else defaults to "paid".
 FREE_TIER_PROVIDERS: set[str] = {"cerebras", "groq", "gemini"}
+# FRONTIER-tier providers are eligible ONLY in CONDUCTOR_MODE=frontier (never in
+# `full`). Opus 4.8 (anthropic) is the only one: this is what keeps the expensive
+# rung opt-in by `--frontier` and never reachable via `--full` or a synth fallthrough.
+FRONTIER_TIER_PROVIDERS: set[str] = {"anthropic"}
 
 # ── DEFAULT ROLE CHAINS (ordered; first PRESENT rung wins, fall through) ──────
 #   synth: US-first, then opt-in non-US, then Opus at the top of the ladder.
@@ -154,7 +162,9 @@ FREE_TIER_PROVIDERS: set[str] = {"cerebras", "groq", "gemini"}
 #          operator's own pricing). Cerebras/Groq/Gemini are deprioritized free
 #          fallbacks for when V4-Flash is absent/over-budget.
 DEFAULT_ROLE_CHAINS: dict[str, list[str]] = {
-    "synth": ["deepinfra", "fireworks", "together", "deepseek", "moonshot", "anthropic"],
+    # synth deliberately does NOT include anthropic — Opus is escalation-only, via
+    # the three-gated frontier flow, never a synth fallthrough.
+    "synth": ["deepinfra", "fireworks", "together", "deepseek", "moonshot"],
     "steer": ["deepinfra", "cerebras", "groq", "gemini"],
     "escalate": ["anthropic"],
 }
@@ -262,7 +272,9 @@ def load_config() -> dict[str, Any]:
     # deep-copy providers so a model override doesn't mutate module state, and
     # tag each with its spend tier (free/paid) for the CONDUCTOR_MODE cap.
     providers = {pid: {**p, "models": dict(p["models"]),
-                       "tier": "free" if pid in FREE_TIER_PROVIDERS else "paid"}
+                       "tier": ("free" if pid in FREE_TIER_PROVIDERS
+                                else "frontier" if pid in FRONTIER_TIER_PROVIDERS
+                                else "paid")}
                  for pid, p in PROVIDERS.items()}
 
     overrode = False

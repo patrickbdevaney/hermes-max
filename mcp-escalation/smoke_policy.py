@@ -73,13 +73,20 @@ def main() -> None:
         _fail(f"no Opus key present -> must NOT route to escalate: {pmet}")
     _ok(f"Opus gate: 1 fail->closed; 2 fails->open but no key -> tier={pmet['tier']} (degraded)")
 
-    # 4b. Opus gate met AND key present -> escalate
+    # 4b. Opus gate met AND key present AND --frontier mode -> escalate. (Opus is the
+    # FRONTIER tier now: a key alone in --full keeps escalate OFF; --frontier is required.)
     os.environ["ANTHROPIC_API_KEY"] = "x"
+    pfull = cp.plan_invocation(HARD, verifiable=False, synth_failures=2)
+    if pfull["tier"] == "escalate":
+        _fail(f"key present but mode=full must NOT route to escalate (Opus is frontier-only): {pfull}")
+    _ok("gate met + key but mode=full -> escalate OFF (degraded) — Opus stays frontier-gated")
+    os.environ["CONDUCTOR_MODE"] = "frontier"
     pop = cp.plan_invocation(HARD, verifiable=False, synth_failures=2)
     if pop["tier"] != "escalate":
-        _fail(f"gate met + Opus key -> escalate: {pop}")
-    _ok("Opus gate met + key present -> tier=escalate")
+        _fail(f"gate met + key + --frontier -> escalate: {pop}")
+    _ok("Opus gate met + key present + --frontier mode -> tier=escalate")
     os.environ.pop("ANTHROPIC_API_KEY", None)
+    os.environ.pop("CONDUCTOR_MODE", None)
 
     # 4c. opinions disagree on high blast also opens the gate
     pdis = cp.plan_invocation(HARD, verifiable=False, opinions_disagree=True, blast_radius="high")

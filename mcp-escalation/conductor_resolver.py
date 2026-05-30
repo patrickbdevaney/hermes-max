@@ -16,15 +16,18 @@ from typing import Any
 
 # ── CONDUCTOR_MODE — a HARD spend-tier cap, read from the env dict that is ─────
 # ALREADY passed to every resolver call (so no call-site threading is needed).
-#   local -> use NO cloud provider at all (the driver runs fully local/sovereign)
-#   free  -> permit only free-tier providers (Cerebras/Groq/Gemini)
-#   full  -> permit every provider (the default; presence-gating alone governs)
+#   local    -> use NO cloud provider at all (the driver runs fully local/sovereign)
+#   free     -> permit only free-tier providers (Cerebras/Groq/Gemini)
+#   full     -> permit free + paid (DeepSeek synth/steer) — the DEFAULT — but NOT
+#               the frontier tier, so Opus is never reachable in --full
+#   frontier -> permit free + paid + the frontier tier (Opus 4.8) — opt-in only
 # A provider is permitted iff its `tier` is in the mode's allowed set AND its key
 # is present. Unknown/unset mode -> "full" (backward-compatible: pre-mode behaviour).
 MODE_ALLOWED_TIERS: dict[str, set[str]] = {
     "local": set(),
     "free": {"free"},
     "full": {"free", "paid"},
+    "frontier": {"free", "paid", "frontier"},
 }
 
 

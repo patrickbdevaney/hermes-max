@@ -391,6 +391,49 @@ def run_role(role: str, messages: list[dict] | None = None, *, prompt: str | Non
                       "cap-blocked -> the driver proceeds local-only"}
 
 
+# ── single-rung primitive (used by the frontier flow; caps enforced by caller) ─
+def call_one(provider_id: str, role: str, messages: list[dict] | None = None, *,
+             prompt: str | None = None, max_tokens: int | None = None,
+             record: bool = True) -> dict[str, Any]:
+    """Call ONE specific provider rung directly — no chain walk, no general USD cap
+    (the caller, e.g. the three-gated frontier flow, enforces its OWN cap). Still
+    presence-gated: returns {ok:False, proceed_local:True} if the provider is
+    unknown, its key is absent, or it has no model for the role. Records the cost
+    to the shared ledger when record=True so total spend stays visible to hm cost.
+    Never raises."""
+    if messages is None:
+        messages = [{"role": "user", "content": prompt or ""}]
+    cfg = reg.load_config()
+    prov = cfg["providers"].get(provider_id)
+    if not prov:
+        return {"ok": False, "proceed_local": True, "reason": f"unknown provider '{provider_id}'"}
+    key = os.environ.get(prov.get("env_key_name", ""), "").strip()
+    if not key:
+        return {"ok": False, "proceed_local": True,
+                "reason": f"{provider_id} key ({prov.get('env_key_name')}) absent"}
+    model = _model_for(prov, provider_id, role)
+    if not model:
+        return {"ok": False, "proceed_local": True,
+                "reason": f"{provider_id} has no model for role '{role}'"}
+    mt = max_tokens or MAX_TOKENS
+    try:
+        data, hdrs = _post_chat(prov["base_url"], key, model, messages, mt)
+        content = data.get("choices", [{}])[0].get("message", {}).get("content")
+        usage = data.get("usage", {}) or {}
+        if content is None:
+            raise ValueError("empty content")
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "proceed_local": True, "provider": provider_id,
+                "reason": f"{type(e).__name__}: {str(e)[:120]}"}
+    free = _is_free(prov, role)
+    cost = 0.0 if free else _cost(prov, role, usage)
+    if record and not free:
+        _record_cost(provider_id, role, cost)
+    _trace("call_one", provider=provider_id, role=role, model=model, cost_usd=round(cost, 6))
+    return {"ok": True, "provider": provider_id, "model": model, "content": content,
+            "usage": usage, "cost_usd": round(cost, 6), "free": free}
+
+
 # ── UNORDERED parallel_draft FAN-OUT (RPM/RPD-budgeted, concurrent) ───────────
 def _draft_one(entry: dict[str, str], prov: dict[str, Any], messages: list[dict],
                mt: int, env: dict[str, str]) -> dict[str, Any]:

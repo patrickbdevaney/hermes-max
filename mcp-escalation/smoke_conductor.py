@@ -76,8 +76,18 @@ def part_a() -> None:
     several = rv.resolve_chain(chain, providers,
                               {"DEEPINFRA_API_KEY": "x", "TOGETHER_API_KEY": "y",
                                "ANTHROPIC_API_KEY": "z"})
-    assert several == ["deepinfra", "together", "anthropic"], several  # order preserved
+    # anthropic is the FRONTIER escalate rung — deliberately NOT in the synth chain
+    # and not eligible in the default (full) mode, so it never resolves here.
+    assert several == ["deepinfra", "together"], several  # order preserved; no Opus in synth
     _ok(f"presence resolver: 0->[], 1->{one}, several->{several} (order preserved)")
+    # the frontier escalate rung resolves ONLY in --frontier mode + key (mode-gating
+    # needs the spend-TIER tag that load_config() attaches to each provider):
+    esc = reg.DEFAULT_ROLE_CHAINS["escalate"]
+    tagged = reg.load_config()["providers"]
+    assert rv.resolve_chain(esc, tagged, {"ANTHROPIC_API_KEY": "z"}) == [], "Opus must be OFF in full mode"
+    assert rv.resolve_chain(esc, tagged,
+                            {"ANTHROPIC_API_KEY": "z", "CONDUCTOR_MODE": "frontier"}) == ["anthropic"]
+    _ok("frontier escalate rung: OFF in full mode, ON only in --frontier + key")
 
     # blank/whitespace key is treated as ABSENT
     assert rv.resolve_chain(chain, providers, {"DEEPINFRA_API_KEY": "  "}) == []

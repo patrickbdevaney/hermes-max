@@ -22,6 +22,7 @@ import conductor_core
 import conductor_policy
 import directive_verify as dv
 import escalation_core
+import frontier_core
 
 PORT = int(os.environ.get("MCP_ESCALATION_PORT", "9105"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
@@ -177,6 +178,41 @@ def conductor_cost_report() -> dict:
     """Per-day + per-month conductor spend, broken down by provider and by role,
     plus call count — the honest cost ledger feeding the Stage-5 report."""
     return conductor_core.cost_report()
+
+
+# ── frontier tier — SPARING Opus 4.8 escalation (--frontier mode + key only) ──
+@mcp.tool()
+@_threaded
+def frontier_escalate(task: str, signals: dict | None = None, context: dict | None = None,
+                      repo: str | None = None, task_id: str | None = None,
+                      synth_failures: int = 0, opinions_disagree: bool = False,
+                      blast_radius: str | None = None,
+                      compressed_brief: str | None = None) -> dict:
+    """Escalate a genuinely FRONTIER-NOVEL, twice-failed subtask to Opus 4.8 via
+    COMPRESS-THEN-REASON, behind THREE gates (ALL must trip): (1) CONDUCTOR_MODE=
+    frontier + ANTHROPIC_API_KEY present; (2) the classifier flags the subtask
+    frontier-novel (blue-ocean — pass signals with novelty='high' and
+    blue_ocean=true / no_reference_impl=true; merely-HARD stays at V4-Pro); (3)
+    V4-Pro synth has ALREADY failed verify twice (pass synth_failures>=2) OR two
+    opinions disagree on a high-blast change (opinions_disagree=true). When all
+    trip: V4-Pro compresses the situation into a dense ~12K brief, Opus reasons on
+    it (~$0.18), the plan is written to FRONTIER_PLAN.md + RAG/KG with provenance
+    and passed through directive_verify (advisory). A hard frontier USD cap blocks
+    + falls back to V4-Pro. Returns opus_invoked + which gate failed if not. Never
+    raises; degrades to V4-Pro/local. Opus is RARE by design — keep it that way."""
+    return frontier_core.frontier_escalate(
+        task, signals=signals, context=context, repo=repo, task_id=task_id,
+        synth_failures=synth_failures, opinions_disagree=opinions_disagree,
+        blast_radius=blast_radius, compressed_brief=compressed_brief)
+
+
+@mcp.tool()
+@_threaded
+def frontier_status() -> dict:
+    """Frontier-tier state: active mode, whether Opus is eligible (frontier mode +
+    key), month-to-date Opus call count + spend vs the daily/monthly USD cap and
+    the sparing target (≤15 calls/mo), and whether the cap is blocking."""
+    return frontier_core.frontier_status()
 
 
 # ── brief-assembler (Stage 2) ─────────────────────────────────────────────────
