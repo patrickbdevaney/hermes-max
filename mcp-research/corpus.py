@@ -53,9 +53,26 @@ ESCALATION_MCP_URL = os.environ.get("ESCALATION_MCP_URL", "http://127.0.0.1:9107
 RAG_MCP_URL = rc.RAG_MCP_URL
 # Flag: off (default) => distillation is fully local/sovereign. On => DENSE
 # technical sources may be distilled by the conductor's cheap-cloud steer role.
+#
+# WHY LOCAL IS THE DEFAULT (Stage 7b): per-source distillation is the highest-VOLUME
+# step in the research cascade. Gating it on a rate-limited cloud tier (e.g. Groq's
+# 6-8K TPM) would force serialization + 429 backoffs — a real ARTIFICIAL bottleneck
+# on exactly the bulkiest step. The local model is already running, has no rate
+# limit, and handles bulk summarization fine. Cloud distillation is therefore an
+# explicit opt-in ONLY, and it is rate-limit-bound (warned below). Keep the fast
+# cloud tiers for slop-drafting small verifiable tasks, not the bulk cascade.
 CLOUD_DISTILL = os.environ.get("RESEARCH_CLOUD_DISTILL", "false").strip().lower() in ("1", "true", "yes")
 # Source types whose content is dense enough to warrant cloud distillation.
 DENSE_SOURCE_TYPES = {"arxiv", "semantic_scholar", "eip_erc", "ietf_rfc", "audit"}
+
+if CLOUD_DISTILL:
+    # One-time warning at import: the operator opted into the rate-limit-bound path.
+    otel_emit.record("research_cloud_distill_enabled", {
+        "warning": "RESEARCH_CLOUD_DISTILL=on — dense-source distillation routes to a "
+                   "RATE-LIMITED cloud tier; high volume may serialize on 429 backoffs "
+                   "(an artificial bottleneck). Local distillation is the default for a "
+                   "reason.", "dense_source_types": sorted(DENSE_SOURCE_TYPES)},
+        status="error")
 
 
 def _now_iso() -> str:

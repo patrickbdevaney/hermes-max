@@ -465,6 +465,38 @@ failure never breaks a tool). At task end, a per-tool summary table:
 scripts/run-summary.sh  # count · total time · failures · fallbacks · est-vs-actual, per tool
 ```
 
+### tqdm progress + the bottleneck split (Stage 7)
+
+`deep_research` and `index_repo` emit **tqdm-style empirical progress** — current
+item N/total, per-item timing, a running ETA — so you can tell instantly whether
+it's moving or stuck on one slow item:
+
+```
+⟳ index_repo [840/1240] 67% | 52s elapsed · ETA ~24s | 3 skipped (unparseable)
+⟳ deep_research [4/12] 33% | arxiv.org/abs/2401.x | crawl 3.2s · distil 8.1s | elapsed 47s · ETA ~94s
+```
+
+Every per-task summary also prints the **bottleneck timing split** — where the
+wall-clock actually went — so you can SEE whether the advanced features earn their
+latency:
+
+```
+bottleneck split: inference 4m12s (58%) · tool-work 2m30s (35%) · artificial 0m31s (7%)
+```
+
+- **inference** — local model thinking (irreducible) · **tool-work** — real tool
+  execution (crawl, tests, indexing) · **artificial** — rate-limit waits, 429/5xx
+  backoffs, redundant sequential calls, MCP overhead. A large `artificial` fraction
+  means a feature is wasting the agent's time — the summary names which.
+- Research **distillation defaults to the local model** (the highest-volume step):
+  gating it on a rate-limited cloud tier would force 429 backoffs — exactly the
+  artificial bottleneck above. Cloud distill is opt-in (`RESEARCH_CLOUD_DISTILL`),
+  warned as rate-limit-bound.
+
+```bash
+scripts/bottleneck-eval.sh   # run the SAME task FULL vs BARE; print both splits → bottleneck_report.md
+```
+
 ## Validate the whole system — dry-run & rate-limit check
 
 ```bash

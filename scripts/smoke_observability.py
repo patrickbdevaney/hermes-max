@@ -61,7 +61,7 @@ def main() -> None:
             _fail(f"tool_start pretty line missing {needle!r}: {p!r}")
     if '"kind": "start"' not in j or '"kind": "end"' not in j:
         _fail(f"jsonl missing start/end records: {j!r}")
-    if "⟳ index_repo heartbeat" not in p or "400/1240" not in p:
+    if "⟳ index_repo" not in p or "400/1240" not in p:
         _fail(f"verbose heartbeat not shown: {p!r}")
     _ok("tool_start/heartbeat/tool_ok write both sinks with input/est/progress")
 
@@ -113,6 +113,43 @@ def main() -> None:
         _fail("summary should list decisions")
     _ok("run_summary aggregates calls/time/fails and lists decisions")
     print(table)
+
+    # 5b. Stage 7c — bottleneck timing split + artificial detection
+    os.environ["HERMES_MAX_VERBOSITY"] = "verbose"
+    jsonl.write_text("")  # isolate this sub-test's split from earlier events
+    pretty.write_text("")
+    livelog.tool_ok("synthesize", secs=4.0)              # inference bucket
+    livelog.tool_ok("index_repo", secs=2.0)              # tool-work bucket
+    livelog.tool_fail("groq", reason="429 rate limit — backing off", secs=3.0,
+                      fallback="deepinfra")               # artificial bucket
+    import run_summary as rs2
+    importlib.reload(rs2)
+    if rs2.classify_bucket("synthesize") != "inference":
+        _fail("synthesize should classify as inference")
+    if rs2.classify_bucket("index_repo") != "tool-work":
+        _fail("index_repo should classify as tool-work")
+    if rs2.classify_bucket("groq", "429 rate limit") != "artificial":
+        _fail("a 429 reason should classify as artificial")
+    agg2 = rs2.aggregate(rs2.load(jsonl))
+    b = agg2["buckets"]
+    if not (b["inference"] >= 4 and b["tool-work"] >= 2 and b["artificial"] >= 3):
+        _fail(f"bucket split wrong: {b}")
+    tbl2 = rs2.fmt(agg2)
+    if "bottleneck split" not in tbl2 or "artificial" not in tbl2:
+        _fail("summary missing bottleneck split")
+    if "artificial dominated by" not in tbl2:
+        _fail(f"summary should name the dominant artificial cause: {tbl2}")
+    _ok(f"3-bucket split: inference {b['inference']:.0f}s · tool-work {b['tool-work']:.0f}s · "
+        f"artificial {b['artificial']:.0f}s, dominant cause named")
+
+    # 5c. Stage 7a — tqdm-style progress (item N/total, per-item, ETA)
+    before = len(_read(pretty))
+    livelog.heartbeat("deep_research", done=4, total=12, elapsed_s=47,
+                      item="arxiv.org/abs/2401.x", per_item="crawl 3.2s · distil 8.1s")
+    pln = _read(pretty)[before:]
+    if "[4/12]" not in pln or "ETA ~" not in pln or "arxiv.org" not in pln:
+        _fail(f"tqdm progress line missing item/ETA: {pln!r}")
+    _ok(f"tqdm progress: {pln.strip().split('] ',1)[-1]}")
 
     # 6. logging failure never raises (unwritable dir)
     os.environ["HERMES_MAX_LOG_DIR"] = "/proc/nonexistent/cannot/write"

@@ -41,8 +41,16 @@ for p in ("lib", "scripts", "mcp-watchdog", "mcp-knowledge-graph", "mcp-checkpoi
 
 # Isolated, throwaway stores so the dry-run never touches the real compounding ones.
 _TMP = tempfile.mkdtemp(prefix="hmx-dryrun-")
-LOG_DIR = os.path.join(_TMP, "logs")
+# Honor an externally-provided live-log dir (e.g. bottleneck-eval per-run dir); else
+# use a fresh temp. Truncate it so this run's summary reflects only this run.
+LOG_DIR = os.environ.get("HERMES_MAX_LOG_DIR") or os.path.join(_TMP, "logs")
 os.environ["HERMES_MAX_LOG_DIR"] = LOG_DIR
+os.makedirs(LOG_DIR, exist_ok=True)
+for _f in ("live.jsonl", "live.log"):
+    try:
+        open(os.path.join(LOG_DIR, _f), "w").close()
+    except Exception:  # noqa: BLE001
+        pass
 os.environ["HERMES_MAX_VERBOSITY"] = os.environ.get("HERMES_MAX_VERBOSITY", "verbose")
 os.environ["KG_DB_PATH"] = os.path.join(_TMP, "kg.db")
 os.environ.setdefault("WATCHDOG_STATE_DIR", os.path.join(_TMP, "wd"))
@@ -147,6 +155,16 @@ def main() -> None:
         _ok(f"RAG query → {syms[:5]}")
     else:
         _bad(f"RAG query missed fibonacci: {syms}")
+
+    # BARE mode (bottleneck-eval): stop after the minimal index+query path so the
+    # full-vs-bare comparison has a genuinely lighter baseline.
+    bare = bool(os.environ.get("HMX_BENCH_BARE"))
+    if bare:
+        print()
+        agg = run_summary.aggregate(run_summary.load(os.path.join(LOG_DIR, "live.jsonl")))
+        print(run_summary.fmt(agg))
+        print("\n(bare path: index + query only)")
+        sys.exit(1 if FAILED else 0)
 
     # 4. KG record + recall
     with step("kg_record", inp={"a": "hermes-max", "rel": "uses", "b": "watchdog"}) as s:

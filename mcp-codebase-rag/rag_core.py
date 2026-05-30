@@ -451,26 +451,35 @@ def scan_repo(path: str) -> dict[str, Any]:
     }
 
 
+_HB_T0: dict[str, float] = {}  # per-tool start time for tqdm-style elapsed/ETA
+
+
 def _heartbeat(tool: str, done: int, total: int, note: str = "") -> None:
     """Best-effort liveness stamp the watchdog can read to confirm a long index is
-    WORKING (never false-killed). Also emits an index_progress OTel span. Any
-    failure here is swallowed — observability never breaks indexing."""
+    WORKING (never false-killed). Emits a tqdm-style index_progress OTel span with
+    elapsed + running ETA (Stage 7a). Any failure here is swallowed — observability
+    never breaks indexing."""
+    import time as _time
+    t0 = _HB_T0.setdefault(tool, _time.time())
+    elapsed = max(0.0, _time.time() - t0)
+    eta = (elapsed * (total - done) / done) if (done and total and done > 0) else None
     try:
         os.makedirs(HEARTBEAT_DIR, exist_ok=True)
         import json as _json
-        import time as _time
         tmp = os.path.join(HEARTBEAT_DIR, f".{tool}.tmp")
         dst = os.path.join(HEARTBEAT_DIR, f"{tool}.json")
         with open(tmp, "w") as f:
             _json.dump({"tool": tool, "ts": _time.time(), "done": done,
-                        "total": total, "note": note}, f)
+                        "total": total, "note": note, "elapsed_s": round(elapsed, 1)}, f)
         os.replace(tmp, dst)
     except Exception:  # noqa: BLE001
         pass
     if otel_emit is not None:
         pct = round(100 * done / total, 1) if total else 100.0
-        otel_emit.record("index_progress", {"tool": tool, "done": done, "total": total,
-                                            "pct": pct, "note": note})
+        otel_emit.record("index_progress", {
+            "tool": tool, "done": done, "total": total, "pct": pct, "note": note,
+            "elapsed_s": round(elapsed, 1),
+            "eta_s": (round(eta, 1) if eta is not None else None)})
 
 
 # ── public operations ────────────────────────────────────────────────────────
@@ -500,6 +509,7 @@ def index_repo(path: str, batch_size: int | None = None, full: bool = False) -> 
     if not os.path.isdir(repo):
         return {"ok": False, "repo": repo, "error": "not a directory"}
     bs = max(1, int(batch_size or RAG_INDEX_BATCH))
+    _HB_T0.pop("index_repo", None)  # fresh per-run clock for tqdm elapsed/ETA
 
     # ── pre-flight scan: report the scope BEFORE touching the store ──────────
     scan = scan_repo(repo)

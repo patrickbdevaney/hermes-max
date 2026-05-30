@@ -46,6 +46,49 @@ def load(path: str) -> list[dict]:
     return rows
 
 
+# ── bottleneck-analysis buckets (Stage 7c) ────────────────────────────────────
+# Every second of wall-clock falls into exactly one bucket so the operator can SEE
+# whether the advanced features earn their latency:
+#   inference  — local model thinking/generation (irreducible real work)
+#   tool-work  — tool execution doing real work (crawl, tests, indexing, retrieval)
+#   artificial — waiting on rate-limited APIs, 429/5xx backoff+retries, redundant
+#                sequential calls that could be concurrent, MCP overhead
+_INFERENCE_TOOLS = {
+    "synth", "steer", "escalate", "parallel_draft", "draft", "plan", "plan_research",
+    "develop_queries", "synthesize", "verify_claims", "llm", "_llm", "classify",
+    "best_of_n", "select",
+}
+_TOOLWORK_TOOLS = {
+    "index_repo", "scan_repo", "search_code", "rag_query", "find_similar",
+    "get_symbol_context", "repo_map", "kg_record", "kg_recall", "kg_query",
+    "fetch_clean", "crawl", "verify", "checkpoint", "revert_to_last_green",
+    "deep_research", "ingest_doc", "record_relation", "record_entity",
+}
+# A reason/fallback string matching any of these marks the time as ARTIFICIAL.
+_ARTIFICIAL_PAT = ("429", "rate", "backoff", "retry", "5xx", "503", "502",
+                   "too many requests", "quota", "throttle", "tpm")
+
+
+def _base_tool(name: str) -> str:
+    # index_repo[sample] -> index_repo ; kg_recall -> kg_recall
+    return name.split("[", 1)[0]
+
+
+def classify_bucket(tool: str, reason: str | None = None,
+                    explicit: str | None = None) -> str:
+    if explicit in ("inference", "tool-work", "artificial"):
+        return explicit
+    r = (reason or "").lower()
+    if any(p in r for p in _ARTIFICIAL_PAT):
+        return "artificial"
+    b = _base_tool(tool)
+    if b in _INFERENCE_TOOLS:
+        return "inference"
+    if b in _TOOLWORK_TOOLS:
+        return "tool-work"
+    return "tool-work"  # unknown real work defaults to tool-work, not free
+
+
 def aggregate(rows: list[dict]) -> dict:
     tools: dict[str, dict] = {}
 
@@ -54,6 +97,23 @@ def aggregate(rows: list[dict]) -> dict:
                                        "fallbacks": 0, "est_s": 0.0, "est_n": 0,
                                        "act_s": 0.0, "act_n": 0, "heartbeats": 0})
     decisions = []
+    buckets = {"inference": 0.0, "tool-work": 0.0, "artificial": 0.0}
+    artificial_by_cause: dict[str, dict] = {}
+
+    def _bucket(name: str, secs: float, reason: str | None, explicit: str | None) -> None:
+        b = classify_bucket(name, reason, explicit)
+        buckets[b] += max(0.0, secs)
+        if b == "artificial":
+            cause = "rate-limit/backoff"
+            rl = (reason or "").lower()
+            for p in _ARTIFICIAL_PAT:
+                if p in rl:
+                    cause = reason or p
+                    break
+            c = artificial_by_cause.setdefault(cause, {"count": 0, "secs": 0.0})
+            c["count"] += 1
+            c["secs"] += max(0.0, secs)
+
     for r in rows:
         kind = r.get("kind")
         name = r.get("tool") or "?"
@@ -65,19 +125,25 @@ def aggregate(rows: list[dict]) -> dict:
             d = t(name)
             if r.get("secs") is not None:
                 d["total_s"] += float(r["secs"]); d["act_s"] += float(r["secs"]); d["act_n"] += 1
-            if r.get("est_s") and not r.get("_counted_est"):
-                pass
+                _bucket(name, float(r["secs"]), None, r.get("bucket"))
         elif kind == "fail":
             d = t(name); d["fails"] += 1
             if r.get("fallback"):
                 d["fallbacks"] += 1
-            if r.get("secs") is not None:
-                d["total_s"] += float(r["secs"])
+            secs = float(r["secs"]) if r.get("secs") is not None else 0.0
+            d["total_s"] += secs
+            # a failure/fallback is classified by its reason (rate-limit -> artificial)
+            _bucket(name, secs, r.get("reason") or r.get("fallback"), r.get("bucket"))
         elif kind == "heartbeat":
             t(name)["heartbeats"] += 1
         elif kind == "decision":
             decisions.append(r)
-    return {"tools": tools, "decisions": decisions, "events": len(rows)}
+            # a kill/backoff decision with a duration contributes to artificial
+            if r.get("secs") is not None:
+                _bucket(r.get("decision", "?"), float(r["secs"]),
+                        r.get("reason"), r.get("bucket"))
+    return {"tools": tools, "decisions": decisions, "events": len(rows),
+            "buckets": buckets, "artificial_by_cause": artificial_by_cause}
 
 
 def fmt(agg: dict) -> str:
@@ -102,6 +168,28 @@ def fmt(agg: dict) -> str:
     out.append("  " + "─" * (len(hdr) - 2))
     out.append(f"  {'TOTAL':<18} {tot['calls']:>5} {tot['total_s']:>8.1f} {tot['fails']:>5} "
                f"{tot['fallbacks']:>6} {'':>7} {'':>7} {tot['hb']:>4}")
+    # ── bottleneck timing split (Stage 7c) ───────────────────────────────────
+    b = agg.get("buckets", {})
+    btot = sum(b.values())
+    out.append("")
+    if btot > 0:
+        def pct(x: float) -> float:
+            return 100 * x / btot
+        out.append("  bottleneck split (where wall-clock went):")
+        out.append(f"    inference {b.get('inference',0):.1f}s ({pct(b.get('inference',0)):.0f}%) · "
+                   f"tool-work {b.get('tool-work',0):.1f}s ({pct(b.get('tool-work',0)):.0f}%) · "
+                   f"artificial {b.get('artificial',0):.1f}s ({pct(b.get('artificial',0)):.0f}%)")
+        # name the dominant artificial cost when it's a meaningful fraction
+        if btot and pct(b.get("artificial", 0)) >= 15:
+            causes = agg.get("artificial_by_cause", {})
+            if causes:
+                top = max(causes.items(), key=lambda kv: kv[1]["secs"])
+                out.append(f"    ⚠ artificial dominated by {top[0]} — "
+                           f"{top[1]['count']} occurrence(s), {top[1]['secs']:.0f}s "
+                           "(a feature is wasting the agent's time — gate it more conservatively)")
+        elif b.get("artificial", 0) == 0:
+            out.append("    ✓ no artificial cost (no rate-limit backoff / redundant waiting)")
+
     dec = agg["decisions"]
     if dec:
         out.append("")
@@ -113,9 +201,22 @@ def fmt(agg: dict) -> str:
 
 
 def main() -> None:
-    path = _log_path(sys.argv)
+    argv = [a for a in sys.argv if a != "--json"]
+    as_json = "--json" in sys.argv
+    path = _log_path(argv)
     agg = aggregate(load(path))
-    print(fmt(agg))
+    if as_json:
+        b = agg.get("buckets", {})
+        print(json.dumps({
+            "events": agg["events"],
+            "tools": len(agg["tools"]),
+            "wall_s": round(sum(t["total_s"] for t in agg["tools"].values()), 2),
+            "buckets": {k: round(v, 2) for k, v in b.items()},
+            "artificial_by_cause": agg.get("artificial_by_cause", {}),
+            "calls": sum(t["calls"] for t in agg["tools"].values()),
+        }))
+    else:
+        print(fmt(agg))
 
 
 if __name__ == "__main__":

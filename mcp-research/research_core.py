@@ -639,6 +639,12 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
         seen_urls = ex.get("seen_urls", seen_urls)
         echo_blocked_total += ex.get("echo_chamber_blocked", 0)
         low_authority_total += ex.get("low_authority_filtered", 0)
+        # tqdm-style empirical progress (Stage 7a): item N/total, per-loop yield,
+        # running elapsed — the live log derives the ETA. Real movement, not "running…".
+        otel_emit.record("research_progress", {
+            "tool": "deep_research", "done": len(all_sources), "total": max_total_sources,
+            "item": f"loop {loops}/{max_loops}: {subgoal[:48]}",
+            "per_item": f"+{len(new)} sources", "elapsed_s": round(time.monotonic() - t0, 1)})
         if not new and loop > 0:
             stop_reason = "no new sources"
             break

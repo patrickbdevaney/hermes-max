@@ -103,16 +103,26 @@ def tool_start(tool: str, server: str | None = None, inp: Any = None,
 
 
 def heartbeat(tool: str, done: int | None = None, total: int | None = None,
-              elapsed_s: float | None = None, note: str | None = None) -> None:
+              elapsed_s: float | None = None, note: str | None = None,
+              item: str | None = None, per_item: str | None = None,
+              eta_s: float | None = None) -> None:
+    """tqdm-style progress (Stage 7a): current item N/total, per-item timing, a
+    running ETA + elapsed — so the operator sees real movement and can tell instantly
+    whether it's progressing or stuck on one slow item. ETA is derived from
+    done/total/elapsed when not supplied."""
+    if eta_s is None and done and total and elapsed_s and done > 0:
+        eta_s = max(0.0, elapsed_s * (total - done) / done)
     prog = ""
     if done is not None and total:
-        prog = f" | progress: {done}/{total} ({100*done/total:.0f}%)"
-    elif note:
-        prog = f" | {note}"
+        prog = f" [{done}/{total}] {100*done/total:.0f}%"
+    it = f" | {item}" if item else ""
+    pit = f" | {per_item}" if per_item else (f" | {note}" if note and not item else "")
     el = f" | elapsed {elapsed_s:.0f}s" if elapsed_s else ""
+    eta = f" · ETA ~{eta_s:.0f}s" if eta_s is not None else ""
     _write({"kind": "heartbeat", "tool": tool, "done": done, "total": total,
-            "elapsed_s": elapsed_s, "note": note},
-           f"⟳ {tool} heartbeat{prog}{el}", _LEVELS["verbose"])
+            "elapsed_s": elapsed_s, "note": note, "item": item,
+            "per_item": per_item, "eta_s": (round(eta_s, 1) if eta_s is not None else None)},
+           f"⟳ {tool}{prog}{it}{pit}{el}{eta}", _LEVELS["verbose"])
 
 
 def tool_ok(tool: str, secs: float | None = None, ret: Any = None,
@@ -168,8 +178,10 @@ def forward(span_name: str, attrs: dict | None = None, status: str = "ok") -> No
             else:
                 _write({"kind": "estimate", "tool": tool, **a}, base + f" — {a.get('basis','')}",
                        _LEVELS["verbose"])
-        elif span_name in ("tool_heartbeat", "index_progress"):
-            heartbeat(tool, done=a.get("done"), total=a.get("total"), note=a.get("note"))
+        elif span_name in ("tool_heartbeat", "index_progress", "research_progress"):
+            heartbeat(tool, done=a.get("done"), total=a.get("total"), note=a.get("note"),
+                      elapsed_s=a.get("elapsed_s"), item=a.get("item"),
+                      per_item=a.get("per_item"), eta_s=a.get("eta_s"))
         elif span_name == "tool_slow_but_alive":
             tool_slow(tool, float(a.get("elapsed_s", 0) or 0), a.get("budget_s"))
         elif span_name in ("tool_killed_hung", "poll_hang_caught"):

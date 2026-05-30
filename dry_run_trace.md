@@ -1,6 +1,6 @@
 # dry_run_trace.md — Stage-4 reliability + observability dry-run
 
-_Generated 2026-05-30 15:58:23 · model-independent reliability sequence (watchdog / RAG / KG / checkpoint + live log + summary)._
+_Generated 2026-05-30 16:10:47 · model-independent reliability sequence (watchdog / RAG / KG / checkpoint + live log + summary)._
 
 Run `scripts/watch.sh` in a side terminal to see this stream live; the same events feed Phoenix. The model-dependent steps (deep_research, parallel_draft, verify) run in `scripts/dry_run.py` and stream here too via the otel→livelog bridge.
 
@@ -11,10 +11,10 @@ Run `scripts/watch.sh` in a side terminal to see this stream live; the same even
 | 1 | index_repo[empty] | 0.12 | — | ✓ | {"empty": true, "files_indexed": 0, "mode": "empty"} |
 | 2 | index_repo[sample] | 0.10 | 0 | ✓ | {"files_indexed": 3, "chunks_indexed": 9, "mode": "bm25+graph"} |
 | 3 | search_code | 0.08 | — | ✓ | {"hits": ["fibonacci"]} |
-| 4 | kg_record | 0.02 | — | ✓ | {"triple": "hermes-max -uses-> watchdog"} |
+| 4 | kg_record | 0.01 | — | ✓ | {"triple": "hermes-max -uses-> watchdog"} |
 | 5 | kg_recall | 0.00 | — | ✓ | {"relations": 1} |
 | 6 | checkpoint[green] | 0.03 | — | ✓ | {"ok": true} |
-| 7 | revert_to_last_green | 0.04 | — | ✓ | {"ok": true} |
+| 7 | revert_to_last_green | 0.03 | — | ✓ | {"ok": true} |
 
 ## Per-tool summary
 
@@ -33,6 +33,10 @@ Run `scripts/watch.sh` in a side terminal to see this stream live; the same even
   deep_research          0      0.0     0      0      0s    0.0s    1
   ───────────────────────────────────────────────────────────────────
   TOTAL                  7      0.4     0      0                    7
+
+  bottleneck split (where wall-clock went):
+    inference 0.0s (0%) · tool-work 0.4s (100%) · artificial 0.0s (0%)
+    ✓ no artificial cost (no rate-limit backoff / redundant waiting)
 
   decisions (3):
     • look-ahead → deep_research ~120s | 4 planned queries x ~30s/source = est ~120s
