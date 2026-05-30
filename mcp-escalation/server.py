@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse
 
 import brief_assemble as brief
 import conductor_core
+import conductor_policy
 import directive_verify as dv
 import escalation_core
 
@@ -202,6 +203,47 @@ def compare_directives(a: dict, b: dict) -> dict:
     """Cheap agreement check between two synth opinions (file-set overlap +
     first-step similarity). agree=False => escalate to Opus or surface to human."""
     return dv.compare_directives(a, b)
+
+
+# ── invocation policy (Stage 5) ───────────────────────────────────────────────
+@mcp.tool()
+def conductor_plan(signals: dict | None = None, verifiable: bool = False,
+                   blast_radius: str | None = None, synth_failures: int = 0,
+                   opinions_disagree: bool = False) -> dict:
+    """ADVISE which ladder rung a subtask should use (does NOT fire a cloud call).
+    Routine (easy/medium) -> LOCAL. verifiable+hard -> parallel_draft -> synthesize.
+    ambiguous+hard -> steer -> synthesize. Opus escalate ONLY if synth_failures>=2
+    or (opinions_disagree AND high blast). Every rung is presence-gated and the
+    ladder degrades when a role is OFF. Pass the cheap `signals` (file_count,
+    novelty, prior_failures, lines_changed, cross_module) and whether the subtask
+    has an objective test oracle (`verifiable`). Then call the returned tier's tool
+    (parallel_draft / conductor_steer / conductor_synthesize / escalate), gate with
+    directive_verify, and record the outcome with conductor_record_outcome."""
+    return conductor_policy.plan_invocation(signals, verifiable=verifiable,
+                                            blast_radius=blast_radius,
+                                            synth_failures=synth_failures,
+                                            opinions_disagree=opinions_disagree)
+
+
+@mcp.tool()
+def conductor_record_outcome(subtask: str, tier: str, outcome: str,
+                             signals: dict | None = None, difficulty: str | None = None,
+                             cost_usd: float = 0.0) -> dict:
+    """Record a conductor decision+outcome to the KG (the compounding flywheel) so
+    the difficulty classifier learns which subtasks needed which tier. Call at
+    subtask end. tier: local|parallel_draft|steer|synthesize|escalate. outcome:
+    e.g. 'verified'|'failed'|'reverted'. Best-effort; never blocks."""
+    return conductor_policy.record_conductor_outcome(subtask, tier, outcome,
+                                                     signals=signals, difficulty=difficulty,
+                                                     cost_usd=cost_usd)
+
+
+@mcp.tool()
+def conductor_frequency_report() -> dict:
+    """Honest invocation-frequency + cost report: spend by provider/role (ledger)
+    + tier counts (KG), checked against the per-project targets (synth<=15,
+    Opus<=3). A breach means brief quality is the bottleneck — fix the assembler."""
+    return conductor_policy.frequency_report()
 
 
 if __name__ == "__main__":
