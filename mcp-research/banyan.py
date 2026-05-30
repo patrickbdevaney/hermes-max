@@ -55,6 +55,16 @@ UCB_C = float(os.environ.get("BANYAN_UCB_C", "1.414"))
 GAIN_HISTORY_MAX = 20
 SATURATION_DRIFT_COSINE = float(os.environ.get("BANYAN_DRIFT_COSINE", "0.95"))  # >= => too similar
 SATURATION_GAIN_FLOOR = float(os.environ.get("BANYAN_GAIN_FLOOR", "0.05"))
+# Empty-base correctness: never flag a namespace SATURATED on thin data — saturation
+# detection is DISABLED below this many recorded tasks/namespace (Stage-6 gate).
+SATURATION_MIN_HISTORY = int(os.environ.get("BANYAN_SATURATION_MIN_HISTORY", "10"))
+# RISK-A remedy (Stage-6): UCB1 is a stationary-bandit explorer — good for RESEARCH
+# breadth, bad for BUILD-loop focus (it abandons half-finished hard subtasks for
+# shinier easy ones). BANYAN_SCOPE scopes UCB1:
+#   research_only (DEFAULT) — UCB1 governs research-namespace selection ONLY; the
+#       build loop uses finish-what-you-started / dependency-order (select_build_subtask).
+#   all — UCB1 governs both loops (the thrash-prone behaviour; kept for A/B eval).
+BANYAN_SCOPE = os.environ.get("BANYAN_SCOPE", "research_only").strip().lower()
 SELF_IMPROVEMENT_ENABLED = os.environ.get("SELF_IMPROVEMENT_ENABLED", "false").strip().lower() in ("1", "true", "yes")
 MATURITY_MIN_TASKS = int(os.environ.get("BANYAN_MIN_TASKS", "200"))
 MATURITY_MIN_DAYS = int(os.environ.get("BANYAN_MIN_DAYS", "30"))
@@ -202,6 +212,49 @@ def banyan_select(c: float = UCB_C) -> dict[str, Any]:
             "visit_count": candidates[chosen]["visit_count"]}
 
 
+# ── RISK-A remedy: BUILD-loop selection (finish-what-you-started, NOT UCB1) ────
+def select_build_subtask(subtasks: list[dict], in_progress: str | None = None) -> dict[str, Any]:
+    """Pick the next BUILD subtask WITHOUT UCB1 — the build loop needs sustained
+    focus, so coherent building is finish-what-you-started then dependency-order:
+      1. if a subtask is already in progress and incomplete, KEEP it (never switch
+         away from half-finished work for a shinier one — the anti-thrash rule);
+      2. else the first INCOMPLETE subtask whose deps are all complete (dep order);
+      3. else None (all complete / blocked).
+    Each subtask: {id, status:'complete'|'incomplete', deps:[ids]}. This is what
+    BANYAN_SCOPE=research_only routes the build loop to, instead of banyan_select()."""
+    by_id = {t["id"]: t for t in subtasks}
+
+    def done(tid: str) -> bool:
+        return by_id.get(tid, {}).get("status") == "complete"
+
+    incomplete = [t for t in subtasks if t.get("status") != "complete"]
+    if not incomplete:
+        return {"ok": True, "subtask": None, "reason": "all subtasks complete", "switched": False}
+    if in_progress and in_progress in by_id and not done(in_progress):
+        return {"ok": True, "subtask": in_progress, "switched": False,
+                "strategy": "finish_in_progress", "reason": "finish-what-you-started (no switch)"}
+    ready = [t for t in incomplete if all(done(d) for d in t.get("deps", []))]
+    pick = (ready or incomplete)[0]
+    return {"ok": True, "subtask": pick["id"], "strategy": "dependency_order",
+            "switched": bool(in_progress and in_progress != pick["id"]),
+            "reason": "dependency-order (deps satisfied)" if ready else "oldest incomplete (deps unmet)"}
+
+
+def select_next(loop: str, *, subtasks: list[dict] | None = None,
+                in_progress: str | None = None, c: float = UCB_C) -> dict[str, Any]:
+    """Route selection by loop + BANYAN_SCOPE (the RISK-A config split):
+      • BANYAN_SCOPE=research_only (DEFAULT): the BUILD loop uses finish-what-you-
+        started (select_build_subtask, no UCB1 thrash); RESEARCH uses UCB1.
+      • BANYAN_SCOPE=all: UCB1 (banyan_select) governs BOTH loops (thrash-prone)."""
+    if loop == "build" and BANYAN_SCOPE == "research_only":
+        out = select_build_subtask(subtasks or [], in_progress)
+        out["selector"] = "build:finish-what-you-started"
+        return out
+    sel = banyan_select(c)
+    sel["selector"] = f"{loop}:ucb1"
+    return sel
+
+
 # ── update after a task completes ──────────────────────────────────────────────
 def banyan_update(namespace: str, utility_sample: float, gain: float) -> dict[str, Any]:
     """After a research/skill task: visit_count++, running utility (0.8 hist / 0.2
@@ -243,6 +296,9 @@ def detect_saturation(namespace: str, new_texts: list[str] | None = None) -> dic
     state = _load_state()
     ns = _ns(state, namespace)
     reasons: list[str] = []
+    # Empty-base gate: below the minimum history we still SEED the centroid (so drift
+    # works once mature) but NEVER flag saturated — thin data must not stop investment.
+    enough_history = ns.get("visit_count", 0) >= SATURATION_MIN_HISTORY
 
     # (1) embedding drift vs stored centroid
     drift_sim = None
@@ -266,7 +322,13 @@ def detect_saturation(namespace: str, new_texts: list[str] | None = None) -> dic
         if second_half < first_half and second_half < SATURATION_GAIN_FLOOR:
             reasons.append(f"marginal-gain decline: recent {second_half:.3f} < earlier {first_half:.3f} and below floor {SATURATION_GAIN_FLOOR}")
 
-    saturated = bool(reasons)
+    note = None
+    if not enough_history:
+        # thin data — suppress any signal; keep investing until history is sufficient
+        note = (f"saturation disabled below {SATURATION_MIN_HISTORY} tasks "
+                f"(have {ns.get('visit_count', 0)}) — never flag on thin data")
+        reasons = []
+    saturated = bool(reasons) and enough_history
     if saturated:
         ns["saturated"] = True
         surface_to_operator(f"namespace '{namespace}' SATURATED — stopping investment, awaiting direction",
@@ -274,7 +336,8 @@ def detect_saturation(namespace: str, new_texts: list[str] | None = None) -> dic
         otel_emit.record("saturation_flagged", {"namespace": namespace, "reasons": len(reasons)})
     _save_state(state)
     return {"ok": True, "namespace": namespace, "saturated": saturated, "reasons": reasons,
-            "drift_similarity": drift_sim}
+            "drift_similarity": drift_sim, "note": note,
+            "min_history": SATURATION_MIN_HISTORY, "visit_count": ns.get("visit_count", 0)}
 
 
 # ── standing-task generation (never idle) ─────────────────────────────────────

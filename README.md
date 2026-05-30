@@ -427,6 +427,34 @@ Drives the best-of-N draft pool until Groq's per-model TPM exhausts and shows th
 live tracker **pre-flight-skipping** the over-limit call (never a 429/413 crash) →
 `rate_limit_validation_trace.md`.
 
+```bash
+bash scripts/emergent_eval.sh           # hunt the interaction failure modes
+```
+A combinatorial eval that hunts the emergent failures isolated tests miss, with
+EVIDENCE on three suspicion risks and each config remedy toggled A/B →
+`emergent_eval_report.md`. **Honest findings:**
+
+- **Banyan focus-thrash (confirmed).** UCB1 is a stationary-bandit explorer — net
+  *positive* for research breadth, net *negative* for build-loop focus: unscoped, it
+  scored a **thrash of 1.0** (abandoned incomplete work on every switch). **Remedy
+  (shipped default):** `BANYAN_SCOPE=research_only` — UCB1 governs research namespaces
+  only; the build loop uses finish-what-you-started / dependency-order, driving
+  build-loop thrash to **0.0**.
+- **Research-noise contamination.** Noisy/low-authority findings can poison a synth
+  brief → confident wrong directives. **Remedy (default on):**
+  `RESEARCH_RELEVANCE_FILTER` + authority/relevance floors drop the noise *before*
+  ingestion (precision over recall).
+- **Ladder cascade-escalation.** Each tier trigger is individually sane, but a hard
+  subtask could cascade and burn budget. **Remedy (default on):** a **global
+  per-subtask budget** (`CONDUCTOR_SUBTASK_USD_CAP` / `_MAX_TIERS`) stops + surfaces
+  to the operator regardless of per-tier triggers.
+
+Empty-base correctness holds on **zero data**: UCB1 optimistic prior, saturation
+disabled below 10 tasks/namespace, classifier escalate-when-uncertain. Coherence
+holds: the verify gate kills a bad directive from any source, every component
+degrades to local without crashing when its cloud is killed, and a task-1 finding
+compounds into task 2.
+
 ## Acceptance test
 
 Give Hermes an unattended task: *"Implement feature X across ≥5 files in `<repo>`

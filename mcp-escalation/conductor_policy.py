@@ -33,6 +33,28 @@ from brief_assemble import KG_PORT, _mcp
 TARGET_SYNTH_PER_PROJECT = int(os.environ.get("CONDUCTOR_TARGET_SYNTH", "15"))
 TARGET_OPUS_PER_PROJECT = int(os.environ.get("CONDUCTOR_TARGET_OPUS", "3"))
 
+# RISK-C remedy (Stage-6): a GLOBAL per-subtask budget so one hard subtask can't
+# cascade driver→steer→synth→research→synth→escalate, burning money/time before
+# any single per-tier trigger fires. When a subtask hits EITHER ceiling we STOP
+# escalating and surface to the operator instead of climbing further. Toggle-able.
+SUBTASK_USD_CAP = float(os.environ.get("CONDUCTOR_SUBTASK_USD_CAP", "0.50"))
+SUBTASK_MAX_TIERS = int(os.environ.get("CONDUCTOR_SUBTASK_MAX_TIERS", "4"))
+
+
+def subtask_budget_check(tiers_used: int, cost_usd_so_far: float) -> dict[str, Any]:
+    """Has THIS subtask exhausted its global cascade budget? Returns stop=True (with
+    a reason) when the cumulative tier-count or USD spend ceiling is hit — the
+    caller then stops escalating and surfaces to the operator."""
+    if cost_usd_so_far >= SUBTASK_USD_CAP:
+        return {"stop": True, "reason": f"per-subtask USD cap hit "
+                f"(${cost_usd_so_far:.4f} >= ${SUBTASK_USD_CAP}) — stop escalating, surface to operator"}
+    if tiers_used >= SUBTASK_MAX_TIERS:
+        return {"stop": True, "reason": f"per-subtask tier ceiling hit "
+                f"({tiers_used} >= {SUBTASK_MAX_TIERS} tiers) — stop escalating, surface to operator"}
+    return {"stop": False, "reason": "within per-subtask budget",
+            "tiers_used": tiers_used, "cost_usd_so_far": round(cost_usd_so_far, 4),
+            "usd_cap": SUBTASK_USD_CAP, "max_tiers": SUBTASK_MAX_TIERS}
+
 
 def _active(env: dict[str, str]) -> dict[str, bool]:
     cfg = reg.load_config()
@@ -44,14 +66,29 @@ def _active(env: dict[str, str]) -> dict[str, bool]:
 
 def plan_invocation(signals: dict | None = None, *, verifiable: bool = False,
                     blast_radius: str | None = None, synth_failures: int = 0,
-                    opinions_disagree: bool = False) -> dict[str, Any]:
+                    opinions_disagree: bool = False, tiers_used: int = 0,
+                    cost_usd_so_far: float = 0.0) -> dict[str, Any]:
     """Advise the ladder rung for a subtask. Returns the chosen tier, the full
     ladder, presence-gated availability, the Opus gate verdict, and the next rung
-    to try on failure. NEVER fires a cloud call."""
+    to try on failure. NEVER fires a cloud call.
+
+    `tiers_used` / `cost_usd_so_far` track THIS subtask's cascade so far; once the
+    global per-subtask budget (RISK-C remedy) is hit, the plan forces local + a
+    surface-to-operator note instead of escalating further."""
     cls = escalation_core.classify_difficulty(signals or {})
     difficulty = cls["difficulty"]
     env = dict(os.environ)
     roles = _active(env)
+
+    # RISK-C global per-subtask budget — overrides every per-tier trigger.
+    budget = subtask_budget_check(tiers_used, cost_usd_so_far)
+    if budget["stop"]:
+        return {"ok": True, "difficulty": difficulty, "classifier": cls, "roles_active": roles,
+                "tier": "local", "ladder": ["local"], "next_if_fail": None,
+                "subtask_budget": budget, "budget_exceeded": True,
+                "reason": budget["reason"],
+                "note": "STUCK SUMMARY: per-subtask budget exhausted — surfacing to operator "
+                        "rather than cascading further"}
     blast = blast_radius or ("high" if (signals or {}).get("cross_module") or
                              int((signals or {}).get("file_count", 0) or 0) >= 4 else "low")
 

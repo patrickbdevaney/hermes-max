@@ -24,6 +24,10 @@ import httpx
 ENABLED = os.environ.get("ESCALATION_ENABLED", "false").strip().lower() == "true"
 DAILY_USD_CAP = float(os.environ.get("ESCALATION_DAILY_USD_CAP", "1.00"))
 MAX_TOKENS = int(os.environ.get("ESCALATION_MAX_TOKENS", "2048"))
+# Empty-base correctness (Stage-6): with NO signals gathered the classifier is
+# UNCERTAIN, so default conservative (medium) instead of "easy". Toggle-able.
+ESCALATE_WHEN_UNCERTAIN = os.environ.get(
+    "CLASSIFIER_ESCALATE_WHEN_UNCERTAIN", "true").strip().lower() in ("1", "true", "yes", "on")
 TIMEOUT = float(os.environ.get("ESCALATION_TIMEOUT", "120"))
 STATE_PATH = os.path.expanduser(
     os.environ.get("ESCALATION_STATE_PATH", "~/.hermes-max/escalation/spend.json")
@@ -221,6 +225,14 @@ def classify_difficulty(signals: dict | None = None) -> dict[str, Any]:
     whole harness shares — gate search N, verify depth, and escalation off it.
     """
     s = signals or {}
+    # Empty-base correctness: on a cold start with NO observable signals gathered,
+    # the caller is UNCERTAIN, not "this is easy". Default conservative (medium →
+    # the cheap ladder engages) rather than under-escalating. Toggle-able; once the
+    # caller passes any real signal, normal scoring applies.
+    if ESCALATE_WHEN_UNCERTAIN and not s:
+        return {"ok": True, "difficulty": "medium", "score": 2,
+                "reasons": ["uncertain: no signals gathered — conservative cold-start default "
+                            "(escalate-when-uncertain)"], "uncertain_default": True}
     score = 0
     reasons: list[str] = []
     fc = int(s.get("file_count", 0) or 0)

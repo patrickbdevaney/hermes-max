@@ -87,12 +87,20 @@ def main() -> None:
     # ---- [C] saturation: two signals + surface ----
     print("[C] saturation detection + surface to operator")
     b.register_namespace("saturated-topic")
-    # seed a centroid, then feed near-identical embeddings -> drift saturation
     b.rank._embed = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
-    b.detect_saturation("saturated-topic", new_texts=["seed the centroid"])   # sets centroid
+    # empty-base gate: on THIN data, saturation must NEVER flag (regardless of drift)
+    b.detect_saturation("saturated-topic", new_texts=["seed the centroid"])
+    thin = b.detect_saturation("saturated-topic", new_texts=["near identical again"])
+    if thin["saturated"]:
+        _fail(f"thin data (< {b.SATURATION_MIN_HISTORY} visits) must NOT saturate: {thin}")
+    _ok(f"empty-base: saturation suppressed below {b.SATURATION_MIN_HISTORY} tasks (thin data)")
+    # now give it sufficient history, then the drift signal must flag
+    st = b._load_state()
+    st["namespaces"]["saturated-topic"]["visit_count"] = b.SATURATION_MIN_HISTORY
+    b._save_state(st)
     sat = b.detect_saturation("saturated-topic", new_texts=["near identical again"])
     if not sat["saturated"] or not any("embedding-drift" in r for r in sat["reasons"]):
-        _fail(f"identical embeddings should flag embedding-drift saturation: {sat}")
+        _fail(f"identical embeddings (with history) should flag embedding-drift saturation: {sat}")
     if not os.path.exists(b.SURFACED_LOG):
         _fail("saturation must SURFACE to the operator (surfaced log)")
     surfaced = Path(b.SURFACED_LOG).read_text()
@@ -108,6 +116,7 @@ def main() -> None:
     b.register_namespace("declining")
     st = b._load_state()
     st["namespaces"]["declining"]["gain_history"] = [0.4, 0.3, 0.2, 0.02, 0.01, 0.0, 0.0, 0.0]
+    st["namespaces"]["declining"]["visit_count"] = b.SATURATION_MIN_HISTORY  # past the thin-data gate
     b._save_state(st)
     b.rank._embed = lambda texts: None  # no embedding -> only the gain signal
     sat = b.detect_saturation("declining")
