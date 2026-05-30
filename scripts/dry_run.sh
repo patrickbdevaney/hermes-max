@@ -20,6 +20,16 @@ hmx_load_env
 MODE="${CONDUCTOR_MODE:-full}"
 if [ "${1:-}" = "--mode" ] && [ -n "${2:-}" ]; then MODE="$2"; fi
 
+# --reliability : the Stage-4 reliability + observability sequence (empty+real
+# index, RAG, KG, watchdog look-ahead/heartbeat/kill, checkpoint revert) with the
+# live log streaming + the per-task summary + dry_run_trace.md. Model-INDEPENDENT
+# (it exercises the parts the reliability pass changed), so it runs with NO cloud
+# keys and NO local model — open scripts/watch.sh in a side terminal to see it live.
+if [ "${1:-}" = "--reliability" ] || [ "${MODE}" = "reliability" ]; then
+  PY="${REPO_ROOT}/mcp-watchdog/.venv/bin/python"; [ -x "${PY}" ] || PY="python3"
+  exec "${PY}" "${SCRIPT_DIR}/dry_run_reliability.py"
+fi
+
 export HMX_REPO_ROOT="${REPO_ROOT}"
 export HMX_DRYRUN_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo run)"
 

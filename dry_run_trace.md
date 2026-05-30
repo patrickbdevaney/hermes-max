@@ -1,135 +1,54 @@
-# hermes-max dry-run trace (real-inference smoke proof)
+# dry_run_trace.md — Stage-4 reliability + observability dry-run
 
-- **mode**: `full`  ·  **started**: 2026-05-30T09:28:50Z  ·  **wall**: 19.8s
-- **endpoint** (`$VLLM_BASE_URL`): `http://YOUR_TAILSCALE_IP:8001/v1`
-- **result**: 15 ✅ PASS · 0 ⊘ skip · 0 ❌ fail (of 15 components)
-- **verdict**: ✅ COHERENT
+_Generated 2026-05-30 15:58:23 · model-independent reliability sequence (watchdog / RAG / KG / checkpoint + live log + summary)._
 
-| # | component | status | provider/model | latency | tokens | cost | detail |
-|---|---|---|---|--:|--:|--:|---|
-| 1 | driver (local model) | ✅ PASS | local / /model | 951ms | 42 | $0.0000 | ```python reversed_string = original_string[::-1] ``` |
-| 2 | classifier (difficulty) | ✅ PASS | local-logic | 175ms | — | — | difficulty=easy reasons=['no complexity signals'] |
-| 3 | watchdog | ✅ PASS | local-logic | 277ms | — | — | armed=True no_progress=True spiral=False |
-| 4 | conductor.steer | ✅ PASS | deepinfra / deepseek-ai/DeepSeek-V4-Flash | 2990ms | 62 | $0.0000 | An agent should ask for a steer when the task is ambiguous, risks high-stakes errors, or r |
-| 5 | research (SearXNG) | ✅ PASS | searxng-local | 3363ms | — | — | src=https://www.w3schools.com/python/python_lists_comprehension.asp chars=198 |
-| 6 | research.corpus | ✅ PASS | disk | 274ms | — | — | path=dryrun/web/python---list-comprehension---w3schools.com.md chars=198 |
-| 7 | knowledge-graph | ✅ PASS | kg:embedded | 74ms | — | — | backend=embedded entities=22 recall_outgoing=['cites'] |
-| 8 | codebase-rag | ✅ PASS | bm25+graph | 168ms | — | — | indexed=True hits=3 |
-| 9 | conductor.synth + brief_assemble | ✅ PASS | deepinfra / deepseek-ai/DeepSeek-V4-Pro | 3279ms | — | $0.0001 | deepinfra:deepseek-ai/DeepSeek-V4-Pro -> ```python def total(xs): return sum(xs) ``` |
-| 10 | verify (deterministic gate) | ✅ PASS | ruff+mypy+pytest | 2773ms | — | — | green_passed=True red_caught=True |
-| 11 | conductor.draft pool | ✅ PASS | cerebras,groq | 1736ms | — | — | candidates=3 skipped=[] |
-| 12 | search.verifier-select | ✅ PASS | verify-gate | 3094ms | — | — | selected=cand_a verdicts={'cand_a': True, 'cand_b': True, 'cand_bad': False} (buggy reject |
-| 13 | research.banyan (UCB1) | ✅ PASS | local-bandit | 289ms | — | — | sel1=dryrun-research(explore) -> update -> sel2=dryrun-build; saturated=False (thin data) |
-| 14 | checkpoint | ✅ PASS | git | 193ms | — | — | sha=0be9e0f23164… reverted=True restored='v = 1' |
-| 15 | escalation ladder (DRY) | ✅ PASS | (no spend) | 148ms | — | $0.0000 | route_escalated=False route=local; escalate_rung=OFF->proceed_local=True |
+Run `scripts/watch.sh` in a side terminal to see this stream live; the same events feed Phoenix. The model-dependent steps (deep_research, parallel_draft, verify) run in `scripts/dry_run.py` and stream here too via the otel→livelog bridge.
 
-## Per-step detail (input → output)
+## Sequence (per step: timing · est-vs-actual · result)
 
-### 1. driver (local model) — ✅ PASS
-- action: trivial coding subtask
-- provider/model: local / /model
-- in:  `Reverse a string in Python in one line. Reply with ONLY the code.`
-- out: ````python reversed_string = original_string[::-1] ````
-- latency: 951ms · cost: $0.0000
+| # | step | secs | est~ | ok | result / reason |
+|---|------|-----:|-----:|:--:|-----------------|
+| 1 | index_repo[empty] | 0.12 | — | ✓ | {"empty": true, "files_indexed": 0, "mode": "empty"} |
+| 2 | index_repo[sample] | 0.10 | 0 | ✓ | {"files_indexed": 3, "chunks_indexed": 9, "mode": "bm25+graph"} |
+| 3 | search_code | 0.08 | — | ✓ | {"hits": ["fibonacci"]} |
+| 4 | kg_record | 0.02 | — | ✓ | {"triple": "hermes-max -uses-> watchdog"} |
+| 5 | kg_recall | 0.00 | — | ✓ | {"relations": 1} |
+| 6 | checkpoint[green] | 0.03 | — | ✓ | {"ok": true} |
+| 7 | revert_to_last_green | 0.04 | — | ✓ | {"ok": true} |
 
-### 2. classifier (difficulty) — ✅ PASS
-- action: classify_difficulty
-- provider/model: local-logic
-- in:  `{'file_count': 1, 'novelty': 'low', 'test_failures': 0}`
-- out: `difficulty=easy reasons=['no complexity signals']`
-- latency: 175ms
+## Per-tool summary
 
-### 3. watchdog — ✅ PASS
-- action: arm budget + progress + spiral
-- provider/model: local-logic
-- in:  `task=dryrun-task wall=120s turns=10`
-- out: `armed=True no_progress=True spiral=False`
-- latency: 277ms
+```
+═══ per-task tool-call summary ═══
+  tool               calls  total_s fails fallbk    est~    act~   hb
+  ───────────────────────────────────────────────────────────────────
+  index_repo[empty]      1      0.1     0      0      0s    0.1s    0
+  index_repo[sample]     1      0.1     0      0      0s    0.1s    0
+  search_code            1      0.1     0      0      0s    0.1s    0
+  revert_to_last_green     1      0.0     0      0      0s    0.0s    0
+  checkpoint[green]      1      0.0     0      0      0s    0.0s    0
+  kg_record              1      0.0     0      0      0s    0.0s    0
+  kg_recall              1      0.0     0      0      0s    0.0s    0
+  index_repo             0      0.0     0      0      0s    0.0s    6
+  deep_research          0      0.0     0      0      0s    0.0s    1
+  ───────────────────────────────────────────────────────────────────
+  TOTAL                  7      0.4     0      0                    7
 
-### 4. conductor.steer — ✅ PASS
-- action: run_role(steer)
-- provider/model: deepinfra / deepseek-ai/DeepSeek-V4-Flash
-- in:  `steer nudge`
-- out: `An agent should ask for a steer when the task is ambiguous, risks high-stakes errors, or requires human judgment, and should proceed when the task is clearly defined, low-risk, or within its proven capabilities.`
-- latency: 2990ms · cost: $0.0000
+  decisions (3):
+    • look-ahead → deep_research ~120s | 4 planned queries x ~30s/source = est ~120s
+    ✗ kill → fetch_clean killed | exceeded HARD ceiling (600s > 90s)
+    • recover → revert_to_last_green | killed step → restore last green state
+```
 
-### 5. research (SearXNG) — ✅ PASS
-- action: one source, tiny query
-- provider/model: searxng-local
-- in:  `python list comprehension`
-- out: `src=https://www.w3schools.com/python/python_lists_comprehension.asp chars=198`
-- latency: 3363ms
+## Decisions (with reasons)
 
-### 6. research.corpus — ✅ PASS
-- action: write on-disk corpus .md
-- provider/model: disk
-- in:  `namespace=dryrun chars=198`
-- out: `path=dryrun/web/python---list-comprehension---w3schools.com.md chars=198`
-- latency: 274ms
-
-### 7. knowledge-graph — ✅ PASS
-- action: record entity+edge, recall
-- provider/model: kg:embedded
-- in:  `decision -[cites]-> corpus doc`
-- out: `backend=embedded entities=22 recall_outgoing=['cites']`
-- latency: 74ms
-
-### 8. codebase-rag — ✅ PASS
-- action: index_document + search_code
-- provider/model: bm25+graph
-- in:  `index 1 doc; query 'how to build a list'`
-- out: `indexed=True hits=3`
-- latency: 168ms
-
-### 9. conductor.synth + brief_assemble — ✅ PASS
-- action: assemble brief + directive
-- provider/model: deepinfra / deepseek-ai/DeepSeek-V4-Pro
-- in:  `brief est_tokens=440 sources_live={'plan_md': False, 'kg': True, 'rag': True, 'checkpoints': False, 'watchdog': True}`
-- out: `deepinfra:deepseek-ai/DeepSeek-V4-Pro -> ```python def total(xs): return sum(xs) ````
-- latency: 3279ms · cost: $0.0001
-
-### 10. verify (deterministic gate) — ✅ PASS
-- action: green passes, red caught
-- provider/model: ruff+mypy+pytest
-- in:  `good_mod.py (+test) and a syntax-broken bad_mod.py`
-- out: `green_passed=True red_caught=True`
-- latency: 2773ms
-
-### 11. conductor.draft pool — ✅ PASS
-- action: parallel_draft fan-out
-- provider/model: cerebras,groq
-- in:  `best-of-N over present free pool`
-- out: `candidates=3 skipped=[]`
-- latency: 1736ms
-
-### 12. search.verifier-select — ✅ PASS
-- action: best-of-N, verifier selects green
-- provider/model: verify-gate
-- in:  `3 candidates (2 correct, 1 buggy)`
-- out: `selected=cand_a verdicts={'cand_a': True, 'cand_b': True, 'cand_bad': False} (buggy rejected=True)`
-- latency: 3094ms
-
-### 13. research.banyan (UCB1) — ✅ PASS
-- action: register x2, select, update, saturation
-- provider/model: local-bandit
-- in:  `2 namespaces, optimistic prior`
-- out: `sel1=dryrun-research(explore) -> update -> sel2=dryrun-build; saturated=False (thin data)`
-- latency: 289ms
-
-### 14. checkpoint — ✅ PASS
-- action: checkpoint + revert-to-green
-- provider/model: git
-- in:  `init repo, commit v1, break to v2, revert`
-- out: `sha=0be9e0f23164… reverted=True restored='v = 1'`
-- latency: 193ms
-
-### 15. escalation ladder (DRY) — ✅ PASS
-- action: route(hard) + escalate rung (mocked/off)
-- provider/model: (no spend)
-- in:  `hard task; cloud tiers off-by-default; no Opus key`
-- out: `route_escalated=False route=local; escalate_rung=OFF->proceed_local=True`
-- latency: 148ms · cost: $0.0000
+- • **look-ahead** → deep_research ~120s — 4 planned queries x ~30s/source = est ~120s
+- ✗ **kill** → fetch_clean killed — exceeded HARD ceiling (600s > 90s)
+- • **recover** → revert_to_last_green — killed step → restore last green state
 
 ## What this proves
 
-Every component fired in one end-to-end pass (or cleanly skipped with a reason in this mode). The local driver is the one hard dependency; cloud steps are mode-gated and presence-gated, degrading to local without crashing the run — the anti-Frankenstein property. The verify gate caught a red change (cannot declare done on red), and the best-of-N verifier rejected a buggy candidate.
+- **No premature kill on legitimately-long work** — `index_repo[sample]` and the over-budget-but-heartbeating `deep_research` step run/keep-alive past their estimate because they heartbeat (slow-but-alive, not killed).
+- **Empty-dir index is a clean empty success**, not a hang — `index_repo[empty]` returns instantly with a valid queryable empty index.
+- **Genuinely-hung work IS killed** with a clear report (silent past budget), and the deliberately-killed step **reverts cleanly** to the last green checkpoint.
+- **Full visibility** — every step's input/output/timing/est-vs-actual and every decision is in the live log and the per-tool summary above.

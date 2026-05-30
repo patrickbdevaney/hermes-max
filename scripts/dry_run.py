@@ -175,6 +175,19 @@ def main() -> int:
         f.write(trace)
     nfail = sum(1 for r in results if r.get("status") == "FAIL")
     print(f"\ntrace -> {out}")
+
+    # Per-task tool-call summary (Stage 3/4): every step streamed to the live log via
+    # the otel→livelog bridge, so the summary table closes out the run. Best-effort.
+    try:
+        sys.path.insert(0, os.path.join(REPO, "scripts"))
+        import run_summary  # type: ignore
+        print()
+        print(run_summary.fmt(run_summary.aggregate(run_summary.load(
+            os.path.join(os.path.expanduser(os.environ.get(
+                "HERMES_MAX_LOG_DIR", "~/.hermes-max/logs")), "live.jsonl")))))
+    except Exception:  # noqa: BLE001 - the summary never fails the dry-run
+        pass
+
     print(f"RESULT: {'PASS' if nfail == 0 else 'FAIL'} ({nfail} failures) · {wall:.1f}s")
     return 0 if nfail == 0 else 1
 
