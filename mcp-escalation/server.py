@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+import brief_assemble as brief
 import conductor_core
 import escalation_core
 
@@ -147,6 +148,36 @@ def conductor_cost_report() -> dict:
     """Per-day + per-month conductor spend, broken down by provider and by role,
     plus call count — the honest cost ledger feeding the Stage-5 report."""
     return conductor_core.cost_report()
+
+
+# ── brief-assembler (Stage 2) ─────────────────────────────────────────────────
+@mcp.tool()
+def brief_assemble(task_id: str, current_blocker: str, decision_needed: str,
+                   profile: str = "full", repo: str | None = None,
+                   query: str | None = None, directives: str | None = None,
+                   acceptance_tests: list[str] | None = None) -> dict:
+    """DETERMINISTICALLY assemble a structured cloud brief from harness state.
+    You (the local model) write ONLY `current_blocker` and `decision_needed`;
+    goal/done/constraints/success come from PLAN.md, architecture_state +
+    failed_approaches from the KG + watchdog, and token-budgeted code_excerpts
+    from codebase-rag — so the WEAK local model never hand-writes the brief.
+    profile: 'compact' (steer, <=8K tok) | 'full' (synth, 15-30K) | 'draft'
+    (parallel_draft — pass acceptance_tests, the objective oracle). Feed the
+    returned brief to conductor_steer/synthesize/parallel_draft_pool. Degrades
+    gracefully (missing servers/PLAN.md -> empty sections); never raises."""
+    return brief.brief_assemble(task_id, current_blocker, decision_needed,
+                                profile=profile, repo=repo, query=query,
+                                directives=directives, acceptance_tests=acceptance_tests)
+
+
+@mcp.tool()
+def brief_request_more(task_id: str, section: str, query: str = "", k: int = 8,
+                       offset: int = 0, repo: str | None = None) -> dict:
+    """Progressive disclosure: pull MORE of a section the brief capped, when the
+    cloud asks for it. section: 'code_excerpts' | 'failed_approaches' |
+    'architecture_state'."""
+    return brief.brief_request_more(task_id, section, query=query, k=k,
+                                    offset=offset, repo=repo)
 
 
 if __name__ == "__main__":
