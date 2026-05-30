@@ -29,8 +29,10 @@ hermes-max/
   mcp-codebase-rag/       # hybrid BM25+dense retrieval over your repos (:9102)
   mcp-knowledge-graph/    # embedded SQLite triples store             (:9103)
   mcp-observability/      # OpenTelemetry → Phoenix                    (:9104)
-  mcp-escalation/         # cloud router, OFF by default, USD cap      (:9105)
-  mcp-checkpoint/         # verified-green git checkpoint/revert       (:9106)
+  mcp-escalation/         # tiered router: classifier + local + cloud  (:9105)
+  mcp-checkpoint/         # verified-green git checkpoint/revert+state  (:9106)
+  mcp-watchdog/           # spiral/stall/progress/budget detection      (:9107)
+  mcp-search/             # verifier-guided best-of-N selection         (:9108)
   dspy-evolution/         # weekly cron wrapper for self-evolution
   scripts/                # start-all / healthcheck / smoke-test / register-mcp
   phoenix.sh  searXNG.sh  # supporting containers (already provided)
@@ -50,7 +52,10 @@ cp .env.example .env
 # 2. prove each server in isolation (creates venvs on first run)
 scripts/smoke-test.sh
 
-# 3. start all six MCP servers (independent processes)
+# 3. apply native deadline/effort config (backs up ~/.hermes/config.yaml first)
+scripts/apply-config-deadlines.sh   # terminal.timeout=120, reasoning_effort=medium
+
+# 4. start all eight MCP servers (independent processes)
 scripts/start-all.sh
 
 # 4. register with Hermes (injects mcp_servers, installs Tier-2 skills)
@@ -73,7 +78,11 @@ Stop the servers with `kill $(cat ~/.hermes-max/run/*.pid)`. Logs are under
 |----------|---------|
 | `VLLM_BASE_URL` | **The one port switch.** Dev=`http://YOUR_TAILSCALE_IP:8001/v1`, prod=`http://localhost:8001/v1`. Never hardcoded anywhere. |
 | `EMBED_BASE_URL` | Optional OpenAI-compatible `/embeddings` for RAG dense mode. Blank ⇒ BM25-only. |
-| `MCP_VERIFY_PORT` … `MCP_CHECKPOINT_PORT` | `9101`–`9106`, bound to `127.0.0.1`. |
+| `MCP_VERIFY_PORT` … `MCP_SEARCH_PORT` | `9101`–`9108`, bound to `127.0.0.1`. |
+| `WATCHDOG_TOOL_BUDGET_S` | Per-tool wall-clock budget; over it without a heartbeat ⇒ hung (default `120`). |
+| `SEARCH_DEFAULT_N` / `SEARCH_MAX_N` | Bounded best-of-N (default `3`, cap `6`) — competes for the one GPU. |
+| `ESCALATION_LOCAL_BASE_URL` | Optional **free** local escalation tier (bigger local model); tried before any cloud tier. |
+| `MONITOR_ENABLED` / `MONITOR_BASE_URL` | Optional fast critic model on a 2nd endpoint (**off** by default). |
 | `RAG_INDEX_PATH`, `KG_DB_PATH` | SQLite stores; both start **empty**. |
 | `PHOENIX_COLLECTOR_ENDPOINT` | `http://localhost:4317` (OTLP gRPC). |
 | `ESCALATION_ENABLED` | **`false` by default.** |
@@ -91,26 +100,39 @@ sed -i 's#^VLLM_BASE_URL=.*#VLLM_BASE_URL=http://localhost:8001/v1#' .env
 scripts/start-all.sh && scripts/register-mcp.sh --sync-model-url && scripts/healthcheck.sh
 ```
 
-## The six MCP servers
+## The eight MCP servers
 
 Each has its own `README.md`, `requirements.txt`, `server.py`, `smoke_test.py`
 and `healthcheck.sh`, and runs as an independent streamable-http process.
 
 - **mcp-verify** — `verify(path)` runs **exactly** lint → typecheck → tests
-  (Python/TS/Rust). Deterministic, never flaky. The done-gate.
+  (Python/TS/Rust). `quick_check` (lint+type, fast per-edit) and `deep_verify`
+  (difficulty-gated property/mutation/fuzz) close the silent-wrong gap.
 - **mcp-codebase-rag** — `index_repo` / `search_code` / `get_symbol_context` /
-  `find_similar`. Hybrid BM25 + dense (RRF), tree-sitter chunking, one
-  sqlite-vec store, one embed endpoint, dual-mode retrieval.
+  `find_similar`, **plus** graph/AST retrieval: `retrieve_related(symbol)`
+  (multi-hop callers/callees/imports) and `repo_map` (PageRank, token-budgeted).
+  Hybrid BM25 + dense + graph-rank; degrades to BM25 if the graph build fails.
 - **mcp-knowledge-graph** — `record_entity` / `record_relation` / `query_graph`
   / `recall_about`. One embedded SQLite triples store.
 - **mcp-observability** — `record_trace` / `record_metric` /
-  `record_task_metrics` → OpenTelemetry to Phoenix.
-- **mcp-escalation** — `escalate(task, tier)`. OFF by default, hard daily USD
-  cap, Tier-3 (Opus/Claude Code) rejected by design.
+  `record_task_metrics` → OpenTelemetry to Phoenix. New servers emit
+  `spiral_detected` / `poll_hang_caught` / `budget_exceeded` / `search_selected`
+  / `escalated` spans.
+- **mcp-escalation** — `classify_difficulty` (the **shared** difficulty signal),
+  `should_escalate` (auto-triggers), `route` (hard kernel → **free local tier**
+  first, cloud only if local fails), `escalate(task, tier, context)` with a
+  surgical handoff. Cloud OFF by default + hard USD cap; Tier-3 rejected.
 - **mcp-checkpoint** — `checkpoint(label)` / `revert_to_last_green()` /
-  `list_checkpoints` / `checkpoint_status`. A thin git wrapper that commits
-  **only from a verified-green state** (asks mcp-verify first, refuses on red),
-  so "revert to last green" always lands on green. The stuck-reset primitive.
+  `list_checkpoints` / `checkpoint_status`, **plus** `snapshot_state` /
+  `restore_state` so a revert restores the PLAN + notes, not just the git tree.
+  Commits **only from a verified-green state**. The stuck-reset primitive.
+- **mcp-watchdog** *(:9107)* — the non-turn-based detection layer:
+  `check_spiral` (CoT-loop), `check_stall` (hung vs legitimately-waiting — never
+  false-kills a heartbeating process), `check_progress`, `start_task_budget` /
+  `check_budget`. Closes the two field-observed within-a-turn failures.
+- **mcp-search** *(:9108)* — `generate_and_select`: bounded best-of-N selected by
+  **execution** through mcp-verify (lossless; never returns a red patch).
+  Default-low N, capped; HARD subtasks only.
 
 ## Tier-2 workflow skills (`skills/`)
 
@@ -132,6 +154,18 @@ start backgrounded, test ONCE with a timeout, never poll), `skill-process-gotcha
 ping), `workflow-done-definition` (done = verify green, not the model's opinion),
 and `workflow-context-hygiene` (PLAN.md is the source of truth). See
 `CLAUDE_longhorizon.md` and `long-horizon-scaffolding.md`.
+
+### Two-axis upgrade skills (robustness + capability)
+
+Five skills wire the new servers into the loop: `workflow-deadline-discipline`
+(≤3-4-sentence turns; background + `check_stall` once; `check_progress`/budget;
+on any watchdog flag → revert + replan), `workflow-edit-format` (small diff edits
++ `quick_check` after each), `workflow-effort-routing` (HIGH effort on
+planning/hard, LOW on reads/mechanical — caps spirals), `workflow-critic` (after
+a hard subtask goes green, one bounded reviewer red-teams the diff, grounded in
+`deep_verify`), and `workflow-subagent-isolation` (fan-out read-only
+localization; keep the edit thread single and linear). All gate on the one
+shared difficulty signal from `classify_difficulty`.
 
 ## Long-horizon prerequisite — the full context window
 

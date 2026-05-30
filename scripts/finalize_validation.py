@@ -1034,7 +1034,6 @@ def main() -> None:
 
         banner("V-cloud-gated — cloud tier stays OFF by default and USD-capped")
         cloud = call(ESC_URL, "escalate", task="x", tier="cheap")
-        st = call(ESC_URL, "classify_difficulty")  # cheap reachability sanity (any tool)
         check("cloud escalate refused while OFF (local tier remains the free default)",
               cloud.get("disabled") is True and cloud.get("ok") is not True,
               f"cloud disabled={cloud.get('disabled')}; reason={str(cloud.get('reason'))[:60]}")
