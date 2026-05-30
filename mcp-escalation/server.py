@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse
 
 import brief_assemble as brief
 import conductor_core
+import directive_verify as dv
 import escalation_core
 
 PORT = int(os.environ.get("MCP_ESCALATION_PORT", "9105"))
@@ -178,6 +179,29 @@ def brief_request_more(task_id: str, section: str, query: str = "", k: int = 8,
     'architecture_state'."""
     return brief.brief_request_more(task_id, section, query=query, k=k,
                                     offset=offset, repo=repo)
+
+
+# ── advisory-with-verify-gate authority (Stage 3) ─────────────────────────────
+@mcp.tool()
+def directive_verify(directive: dict, repo: str | None = None, task_id: str | None = None,
+                     second_directive: dict | None = None, run_static: bool = True) -> dict:
+    """GATE a cloud directive BEFORE executing it — the cloud is smart but BLIND.
+    (1) verify each `assumptions` entry vs ACTUAL repo state (a false one rejects
+    the directive and is recorded as a failed_approach); (2) check `apis_to_use`
+    exist + repo baseline (verify.quick_check); (3) require concrete
+    `tests_to_write`; (4) on low-confidence + high-blast-radius demand a second
+    synth opinion (pass `second_directive` to compare — disagreement -> escalate/
+    human). Returns `execute` (bool) + per-gate detail. Only execute + checkpoint
+    when execute is True. Deterministic; degrades if verify/KG are down."""
+    return dv.directive_verify(directive, repo=repo, task_id=task_id,
+                               second_directive=second_directive, run_static=run_static)
+
+
+@mcp.tool()
+def compare_directives(a: dict, b: dict) -> dict:
+    """Cheap agreement check between two synth opinions (file-set overlap +
+    first-step similarity). agree=False => escalate to Opus or surface to human."""
+    return dv.compare_directives(a, b)
 
 
 if __name__ == "__main__":
