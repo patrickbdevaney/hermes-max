@@ -82,6 +82,37 @@ load). The keyless sources are the durable core; optional keys (`GITHUB_TOKEN`,
 `SEMANTIC_SCHOLAR_API_KEY`, `STACKEXCHANGE_KEY`) only lift limits — **no new required
 keys**. See `.env.example` → *DEEP-RESEARCH SOURCE FAN-OUT*.
 
+## On-disk corpus + provenance + lazy distillation (research_engine Stage 3)
+
+Research content is no longer distilled-away on ingest. Instead:
+
+- **Sovereign markdown corpus on disk** — `ingest_research(...)` writes the **full,
+  untruncated** extracted content to `corpus/{namespace}/{source_type}/{slug}.md`
+  with **YAML front-matter provenance** (`source_url`, `title`, `authors`, `date`,
+  `retrieval_query`, `source_type`, `citation_count`, `authority_score`,
+  `ingested_at`, `session_id`). Greppable, git-versionable, human-readable, and
+  **independent of the vector store**. Idempotent (re-ingest overwrites the slug).
+  Location: `RESEARCH_CORPUS_DIR` (default `~/.hermes-max/corpus`; point at a repo
+  path to version it).
+- **Full chunks in RAG, resolvable** — the same full text is indexed into the hybrid
+  store; each chunk's `source` is the corpus relpath, so a retrieved chunk resolves
+  straight back to its on-disk document + provenance via `resolve_source(source)`
+  (the seam the Stage-5 verify gate uses).
+- **Lazy, query-time distillation** — `distill_for_query(query, chunks, source_type)`
+  distills **only the retrieved chunks**, at query time, preserving technical detail
+  verbatim. Density-routed: dense sources (arxiv/semantic_scholar/eip_erc/ietf_rfc/
+  audit) → cheap-cloud (**DeepSeek via the conductor's steer role**) when
+  `RESEARCH_CLOUD_DISTILL=true`; everything else → local Qwen; **no model anywhere →
+  raw chunk concatenation** (fully sovereign, still honest).
+
+> The spec says "Qdrant"; the actual RAG is `mcp-codebase-rag`'s SQLite + FTS5 +
+> sqlite-vec hybrid store (same full-chunks-plus-embeddings contract). The vector
+> store is *used*, not modified — full provenance lives in the on-disk corpus.
+
+Asserted in `smoke_corpus.py` (temp dir, monkeypatched RAG/LLM/conductor): full
+untruncated write, idempotency, full-content RAG index with resolvable source,
+density routing (all four paths), provenance round-trip, 45K-char paper untruncated.
+
 ## Backends (all local; each degrades gracefully)
 
 | Env var | Default | Down ⇒ |
@@ -108,7 +139,8 @@ model + reranker, but the loop is fully functional without them.
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
 MCP_RESEARCH_PORT=9110 .venv/bin/python server.py
 .venv/bin/python smoke_test.py     # A pure, B degraded, C 4 invariants, D e2e, E boot
-.venv/bin/python smoke_sources.py  # Stage 1: adapter parsing, gating, RRF, routing, degrade
+.venv/bin/python smoke_sources.py  # Stage 1+2: adapter parsing, gating, RRF, routing, degrade
+.venv/bin/python smoke_corpus.py   # Stage 3: on-disk corpus, provenance, lazy distill, resolve
 bash ../scripts/eval-research.sh    # honest quality number on a small fixed set
 ```
 

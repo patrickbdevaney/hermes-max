@@ -25,6 +25,7 @@ from starlette.responses import JSONResponse
 
 import research_core
 import sources
+import corpus
 
 PORT = int(os.environ.get("MCP_RESEARCH_PORT", "9110"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
@@ -52,7 +53,8 @@ mcp = FastMCP(
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "mcp-research", "port": PORT,
-                         **research_core.stats(), "sources": sources.source_stats()})
+                         **research_core.stats(), "sources": sources.source_stats(),
+                         "corpus": corpus.corpus_stats()})
 
 
 @mcp.tool()
@@ -208,6 +210,37 @@ def ietf_rfc(query: str, limit: int = 5) -> dict:
     """IETF RFC full text (keyless, RFC-Editor). Naming an RFC number fetches its
     full text. Routed only when a query mentions rfc/ietf (optional per spec)."""
     return sources.ietf_rfc(query, limit)
+
+
+# ── Stage 3: on-disk corpus + provenance + lazy distillation ──────────────────
+@mcp.tool()
+def ingest_research(namespace: str, source_type: str, content: str,
+                    meta: dict | None = None, index: bool = True) -> dict:
+    """Write FULL untruncated content to the on-disk markdown corpus
+    (corpus/{namespace}/{source_type}/{slug}.md with YAML front-matter provenance)
+    AND index the full text into the hybrid RAG store. NO distill-on-ingest — the
+    technical nuance is preserved; distillation happens lazily at query time. Each
+    RAG chunk resolves back to its corpus file. meta: source_url/title/authors/date/
+    retrieval_query/citation_count/authority_score/session_id."""
+    return corpus.ingest_research(namespace, source_type, content, meta, index)
+
+
+@mcp.tool()
+def distill_for_query(query: str, chunks: list, source_type: str = "web",
+                      max_tokens: int = 1500) -> dict:
+    """Lazily distill ONLY the retrieved chunks, at QUERY time. Dense technical
+    sources (arxiv/semantic_scholar/eip_erc/ietf_rfc/audit) route to cheap-cloud
+    (DeepSeek via conductor) when RESEARCH_CLOUD_DISTILL is on; else local Qwen.
+    Degrades to raw chunk concatenation with no model — fully sovereign."""
+    return corpus.distill_for_query(query, chunks, source_type, max_tokens)
+
+
+@mcp.tool()
+def resolve_source(source: str) -> dict:
+    """Resolve a RAG chunk's `source` (a corpus relpath) back to its backing on-disk
+    document: full content + parsed front-matter provenance. The seam the Stage-5
+    verify gate uses to map a claim -> the exact stored chunk it came from."""
+    return corpus.resolve_source(source)
 
 
 if __name__ == "__main__":
