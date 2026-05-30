@@ -80,6 +80,38 @@ print(" · ".join(parts))
   done
 fi
 
+# ── conductor (cloud tiers + active mode + frontier spend) ───────────────────
+# The MODE is the cloud-tier CEILING set by `hm up --local|--free|--full|--frontier`.
+MODE_FILE="${HERMES_MAX_STATE_DIR:-${HOME}/.hermes-max}/conductor/mode"
+MODE_FILE="${MODE_FILE/#\~/$HOME}"
+CMODE="${CONDUCTOR_MODE:-}"
+[ -z "${CMODE}" ] && [ -f "${MODE_FILE}" ] && CMODE="$(cat "${MODE_FILE}" 2>/dev/null)"
+CMODE="${CMODE:-full}"
+_kp() { local k="$1"; [ -n "${!k:-}" ] || grep -qE "^${k}=[^[:space:]#]" "${REPO_ROOT}/.env" 2>/dev/null; }
+tiers=""
+case "${CMODE}" in
+  local) tiers="(cloud OFF — fully sovereign)" ;;
+  free|full|frontier)
+    _kp DEEPINFRA_API_KEY && tiers="${tiers} deepinfra"
+    _kp CEREBRAS_API_KEY && tiers="${tiers} cerebras"; _kp GROQ_API_KEY && tiers="${tiers} groq"
+    _kp GEMINI_API_KEY && tiers="${tiers} gemini"; _kp DEEPSEEK_API_KEY && tiers="${tiers} deepseek"
+    [ "${CMODE}" = "free" ] && tiers="$(echo "${tiers}" | sed 's/ deepinfra//; s/ deepseek//')"
+    [ "${CMODE}" = "frontier" ] && { _kp ANTHROPIC_API_KEY && tiers="${tiers} opus-4.8" || tiers="${tiers} (opus OFF: no key)"; }
+    ;;
+esac
+echo "── conductor (cloud tiers) ──"
+echo "  ${D}mode${Z} ${CMODE}  ·  ${D}live tiers${Z}${tiers:- (none present)}"
+FRONTIER_STATE="${HERMES_MAX_STATE_DIR:-${HOME}/.hermes-max}/conductor/frontier.json"
+FRONTIER_STATE="${FRONTIER_STATE/#\~/$HOME}"
+if [ "${CMODE}" = "frontier" ] && [ -f "${FRONTIER_STATE}" ]; then
+  python3 - "${FRONTIER_STATE}" "${FRONTIER_USD_CAP_MONTHLY:-10}" "${FRONTIER_USD_CAP_DAILY:-2}" "${FRONTIER_TARGET_CALLS_MONTHLY:-15}" <<'PY' 2>/dev/null || true
+import json,sys
+st=json.load(open(sys.argv[1])); capm,capd,tgt=sys.argv[2],sys.argv[3],sys.argv[4]
+print(f"  frontier Opus: {st.get('calls_month',0)}/{tgt} calls this month  ·  "
+      f"${st.get('spend_month',0):.2f}/${capm} mo  ${st.get('spend_today',0):.2f}/${capd} day")
+PY
+fi
+
 echo "── supporting (informational) ──"
 hmx_phoenix_otlp_ok && echo "  ${G}✓${Z} Phoenix OTLP ${PHOENIX_COLLECTOR_ENDPOINT:-http://localhost:4317}" \
                     || echo "  ${D}• Phoenix OTLP down (./phoenix.sh)${Z}"

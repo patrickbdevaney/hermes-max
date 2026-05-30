@@ -12,7 +12,22 @@ proceeds local-only.
 
 from __future__ import annotations
 
+import os
 from typing import Any
+
+# Runtime mode selected by `hm up --local|--free|--full|--frontier`. The resolver
+# reads it LIVE (per call) so switching mode takes effect without restarting the
+# servers. An explicit CONDUCTOR_MODE in the environment always wins over the file.
+MODE_FILE = os.path.expanduser(
+    os.environ.get("CONDUCTOR_MODE_FILE", "~/.hermes-max/conductor/mode"))
+
+
+def _mode_from_file() -> str:
+    try:
+        with open(MODE_FILE) as f:
+            return f.read().strip().lower()
+    except Exception:  # noqa: BLE001 - no file -> caller defaults to 'full'
+        return ""
 
 # ── CONDUCTOR_MODE — a HARD spend-tier cap, read from the env dict that is ─────
 # ALREADY passed to every resolver call (so no call-site threading is needed).
@@ -36,8 +51,15 @@ def _present(env_key_name: str, env: dict[str, str]) -> bool:
 
 
 def current_mode(env: dict[str, str]) -> str:
-    """The active CONDUCTOR_MODE (lower-cased), defaulting to 'full'."""
-    m = (env.get("CONDUCTOR_MODE") or "full").strip().lower()
+    """The active CONDUCTOR_MODE (lower-cased), defaulting to 'full'.
+
+    Precedence: an explicit env CONDUCTOR_MODE (operator pin) > the runtime mode
+    file written by `hm up <mode>` (read live, so a mode switch needs no restart) >
+    'full'. An unknown value falls back to 'full' (backward-compatible)."""
+    m = (env.get("CONDUCTOR_MODE") or "").strip().lower()
+    if not m:
+        m = _mode_from_file()
+    m = m or "full"
     return m if m in MODE_ALLOWED_TIERS else "full"
 
 

@@ -6,7 +6,9 @@
 # sugar, the scripts are the substance. Runnable as `./hm` from the repo root, or
 # install onto PATH (`hm install`, or via bootstrap.sh).
 #
-#   hm up                 start all MCPs (+ embed/rerank hint)         scripts/start-all.sh
+#   hm up [--MODE]        start all MCPs (+ embed/rerank hint)         scripts/start-all.sh
+#                         MODE = --local|--free|--full|--frontier (default --full);
+#                         the cloud-tier ceiling, presence-gated with fall-through
 #   hm down               stop everything (PID + port fallback)        scripts/stop-all.sh
 #   hm restart [srv|all]  restart one server or all                    scripts/restart.sh
 #   hm status             UP/DOWN · port · PID · uptime · health       scripts/status.sh
@@ -15,7 +17,7 @@
 #   hm run "task"         launch hermes with a task                    hermes
 #   hm snapshot <name>    snapshot RAG+KG+corpus stores                scripts/snapshot-stores.sh
 #   hm restore <name>     restore a named snapshot                     scripts/restore-stores.sh
-#   hm dev                the tmux cockpit (hermes + watch + status)   (this script)
+#   hm dev [--MODE]       the tmux cockpit (hermes + watch + status)   (this script)
 #   hm attach             reattach to the running tmux cockpit         tmux attach
 #   hm health             pass/fail healthcheck (for scripting)        scripts/healthcheck.sh
 #   hm summary            per-task tool-call summary + bottleneck split scripts/run-summary.sh
@@ -65,8 +67,95 @@ _start_serves() {
   fi
 }
 
+# ── conductor MODE system (--local | --free | --full | --frontier) ────────────
+# Default --full. Each mode is a SUPERSET of the one below and is presence-gated:
+# a tier whose required key is absent falls through to the next-lower tier, so the
+# system always resolves to the highest tier whose keys are actually present. The
+# mode is the CEILING; the conductor's per-subtask gating decides actual use.
+HMX_ENV_FILE="${HMX_ENV_FILE:-${REPO_ROOT}/.env}"
+HMX_MODE_FILE="${HERMES_MAX_STATE_DIR:-${HOME}/.hermes-max}/conductor/mode"
+HMX_MODE_FILE="${HMX_MODE_FILE/#\~/$HOME}"
+
+# A key is present if non-empty in the live shell env OR non-empty in .env.
+_key_present() {
+  local k="$1"
+  [ -n "${!k:-}" ] && return 0
+  grep -qE "^${k}=[^[:space:]#]" "${HMX_ENV_FILE}" 2>/dev/null
+}
+_paid_present() { _key_present DEEPINFRA_API_KEY || _key_present FIREWORKS_API_KEY \
+  || _key_present TOGETHER_API_KEY || _key_present DEEPSEEK_API_KEY || _key_present MOONSHOT_API_KEY; }
+_free_present() { _key_present CEREBRAS_API_KEY || _key_present GROQ_API_KEY || _key_present GEMINI_API_KEY; }
+
+# Resolve a requested mode to the highest tier whose required key is present,
+# warning (to stderr) on each fall-through. Echoes the effective mode on stdout.
+_resolve_mode() {
+  local m="$1"
+  while :; do
+    case "${m}" in
+      frontier) _key_present ANTHROPIC_API_KEY && break
+                echo "  ⚠ --frontier needs ANTHROPIC_API_KEY (absent) → falling back to --full (Opus tier OFF)" >&2; m=full ;;
+      full)     _paid_present && break
+                echo "  ⚠ --full needs a paid synth key (DeepInfra/Fireworks/Together/DeepSeek/Moonshot) (absent) → --free" >&2; m=free ;;
+      free)     _free_present && break
+                echo "  ⚠ --free needs a free key (Cerebras/Groq/Gemini) (absent) → --local" >&2; m=local ;;
+      local)    break ;;
+      *)        m=full ;;
+    esac
+  done
+  echo "${m}"
+}
+
+_mode_tiers_line() {
+  case "$1" in
+    local)    echo "local only — fully sovereign, \$0 cloud" ;;
+    free)     echo "local + free draft/steer (Cerebras/Groq/Gemini)" ;;
+    full)     echo "local + free + DeepSeek V4 steer/synth (paid, ~\$10/mo)" ;;
+    frontier) echo "local + free + DeepSeek + SPARING Opus 4.8 escalation (3-gated, ~\$12-15/mo)" ;;
+  esac
+}
+
+# Apply a mode: resolve fall-through, persist to .env (backed up) + the live mode
+# file, export for freshly-started servers. Sets HMX_MODE_CHANGED=1 if .env changed
+# (the caller restarts the conductor so the running server picks up the new mode).
+HMX_MODE_CHANGED=0
+HMX_EFFECTIVE_MODE=""
+_apply_mode() {
+  local requested="${1:-full}" eff cur
+  eff="$(_resolve_mode "${requested}")"
+  HMX_EFFECTIVE_MODE="${eff}"
+  mkdir -p "$(dirname "${HMX_MODE_FILE}")"
+  printf '%s\n' "${eff}" > "${HMX_MODE_FILE}"
+  cur="$(grep -E '^CONDUCTOR_MODE=' "${HMX_ENV_FILE}" 2>/dev/null | head -1 | sed 's/^CONDUCTOR_MODE=//; s/[[:space:]].*//')"
+  if [ "${cur}" != "${eff}" ]; then
+    if [ -f "${HMX_ENV_FILE}" ]; then
+      cp -p "${HMX_ENV_FILE}" "${HMX_ENV_FILE}.bak.mode.$(date +%s 2>/dev/null || echo bak)" 2>/dev/null || true
+      if grep -qE '^CONDUCTOR_MODE=' "${HMX_ENV_FILE}"; then
+        sed -i "s@^CONDUCTOR_MODE=.*@CONDUCTOR_MODE=${eff}   # set by hm up (local/free/full/frontier)@" "${HMX_ENV_FILE}"
+      else
+        printf 'CONDUCTOR_MODE=%s   # set by hm up (local/free/full/frontier)\n' "${eff}" >> "${HMX_ENV_FILE}"
+      fi
+    fi
+    HMX_MODE_CHANGED=1
+  fi
+  export CONDUCTOR_MODE="${eff}"
+  if [ "${eff}" != "${requested}" ]; then
+    echo "  • requested --${requested}, resolved to --${eff} (key fall-through)"
+  fi
+  echo "  ▸ conductor mode: ${eff} — $(_mode_tiers_line "${eff}")"
+}
+
+# Extract a --local|--free|--full|--frontier flag from args; echo the mode (or
+# 'full' default). Other args are ignored (start-all takes none meaningfully).
+_mode_from_args() {
+  local m=full a
+  for a in "$@"; do case "${a}" in
+    --local) m=local ;; --free) m=free ;; --full) m=full ;; --frontier) m=frontier ;;
+  esac; done
+  echo "${m}"
+}
+
 usage() {
-  sed -n '3,28p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
+  sed -n '3,27p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
 }
 
 _install() {
@@ -108,8 +197,13 @@ EOF
     echo "• '${TMUX_SESSION}' already running — attaching"
     exec tmux attach -t "${TMUX_SESSION}"
   fi
+  # conductor mode (default --full) before bringing the stack up
+  _apply_mode "$(_mode_from_args "$@")"
   # bring servers up if not already healthy (backgrounded inside start-all)
   "${SCRIPTS}/healthcheck.sh" >/dev/null 2>&1 || "${SCRIPTS}/start-all.sh" || true
+  if [ "${HMX_MODE_CHANGED}" = "1" ] && timeout 1 bash -c ">/dev/tcp/127.0.0.1/${MCP_ESCALATION_PORT:-9105}" 2>/dev/null; then
+    "${SCRIPTS}/restart.sh" escalation >/dev/null 2>&1 || true
+  fi
   # embed + rerank serves (gpu_local default) so the cockpit's status pane shows them
   _start_serves || true
   # pane 1 (large): an interactive shell ready for `hermes`
@@ -132,11 +226,22 @@ EOF
   exec tmux attach -t "${TMUX_SESSION}"
 }
 
+# Sourcing with HM_LIB_ONLY=1 defines the helper functions and stops before the
+# dispatch — so the mode-resolution logic can be unit-tested in isolation.
+if [ -n "${HM_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
+
 cmd="${1:-}"; shift || true
 case "${cmd}" in
   up)
     if [ -n "${HM_PRINT:-}" ]; then echo "${SCRIPTS}/start-all.sh"; exit 0; fi
-    "${SCRIPTS}/start-all.sh" "$@"
+    _apply_mode "$(_mode_from_args "$@")"
+    "${SCRIPTS}/start-all.sh"
+    # If the conductor was already running, restart it so it picks up the new mode
+    # (mode is read from CONDUCTOR_MODE in .env at launch). No-op if mode unchanged.
+    if [ "${HMX_MODE_CHANGED}" = "1" ] && timeout 1 bash -c ">/dev/tcp/127.0.0.1/${MCP_ESCALATION_PORT:-9105}" 2>/dev/null; then
+      echo "  • mode changed → restarting conductor (escalation) to apply it"
+      "${SCRIPTS}/restart.sh" escalation >/dev/null 2>&1 || true
+    fi
     # embed (:8002) + rerank (:8003) serves auto-start with the stack on gpu_local
     # (the dense lane + reranker); opt out with HM_WITH_EMBED=0 / HM_WITH_RERANK=0.
     _start_serves
