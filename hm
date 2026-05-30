@@ -20,6 +20,8 @@
 #   hm health             pass/fail healthcheck (for scripting)        scripts/healthcheck.sh
 #   hm summary            per-task tool-call summary + bottleneck split scripts/run-summary.sh
 #   hm bottleneck         full-vs-bare timing eval                     scripts/bottleneck-eval.sh
+#   hm eval [capability]  prove every feature works in the REAL agent  scripts/eval-battery.sh
+#                         loop (asserts real effects); one capability if named
 #   hm install            symlink hm onto PATH (~/.local/bin)
 set -uo pipefail
 
@@ -64,7 +66,7 @@ _start_serves() {
 }
 
 usage() {
-  sed -n '3,26p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
+  sed -n '3,28p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
 }
 
 _install() {
@@ -146,6 +148,7 @@ case "${cmd}" in
   health)      _dispatch "${SCRIPTS}/healthcheck.sh" "$@" ;;
   summary)     _dispatch "${SCRIPTS}/run-summary.sh" "$@" ;;
   bottleneck)  _dispatch "${SCRIPTS}/bottleneck-eval.sh" "$@" ;;
+  eval)        _dispatch "${SCRIPTS}/eval-battery.sh" "$@" ;;
   snapshot)    _dispatch "${SCRIPTS}/snapshot-stores.sh" "$@" ;;
   restore)     _dispatch "${SCRIPTS}/restore-stores.sh" "$@" ;;
   logs)

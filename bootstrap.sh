@@ -7,6 +7,9 @@
 #   bash bootstrap.sh            # set everything up (idempotent, safe to re-run)
 #   bash bootstrap.sh --check    # dry-run AUDIT: report what's missing, change nothing
 #   bash bootstrap.sh --no-smoke # skip the per-server smoke tests (faster)
+#   bash bootstrap.sh --verify-agent # after setup, drive a quick capability subset
+#                                # through REAL hermes agent turns (proves the agent
+#                                # can actually use the features, not just that servers are up)
 #
 # Always invoke via `bash bootstrap.sh` — it needs no execute bit, and it
 # chmod +x's the repo's own scripts so YOU never have to.
@@ -34,12 +37,14 @@ REPO_ROOT="${SCRIPT_DIR}"
 
 CHECK=0
 DO_SMOKE=1
+VERIFY_AGENT=0   # --verify-agent: after setup, drive a few capabilities through a REAL agent turn
 EXPLICIT_PROFILE=""   # --profile X (or DEPLOY_PROFILE env) — never silently overridden
 while [ "$#" -gt 0 ]; do
   arg="$1"
   case "${arg}" in
     --check)    CHECK=1 ;;
     --no-smoke) DO_SMOKE=0 ;;
+    --verify-agent) VERIFY_AGENT=1 ;;
     --profile)  shift; EXPLICIT_PROFILE="${1:-}" ;;
     --profile=*) EXPLICIT_PROFILE="${arg#--profile=}" ;;
     -h|--help)
@@ -395,6 +400,30 @@ if [ "${CHECK}" -eq 0 ]; then
       || c_warn "could not install tmux via brew — 'hm dev' will show manual instructions"
   else
     c_warn "tmux not installed — 'hm dev' will print manual instructions. Install it for the cockpit:  sudo apt install tmux  (or brew install tmux)"
+  fi
+fi
+
+# ── 5b. optional: prove the install actually works in the REAL agent loop ─────
+# `--verify-agent` brings the stack up and drives a FAST subset of capabilities
+# through real `hermes -z` agent turns, asserting the real-world effect (not just
+# that servers respond). This is the difference between "servers are up" and "the
+# agent can actually use the features". Skipped in --check (read-only).
+if [ "${VERIFY_AGENT}" -eq 1 ] && [ "${CHECK}" -eq 0 ]; then
+  hdr "verify-agent (real agent turns)"
+  if ! command -v hermes >/dev/null 2>&1; then
+    c_warn "hermes not on PATH — cannot drive agent turns; skipping --verify-agent"
+  else
+    "${REPO_ROOT}/scripts/start-all.sh" >/dev/null 2>&1 || true
+    if "${REPO_ROOT}/scripts/healthcheck.sh" >/dev/null 2>&1; then
+      c_ok "stack live — driving a quick capability subset through the agent"
+      if "${REPO_ROOT}/scripts/eval-battery.sh" --quick; then
+        c_ok "agent-level verification PASSED (see ${REPO_ROOT}/eval_battery_report.md)"
+      else
+        c_warn "agent-level verification had failures — see ${REPO_ROOT}/eval_battery_report.md"
+      fi
+    else
+      c_warn "stack did not come up — skipping --verify-agent (run 'hm up' then 'hm eval --quick')"
+    fi
   fi
 fi
 

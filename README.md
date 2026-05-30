@@ -97,6 +97,7 @@ hm summary             # per-task summary + bottleneck split
 hm dev                 # the tmux cockpit (below)
 hm attach              # reattach to the cockpit
 hm health              # pass/fail healthcheck     (scripts/healthcheck.sh)
+hm eval [capability]   # prove every feature works in the REAL agent loop (scripts/eval-battery.sh)
 ```
 
 **`hm dev` — the one-command tmux cockpit.** Brings the servers up backgrounded
@@ -134,6 +135,44 @@ overwriting, so a restore is itself reversible.
 
 Stop the servers with `kill $(cat ~/.hermes-max/run/*.pid)`. Logs are under
 `~/.hermes-max/logs/`.
+
+## The agent-level eval battery — *does every feature actually work?*
+
+`smoke-test.sh` proves each server responds **in isolation**; `healthcheck.sh`
+proves each is **live**. Neither proves the thing that actually matters: that the
+**Hermes agent can use each feature in the real loop**. A server can answer `200`
+on `/health` while the agent's call into it silently fails — exactly the class of
+bug fixed in this work (a long sync tool blocked the event loop so `/health`
+timed out → false DOWN; a bare `asyncio.run()` inside the live loop made every
+MCP-to-MCP call return nothing → empty research). Isolation tests were green
+throughout; only a **real agent turn** exposed it.
+
+`scripts/eval-battery.sh` (`hm eval`) is the canonical *"is the system actually
+working?"* check. It drives **each capability through a real `hermes -z … --yolo`
+agent turn** and asserts the **real-world effect** — a file on disk, a row in the
+KG db, a doc in the corpus, a git checkpoint commit, a line in `MEMORY.md`, a span
+in the live log — **not just a 200**. A capability "works" only if the agent
+invoking it produced the change it's supposed to.
+
+```bash
+hm eval                      # whole battery (real agent turns; ~tens of minutes)
+hm eval knowledge-graph      # one capability (fast iteration)
+hm eval --quick              # fast subset: core-memory, knowledge-graph, verify
+scripts/eval-battery.sh --no-cloud   # skip conductor tests that need a key
+```
+
+Coverage: `verify` gate · `codebase-rag` · `knowledge-graph` · `checkpoint` ·
+`watchdog` · `search` (best-of-N) · `docs` · `research` · `escalation` ·
+`observability` · `core-memory`. It is **isolated** — RAG/KG/corpus are
+snapshotted and restored, `MEMORY.md` is backed up and restored, and filesystem
+tests run in their own temp project dir, so it never pollutes real state. Output
+is a readable `eval_battery_report.md`: per-capability PASS/FAIL, the agent task
+used, the tool that fired, the artifact effect verified, and for any failure the
+**precise break-point** (tool-not-called / tool-errored / no-effect).
+
+**Run it after any change, or on a fresh install** (`bootstrap.sh --verify-agent`
+drives the quick subset through real agent turns) to confirm the agent can really
+use every feature — not just that the servers are up.
 
 ## Config contract (`.env`)
 
