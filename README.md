@@ -423,7 +423,7 @@ start backgrounded, test ONCE with a timeout, never poll), `skill-process-gotcha
 (STUCK → summarize → **revert_to_last_green** → reset context → try different →
 ping), `workflow-done-definition` (done = verify green, not the model's opinion),
 and `workflow-context-hygiene` (PLAN.md is the source of truth). See
-`CLAUDE_longhorizon.md` and `long-horizon-scaffolding.md`.
+`specs/CLAUDE_longhorizon.md` and `long-horizon-scaffolding.md`.
 
 ### Two-axis upgrade skills (robustness + capability)
 
