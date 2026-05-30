@@ -27,13 +27,16 @@ HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
 mcp = FastMCP(
     "mcp-watchdog",
     instructions=(
-        "Deterministic self-check signals for never-getting-stuck. Call "
-        "check_spiral on recent reasoning to catch a thinking loop; check_stall "
-        "ONCE on a long-running tool call (it will NOT report a heartbeating "
-        "process as hung); check_progress every few subtasks to catch a stall; "
-        "and start_task_budget/check_budget for per-task wall-clock/turns/USD "
-        "limits. On spiral_detected / no_progress / hung / budget_exceeded, write "
-        "a STUCK SUMMARY and call revert_to_last_green + replan."
+        "Deterministic self-check signals for never-getting-stuck. For a "
+        "variable-duration tool call estimate_duration FIRST (look-ahead) and log "
+        "it; record_heartbeat as it makes progress; then check_stall ONCE — it uses "
+        "the PER-TOOL adaptive budget + hard ceiling (tool_budget) and will NOT "
+        "report a heartbeating process as hung, only a silent over-budget one or a "
+        "hard-ceiling runaway. Call check_spiral on recent reasoning to catch a "
+        "thinking loop; check_progress every few subtasks to catch a stall; and "
+        "start_task_budget/check_budget for per-task wall-clock/turns/USD limits. On "
+        "spiral_detected / no_progress / hung / budget_exceeded, write a STUCK "
+        "SUMMARY and call revert_to_last_green + replan."
     ),
     host=HOST,
     port=PORT,
@@ -63,16 +66,49 @@ def check_spiral(recent_thinking_text: str, ngram: int | None = None) -> dict:
 @mcp.tool()
 def check_stall(tool_name: str, elapsed_s: float, expecting_heartbeat: bool = False,
                 last_heartbeat_age_s: float | None = None,
-                per_tool_budget_s: float | None = None) -> dict:
-    """Decide if an in-flight tool call is HUNG vs legitimately WAITING.
+                per_tool_budget_s: float | None = None,
+                task_id: str | None = None) -> dict:
+    """Decide if an in-flight tool call is HUNG vs legitimately WAITING, using the
+    PER-TOOL adaptive budget + hard ceiling registry (Stage 1).
 
-    Hung only if it exceeded its per-tool budget AND is silent. A heartbeating
-    process (recent last_heartbeat_age_s) is WAITING — never killed. Call this
-    ONCE on a backgrounded long-running process instead of polling it to
-    completion (the poll-hang fix).
+    Killed when elapsed exceeds the tool's HARD ceiling, OR when it is over its soft
+    budget AND has produced no heartbeat for > HEARTBEAT_TIMEOUT_S. A heartbeating
+    process is "slow-but-alive" — never killed for being slow. Pass task_id to let
+    the watchdog read the heartbeat age stamped by record_heartbeat (no need to
+    track it yourself). Call ONCE on a backgrounded long-running process instead of
+    polling it to completion (the poll-hang fix).
     """
     return watchdog_core.check_stall(tool_name, elapsed_s, expecting_heartbeat,
-                                     last_heartbeat_age_s, per_tool_budget_s)
+                                     last_heartbeat_age_s, per_tool_budget_s, task_id)
+
+
+@mcp.tool()
+def tool_budget(tool_name: str) -> dict:
+    """Return the per-tool adaptive budget for a tool: expected-duration class, soft
+    budget, HARD ceiling (env-overridable via BUDGET_<TOOL>_S), heartbeat timeout,
+    and the look-ahead input. Unknown tools fall back to the global budget."""
+    return watchdog_core.tool_budget(tool_name)
+
+
+@mcp.tool()
+def estimate_duration(tool_name: str, inputs: dict | None = None) -> dict:
+    """Look-ahead: BEFORE running a variable-duration tool, estimate how long it
+    SHOULD take so neither legitimately-long work is killed nor a doomed run is
+    started. inputs keys by tool — index_repo: {file_count, total_bytes};
+    deep_research: {query_count, per_source_s}; fetch_clean: {page_count};
+    verify: {test_count}. Returns est_s, hard ceiling, exceeds_ceiling, and a
+    human-readable basis to log for the operator."""
+    return watchdog_core.estimate_duration(tool_name, **(inputs or {}))
+
+
+@mcp.tool()
+def record_heartbeat(task_id: str, tool_name: str, progress: str | None = None,
+                     done: int | None = None, total: int | None = None) -> dict:
+    """Stamp a liveness heartbeat for an in-flight long-running tool (per file-batch
+    for index_repo, per source for deep_research). Proves the tool is WORKING so
+    check_stall(task_id=...) won't kill it for being slow. Carries item N/total for
+    the live progress log."""
+    return watchdog_core.record_heartbeat(task_id, tool_name, progress, done, total)
 
 
 @mcp.tool()

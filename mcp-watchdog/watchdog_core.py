@@ -41,7 +41,174 @@ STATE_DIR = Path(os.path.expanduser(
 
 # Default per-tool wall-clock budget (s). Mirrors the lowered native
 # terminal.timeout; a single tool call exceeding this WITHOUT a heartbeat is hung.
+# This is the GLOBAL backstop budget — Stage 1 refines it with a PER-TOOL registry
+# (see TOOL_BUDGETS below) so legitimately-long work is not killed prematurely and
+# genuinely-hung work still is. The global budget remains the fallback for any tool
+# not in the registry.
 TOOL_BUDGET_S = float(os.environ.get("WATCHDOG_TOOL_BUDGET_S", "120"))
+
+# Heartbeat liveness window (s). A tool that is OVER its budget is killed only if it
+# has produced NO heartbeat for longer than this — that is the do-nothing-hang
+# detector. A tool that keeps heartbeating is "working", never killed, even past its
+# estimate. (Separate knob from the budget itself, per the Stage-1 spec.)
+HEARTBEAT_TIMEOUT_S = float(os.environ.get("HEARTBEAT_TIMEOUT_S", "90"))
+
+
+# ── Stage 1: per-tool adaptive budget registry + look-ahead estimation ───────
+# Each tool declares an expected-duration class, a HARD ceiling (the most it may
+# ever run, heartbeat or not), and the look-ahead input that drives its estimate.
+# Ceilings are overridable per-tool via BUDGET_<TOOL>_S in .env (TOOL upper-cased,
+# non-alphanumerics -> '_'); e.g. BUDGET_INDEX_REPO_S, BUDGET_DEEP_RESEARCH_S.
+#
+# The principle: BEFORE a variable-duration tool runs, estimate how long it SHOULD
+# take (look-ahead) and log it; WHILE it runs, require a heartbeat; kill only when
+# (elapsed > ceiling) OR (elapsed > budget AND no heartbeat for > HEARTBEAT_TIMEOUT).
+def _budget_env(tool: str) -> str:
+    safe = "".join(c if c.isalnum() else "_" for c in tool).upper()
+    return f"BUDGET_{safe}_S"
+
+
+def _env_ceiling(tool: str, default: float) -> float:
+    try:
+        return float(os.environ.get(_budget_env(tool), default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+# expected: human label · ceiling_s: hard ceiling (env-overridable) · lookahead:
+# the input the estimator uses (None = fixed-cost tool, no look-ahead needed).
+_TOOL_BUDGET_DEFAULTS: dict[str, dict[str, Any]] = {
+    "quick_check":    {"expected": "seconds",            "ceiling_s": 60,   "lookahead": "file size"},
+    "lint":           {"expected": "seconds",            "ceiling_s": 60,   "lookahead": "file size"},
+    "type":           {"expected": "seconds",            "ceiling_s": 60,   "lookahead": "file size"},
+    "verify":         {"expected": "tens of seconds",    "ceiling_s": 300,  "lookahead": "test count"},
+    "index_repo":     {"expected": "scales with repo",   "ceiling_s": 1800, "lookahead": "file count x avg size"},
+    "search_code":    {"expected": "sub-second",         "ceiling_s": 30,   "lookahead": None},
+    "rag_query":      {"expected": "sub-second",         "ceiling_s": 30,   "lookahead": None},
+    "kg_query":       {"expected": "milliseconds",       "ceiling_s": 15,   "lookahead": None},
+    "kg_record":      {"expected": "milliseconds",       "ceiling_s": 15,   "lookahead": None},
+    "fetch_clean":    {"expected": "seconds-per-page",   "ceiling_s": 90,   "lookahead": "page count"},
+    "deep_research":  {"expected": "minutes",            "ceiling_s": 900,  "lookahead": "query count x per-source"},
+    "parallel_draft": {"expected": "seconds (concurrent)", "ceiling_s": 120, "lookahead": "pool size"},
+    "synth":          {"expected": "seconds",            "ceiling_s": 120,  "lookahead": None},
+    "steer":          {"expected": "seconds",            "ceiling_s": 120,  "lookahead": None},
+    "escalate":       {"expected": "seconds",            "ceiling_s": 120,  "lookahead": None},
+}
+
+# Per-item rates used by the look-ahead estimators (env-overridable). These are
+# rough "what's normal" priors — the heartbeat is the real liveness signal; the
+# estimate only tells the watchdog/operator what to expect and catches a doomed run
+# whose estimate alone already blows past the hard ceiling.
+EST_INDEX_PER_FILE_S = float(os.environ.get("EST_INDEX_PER_FILE_S", "0.077"))
+EST_INDEX_PER_MB_S = float(os.environ.get("EST_INDEX_PER_MB_S", "0.5"))
+EST_RESEARCH_PER_SOURCE_S = float(os.environ.get("EST_RESEARCH_PER_SOURCE_S", "30"))
+EST_FETCH_PER_PAGE_S = float(os.environ.get("EST_FETCH_PER_PAGE_S", "8"))
+
+
+def tool_budget(tool_name: str) -> dict[str, Any]:
+    """Return the registered budget for a tool: expected class, soft budget, hard
+    ceiling (env-overridable), and look-ahead input. Unknown tools fall back to the
+    global TOOL_BUDGET_S as both budget and ceiling so nothing is left unbudgeted."""
+    reg = _TOOL_BUDGET_DEFAULTS.get(tool_name)
+    if reg is None:
+        # Unknown tool: soft budget = global default, NO hard ceiling. It is judged
+        # purely by budget + heartbeat — so an arbitrary long-lived process (a dev
+        # server, a watcher) that keeps heartbeating is never killed for being slow.
+        return {"tool": tool_name, "known": False, "expected": "unknown",
+                "budget_s": TOOL_BUDGET_S, "ceiling_s": None,
+                "heartbeat_timeout_s": HEARTBEAT_TIMEOUT_S, "lookahead": None}
+    ceiling = _env_ceiling(tool_name, reg["ceiling_s"])
+    # Soft budget = the global default, but never above the tool's hard ceiling.
+    budget = min(TOOL_BUDGET_S, ceiling)
+    return {"tool": tool_name, "known": True, "expected": reg["expected"],
+            "budget_s": budget, "ceiling_s": ceiling,
+            "heartbeat_timeout_s": HEARTBEAT_TIMEOUT_S, "lookahead": reg["lookahead"]}
+
+
+def estimate_duration(tool_name: str, **inputs: Any) -> dict[str, Any]:
+    """Look-ahead: estimate how long a variable-duration tool SHOULD take BEFORE it
+    runs, so the watchdog knows what's normal and the operator knows what to expect.
+
+    Recognised inputs:
+      index_repo:    file_count, total_bytes (or avg_file_bytes)
+      deep_research: query_count, per_source_s
+      fetch_clean:   page_count, per_page_s
+      verify:        test_count
+    Returns est_s, the hard ceiling, exceeds_ceiling (a doomed run to chunk/raise),
+    and a human-readable basis string. Emits a tool_estimate span."""
+    b = tool_budget(tool_name)
+    ceiling = b["ceiling_s"]
+    est_s = 0.0
+    basis = "fixed-cost tool — no look-ahead"
+
+    if tool_name == "index_repo":
+        n = int(inputs.get("file_count", 0) or 0)
+        total_bytes = inputs.get("total_bytes")
+        if total_bytes is None and inputs.get("avg_file_bytes") is not None:
+            total_bytes = float(inputs["avg_file_bytes"]) * n
+        mb = (float(total_bytes) / 1_048_576) if total_bytes else 0.0
+        est_s = max(0.5, n * EST_INDEX_PER_FILE_S + mb * EST_INDEX_PER_MB_S) if n else 0.0
+        basis = f"{n:,} files" + (f", {mb:.1f}MB" if mb else "") + \
+                f" x ~{EST_INDEX_PER_FILE_S:.3f}s/file = est ~{est_s:.0f}s"
+    elif tool_name == "deep_research":
+        q = int(inputs.get("query_count", 0) or 0)
+        per = float(inputs.get("per_source_s", EST_RESEARCH_PER_SOURCE_S))
+        est_s = q * per
+        basis = f"{q} planned queries x ~{per:.0f}s/source = est ~{est_s:.0f}s"
+    elif tool_name == "fetch_clean":
+        pages = int(inputs.get("page_count", 1) or 1)
+        per = float(inputs.get("per_page_s", EST_FETCH_PER_PAGE_S))
+        est_s = pages * per
+        basis = f"{pages} page(s) x ~{per:.0f}s/page = est ~{est_s:.0f}s"
+    elif tool_name == "verify":
+        t = int(inputs.get("test_count", 0) or 0)
+        per = float(inputs.get("per_test_s", 0.25))
+        est_s = max(2.0, t * per) if t else 0.0
+        basis = f"{t} tests x ~{per:.2f}s = est ~{est_s:.0f}s" if t else basis
+
+    exceeds = bool(est_s and ceiling is not None and est_s > ceiling)
+    out = {
+        "ok": True, "tool": tool_name, "est_s": round(est_s, 1),
+        "ceiling_s": ceiling, "budget_s": b["budget_s"],
+        "exceeds_ceiling": exceeds, "basis": basis,
+        "advice": ("estimate alone exceeds the hard ceiling — chunk the work or "
+                   f"raise {_budget_env(tool_name)} before starting"
+                   if exceeds else "within ceiling — run with heartbeat liveness"),
+    }
+    otel_emit.record("tool_estimate", {"tool": tool_name, "est_s": out["est_s"],
+                                       "ceiling_s": ceiling, "exceeds_ceiling": exceeds,
+                                       "basis": basis},
+                     status="error" if exceeds else "ok")
+    return out
+
+
+def record_heartbeat(task_id: str, tool_name: str, progress: str | None = None,
+                     done: int | None = None, total: int | None = None) -> dict[str, Any]:
+    """Stamp a liveness heartbeat for an in-flight long-running tool. A tool that
+    heartbeats (per file-batch, per research source) is proven WORKING; check_stall
+    reads the freshness of this stamp to decide hung-vs-waiting. Emits a
+    tool_heartbeat span carrying current progress (item N/total) for the live log."""
+    now = time.time()
+    with _lock:
+        st = _load(task_id)
+        hb = st.get("heartbeats", {})
+        hb[tool_name] = {"ts": now, "progress": progress, "done": done, "total": total}
+        st["heartbeats"] = hb
+        _save(task_id, st)
+    pct = (round(100 * done / total, 1) if (done is not None and total) else None)
+    otel_emit.record("tool_heartbeat", {"task_id": task_id, "tool": tool_name,
+                                        "progress": progress, "done": done, "total": total,
+                                        "pct": pct})
+    return {"ok": True, "tool": tool_name, "ts": now, "progress": progress,
+            "done": done, "total": total, "pct": pct}
+
+
+def _heartbeat_age(task_id: str, tool_name: str) -> float | None:
+    st = _load(task_id)
+    hb = st.get("heartbeats", {}).get(tool_name)
+    if not hb:
+        return None
+    return max(0.0, time.time() - float(hb["ts"]))
 
 # Spiral thresholds (env-overridable). A spiral trips if ANY fires.
 SPIRAL_NGRAM = int(os.environ.get("WATCHDOG_SPIRAL_NGRAM", "4"))
@@ -158,41 +325,90 @@ def check_spiral(recent_thinking_text: str, ngram: int | None = None) -> dict[st
 # ── check_stall ──────────────────────────────────────────────────────────────
 def check_stall(tool_name: str, elapsed_s: float, expecting_heartbeat: bool = False,
                 last_heartbeat_age_s: float | None = None,
-                per_tool_budget_s: float | None = None) -> dict[str, Any]:
+                per_tool_budget_s: float | None = None,
+                task_id: str | None = None) -> dict[str, Any]:
     """Decide if a single in-flight tool call is HUNG vs legitimately WAITING.
 
-    A call is hung only if it has exceeded its per-tool budget AND is not
-    producing output. A process that is heartbeating (recent output, or a fresh
-    last_heartbeat_age_s) is WAITING, not hung — never report it hung (the
-    OpenHands kill-the-waiter trap). If it WAS heartbeating but the heartbeat is
-    now older than the budget, it has gone silent and IS hung.
-    """
-    budget = float(per_tool_budget_s if per_tool_budget_s is not None else TOOL_BUDGET_S)
-    elapsed = float(elapsed_s)
-    over_budget = elapsed > budget
+    Per-tool adaptive model (Stage 1):
+      * budget  = per_tool_budget_s if given, else the tool's registered soft budget
+                  (which falls back to the global TOOL_BUDGET_S for unknown tools).
+      * ceiling = the tool's registered HARD ceiling — the most it may EVER run,
+                  heartbeat or not (env-overridable via BUDGET_<TOOL>_S).
+      * heartbeat age — supplied directly, OR looked up from the watchdog state by
+                  task_id (record_heartbeat stamps it). Fresh within
+                  HEARTBEAT_TIMEOUT_S ⇒ the process is WORKING.
 
-    heartbeating = (
-        expecting_heartbeat
-        and last_heartbeat_age_s is not None
-        and float(last_heartbeat_age_s) <= budget
+    KILL only when (elapsed > ceiling)  — a hard runaway, OR
+                  (elapsed > budget AND no fresh heartbeat for > HEARTBEAT_TIMEOUT_S).
+    A tool that keeps heartbeating is never killed for being slow — it is
+    "slow-but-alive" (the OpenHands kill-the-waiter trap, avoided). Over budget but
+    still heartbeating emits tool_slow_but_alive; a kill emits tool_killed_hung.
+    """
+    reg = tool_budget(tool_name)
+    budget = float(per_tool_budget_s if per_tool_budget_s is not None else reg["budget_s"])
+    # ceiling is None for unknown tools (no hard cap — heartbeat governs entirely).
+    ceiling = float(reg["ceiling_s"]) if reg["ceiling_s"] is not None else None
+    hb_timeout = HEARTBEAT_TIMEOUT_S
+    elapsed = float(elapsed_s)
+
+    # Resolve heartbeat age: explicit arg wins; else look it up from state by task_id.
+    hb_age = last_heartbeat_age_s
+    if hb_age is None and task_id is not None:
+        hb_age = _heartbeat_age(task_id, tool_name)
+    if hb_age is not None:
+        expecting_heartbeat = True
+
+    over_budget = elapsed > budget
+    over_ceiling = ceiling is not None and elapsed > ceiling
+    fresh_heartbeat = (
+        expecting_heartbeat and hb_age is not None and float(hb_age) <= hb_timeout
     )
 
-    if not over_budget:
-        return {"ok": True, "hung": False, "waiting": False, "budget_s": budget,
-                "elapsed_s": elapsed, "reason": "within per-tool budget"}
-    if heartbeating:
-        return {"ok": True, "hung": False, "waiting": True, "budget_s": budget,
-                "elapsed_s": elapsed,
-                "reason": "over budget but heartbeating — legitimately waiting, do NOT kill"}
+    base = {"ok": True, "budget_s": budget, "ceiling_s": ceiling,
+            "heartbeat_timeout_s": hb_timeout, "elapsed_s": elapsed,
+            "heartbeat_age_s": (round(float(hb_age), 1) if hb_age is not None else None)}
 
-    # over budget and silent -> hung
-    reason = ("over per-tool budget with no heartbeat — "
-              + ("heartbeat went stale" if expecting_heartbeat else "silent")
-              + f" ({elapsed:.0f}s > {budget:.0f}s)")
+    # 1. Hard ceiling — killed regardless of heartbeat (a genuine runaway).
+    if over_ceiling:
+        reason = (f"exceeded HARD ceiling ({elapsed:.0f}s > {ceiling:.0f}s) — "
+                  "killed even though heartbeating" if fresh_heartbeat
+                  else f"exceeded HARD ceiling ({elapsed:.0f}s > {ceiling:.0f}s)")
+        otel_emit.record("tool_killed_hung", {"tool": tool_name, "elapsed_s": elapsed,
+                                              "ceiling_s": ceiling, "cause": "ceiling",
+                                              "reason": reason}, status="error")
+        return {**base, "hung": True, "waiting": False, "cause": "ceiling", "reason": reason}
+
+    # 2. Within budget — fine.
+    if not over_budget:
+        return {**base, "hung": False, "waiting": False, "cause": None,
+                "reason": "within per-tool budget"}
+
+    # 3. Over budget but heartbeating — slow-but-alive, do NOT kill.
+    if fresh_heartbeat:
+        reason = (f"over budget ({elapsed:.0f}s > {budget:.0f}s) but heartbeating "
+                  f"({float(hb_age):.0f}s ago) — legitimately working, do NOT kill")
+        otel_emit.record("tool_slow_but_alive", {"tool": tool_name, "elapsed_s": elapsed,
+                                                 "budget_s": budget, "ceiling_s": ceiling,
+                                                 "heartbeat_age_s": round(float(hb_age), 1)})
+        return {**base, "hung": False, "waiting": True, "cause": None, "reason": reason}
+
+    # 4. Over budget and silent past the heartbeat timeout — hung.
+    if expecting_heartbeat and hb_age is not None:
+        why = f"heartbeat went stale ({float(hb_age):.0f}s > {hb_timeout:.0f}s)"
+    elif expecting_heartbeat:
+        why = "expected a heartbeat but none recorded"
+    else:
+        why = "silent"
+    reason = (f"over per-tool budget with no heartbeat — {why} "
+              f"({elapsed:.0f}s > {budget:.0f}s)")
+    otel_emit.record("tool_killed_hung", {"tool": tool_name, "elapsed_s": elapsed,
+                                          "budget_s": budget, "cause": "budget+no-heartbeat",
+                                          "reason": reason}, status="error")
+    # Keep the legacy span too so existing Phoenix dashboards still light up.
     otel_emit.record("poll_hang_caught", {"tool": tool_name, "elapsed_s": elapsed,
                                           "budget_s": budget, "reason": reason}, status="error")
-    return {"ok": True, "hung": True, "waiting": False, "budget_s": budget,
-            "elapsed_s": elapsed, "reason": reason}
+    return {**base, "hung": True, "waiting": False, "cause": "budget+no-heartbeat",
+            "reason": reason}
 
 
 # ── check_progress ───────────────────────────────────────────────────────────
@@ -309,6 +525,8 @@ def check_budget(task_id: str, turns_used: int | None = None, usd_spent: float |
 def status() -> dict[str, Any]:
     return {
         "tool_budget_s": TOOL_BUDGET_S,
+        "heartbeat_timeout_s": HEARTBEAT_TIMEOUT_S,
+        "tool_budgets": {t: tool_budget(t) for t in _TOOL_BUDGET_DEFAULTS},
         "spiral_thresholds": {
             "ngram": SPIRAL_NGRAM, "dup_ratio": SPIRAL_DUP_RATIO, "top_freq": SPIRAL_TOP_FREQ,
             "compress_ratio_max": SPIRAL_COMPRESS, "seg_sim": SPIRAL_SEG_SIM,

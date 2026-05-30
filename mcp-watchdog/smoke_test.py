@@ -131,6 +131,57 @@ def part_a() -> None:
         _fail(f"check_budget should error when no budget started: {r}")
     _ok("check_budget on unstarted task returns a clean error (no crash)")
 
+    # 5. per-tool budget registry (Stage 1)
+    b = wc.tool_budget("index_repo")
+    if not b["known"] or b["ceiling_s"] != 1800:
+        _fail(f"index_repo registry ceiling wrong: {b}")
+    _ok(f"index_repo has a per-tool hard ceiling ({b['ceiling_s']}s, expected '{b['expected']}')")
+    b = wc.tool_budget("totally_unknown_tool")
+    if b["known"] or b["ceiling_s"] is not None:
+        _fail(f"unknown tool should have no hard ceiling: {b}")
+    _ok("unknown tool falls back to global budget with NO hard ceiling")
+    # env override of a ceiling
+    os.environ["BUDGET_DEEP_RESEARCH_S"] = "1234"
+    b = wc.tool_budget("deep_research")
+    if b["ceiling_s"] != 1234:
+        _fail(f"BUDGET_DEEP_RESEARCH_S override not honored: {b}")
+    _ok("BUDGET_<TOOL>_S overrides a per-tool ceiling")
+    del os.environ["BUDGET_DEEP_RESEARCH_S"]
+
+    # 6. look-ahead estimation (Stage 1)
+    e = wc.estimate_duration("index_repo", file_count=1240, total_bytes=1240 * 4096)
+    if not (50 < e["est_s"] < 1800) or e["exceeds_ceiling"]:
+        _fail(f"index_repo look-ahead estimate implausible: {e}")
+    _ok(f"index_repo look-ahead: {e['basis']} (ceiling {e['ceiling_s']}s)")
+    e = wc.estimate_duration("deep_research", query_count=12, per_source_s=30)
+    if abs(e["est_s"] - 360) > 1 or e["exceeds_ceiling"]:
+        _fail(f"deep_research look-ahead wrong: {e}")
+    _ok(f"deep_research look-ahead: {e['basis']}")
+    # a doomed run: estimate alone blows past the ceiling
+    e = wc.estimate_duration("deep_research", query_count=1000, per_source_s=30)
+    if not e["exceeds_ceiling"]:
+        _fail(f"a 1000-query research run should exceed the ceiling: {e}")
+    _ok("a look-ahead estimate exceeding the ceiling is flagged (chunk/raise, not doomed-run)")
+
+    # 7. hard ceiling kills even a heartbeating tool; heartbeat-via-state liveness
+    r = wc.check_stall("index_repo", elapsed_s=2000, expecting_heartbeat=True,
+                       last_heartbeat_age_s=1)
+    if not r["hung"] or r.get("cause") != "ceiling":
+        _fail(f"hard-ceiling runaway not killed despite heartbeat: {r}")
+    _ok("a heartbeating tool past its HARD ceiling IS killed (runaway guard)")
+    # within ceiling, over budget, heartbeating -> slow-but-alive
+    r = wc.check_stall("index_repo", elapsed_s=200, expecting_heartbeat=True,
+                       last_heartbeat_age_s=3)
+    if r["hung"] or not r["waiting"]:
+        _fail(f"over-budget heartbeating index wrongly killed: {r}")
+    _ok("over-budget but heartbeating (within ceiling) is slow-but-alive, not killed")
+    # heartbeat resolved from watchdog state by task_id (no caller-tracked age)
+    wc.record_heartbeat("hb-task", "index_repo", progress="400/1240", done=400, total=1240)
+    r = wc.check_stall("index_repo", elapsed_s=200, task_id="hb-task")
+    if r["hung"] or not r["waiting"]:
+        _fail(f"state-stamped heartbeat not honored by check_stall: {r}")
+    _ok("record_heartbeat + check_stall(task_id=...) resolves liveness from state")
+
 
 async def _mcp_check(port: int) -> None:
     from mcp import ClientSession
@@ -141,7 +192,8 @@ async def _mcp_check(port: int) -> None:
             await session.initialize()
             names = {t.name for t in (await session.list_tools()).tools}
             expected = {"check_spiral", "check_stall", "check_progress",
-                        "start_task_budget", "check_budget"}
+                        "start_task_budget", "check_budget",
+                        "tool_budget", "estimate_duration", "record_heartbeat"}
             if not expected.issubset(names):
                 _fail(f"missing tools; got {sorted(names)}")
             _ok(f"tools advertised: {sorted(names)}")
