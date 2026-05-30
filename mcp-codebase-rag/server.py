@@ -73,6 +73,15 @@ def search_code(query: str, k: int = 8) -> dict:
 
 
 @mcp.tool()
+def index_document(text: str, namespace: str, source: str = "", title: str = "") -> dict:
+    """Ingest a distilled document (markdown) into the hybrid store under a
+    `namespace` (e.g. 'docs/fastapi'), co-retrievable with code via search_code.
+    Idempotent per (namespace, source). Used by mcp-docs to land learned-framework
+    knowledge alongside code-trace memory."""
+    return rag_core.index_document(text, namespace, source, title)
+
+
+@mcp.tool()
 def get_symbol_context(symbol: str, k: int = 5) -> dict:
     """Return the full chunk(s) defining a named symbol (function/class/etc.)."""
     return rag_core.get_symbol_context(symbol, k)

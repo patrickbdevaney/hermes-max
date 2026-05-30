@@ -479,6 +479,97 @@ def index_repo(path: str) -> dict[str, Any]:
         con.close()
 
 
+def _markdown_chunks(text: str, source: str) -> list[Chunk]:
+    """Section-aware chunking for ingested docs: split on markdown headings, then
+    window any over-long section. Each chunk's symbol is its heading trail so it
+    is co-retrievable with code symbols."""
+    lines = text.splitlines()
+    sections: list[tuple[str, list[str]]] = []
+    cur_head = source or "doc"
+    cur: list[str] = []
+    for ln in lines:
+        if re.match(r"^#{1,6}\s+\S", ln):
+            if cur:
+                sections.append((cur_head, cur))
+            cur_head = ln.lstrip("#").strip()[:120]
+            cur = [ln]
+        else:
+            cur.append(ln)
+    if cur:
+        sections.append((cur_head, cur))
+    if not sections:
+        sections = [(source or "doc", lines)]
+
+    out: list[Chunk] = []
+    for head, body in sections:
+        block = "\n".join(body).strip()
+        if not block:
+            continue
+        if len(block) <= MAX_CHUNK_CHARS:
+            out.append(Chunk(head, "doc", 1, 1, block))
+        else:
+            for i in range(0, len(block), MAX_CHUNK_CHARS):
+                out.append(Chunk(head, "doc", 1, 1, block[i: i + MAX_CHUNK_CHARS]))
+    return out
+
+
+def index_document(text: str, namespace: str, source: str = "", title: str = "") -> dict[str, Any]:
+    """Ingest a distilled document (markdown) into the SAME hybrid store under a
+    `namespace` (e.g. 'docs/fastapi'), co-retrievable with code via search_code.
+
+    Idempotent per (namespace, source): re-ingesting the same URL replaces its
+    prior chunks. Embeds when EMBED_BASE_URL is configured; otherwise BM25-only.
+    No graph layer (docs aren't AST). Used by mcp-docs.ingest_doc.
+    """
+    if not text or not text.strip():
+        return {"ok": False, "error": "empty document", "namespace": namespace}
+    repo = namespace.strip() or "docs/uncategorized"
+    src = source or (title or "doc")
+    con, vec_ok = _connect()
+    try:
+        old = [r["id"] for r in con.execute(
+            "SELECT id FROM chunks WHERE repo=? AND path=?", (repo, src))]
+        if old:
+            qs = ",".join("?" * len(old))
+            con.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({qs})", old)
+            if _vec_table_exists(con):
+                con.execute(f"DELETE FROM chunks_vec WHERE rowid IN ({qs})", old)
+            con.execute(f"DELETE FROM chunks WHERE id IN ({qs})", old)
+
+        chunks = _markdown_chunks(text, title or src)
+        pending: list[int] = []
+        pending_text: list[str] = []
+        for ch in chunks:
+            cur = con.execute(
+                "INSERT INTO chunks(repo, path, symbol, kind, lang, start_line, end_line, content) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (repo, src, ch.symbol, "doc", "markdown", ch.start_line, ch.end_line, ch.content),
+            )
+            cid = cur.lastrowid
+            con.execute("INSERT INTO chunks_fts(rowid, symbol, content) VALUES(?,?,?)",
+                        (cid, ch.symbol, ch.content))
+            pending.append(cid)
+            pending_text.append(f"{ch.symbol}\n{ch.content}")
+        con.commit()
+
+        embedded = False
+        if vec_ok and embeddings_configured() and pending_text:
+            vectors = embed_texts(pending_text)
+            if vectors and len(vectors) == len(pending):
+                _ensure_vec_table(con, len(vectors[0]))
+                for cid, vec in zip(pending, vectors):
+                    con.execute("INSERT INTO chunks_vec(rowid, embedding) VALUES(?, ?)",
+                                (cid, _ser(vec)))
+                con.commit()
+                embedded = True
+
+        return {"ok": True, "namespace": repo, "source": src,
+                "chunks_indexed": len(pending), "dense_embedded": embedded,
+                "mode": "hybrid" if embedded else "bm25-only"}
+    finally:
+        con.close()
+
+
 def _fts_query(query: str) -> str:
     """Build a safe FTS5 MATCH expression: OR of quoted word tokens."""
     words = re.findall(r"[A-Za-z0-9_]+", query)

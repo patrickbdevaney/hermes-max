@@ -66,3 +66,9 @@ servers:
     port_env: MCP_SEARCH_PORT
     health: /health
     register_as: hermes-max-search
+  - name: docs
+    dir: mcp-docs
+    port: 9109
+    port_env: MCP_DOCS_PORT
+    health: /health
+    register_as: hermes-max-docs
