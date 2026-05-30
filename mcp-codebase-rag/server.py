@@ -61,10 +61,13 @@ def index_repo(path: str) -> dict:
 
 @mcp.tool()
 def search_code(query: str, k: int = 8) -> dict:
-    """Hybrid search (BM25 + dense via RRF) over indexed code.
+    """Hybrid search (BM25 + dense + graph via RRF, then optional cross-encoder
+    rerank) over indexed code.
 
     Returns up to k results with symbol, kind, path:line location, and a code
-    snippet. Falls back to BM25-only when embeddings are unavailable.
+    snippet. The `mode` field reports exactly which lanes were active
+    (e.g. "hybrid+graph+rerank" or "bm25-only"); each lane degrades gracefully
+    when its endpoint is absent, so retrieval never hard-fails.
     """
     return rag_core.search_code(query, k)
 

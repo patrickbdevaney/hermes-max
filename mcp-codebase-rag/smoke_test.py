@@ -122,6 +122,57 @@ def part_a() -> None:
         graph_core.graph_available = _real  # type: ignore[assignment]
 
 
+def part_rerank() -> None:
+    """Stage 1.2 rerank WIRING, deterministic (fake endpoint — no live model).
+
+    Proves: (1) a configured reranker is handed a LARGER fused pool and its order
+    is applied (mode shows +rerank); (2) when the reranker returns nothing the
+    server keeps the fused order and drops +rerank (graceful degradation).
+    """
+    print("[A2] reranker wiring (fake endpoint, deterministic)")
+    import rag_core
+
+    rag_core.RERANK_BASE_URL = "http://fake-rerank.local"  # marks rerank "configured"
+    calls: dict[str, int] = {}
+
+    def fake_rerank(query: str, documents: list[str]):
+        calls["n_docs"] = len(documents)
+        return list(range(len(documents)))[::-1]  # deterministic reversal
+
+    real = rag_core.rerank
+    # A query that fuses a multi-candidate pool (so there's something to reorder).
+    q_multi = "account balance deposit withdraw transfer money"
+    # Baseline fused order with the reranker OFF.
+    rag_core.RERANK_BASE_URL = ""
+    fused = [r["symbol"] for r in rag_core.search_code(q_multi, k=3)["results"]]
+    rag_core.RERANK_BASE_URL = "http://fake-rerank.local"
+    rag_core.rerank = fake_rerank  # type: ignore[assignment]
+    try:
+        res = rag_core.search_code(q_multi, k=3)
+        if "+rerank" not in res["mode"]:
+            _fail(f"rerank not applied; mode={res['mode']}")
+        if calls.get("n_docs", 0) <= 3:
+            _fail(f"reranker got only {calls.get('n_docs')} docs — expected a larger fused pool")
+        if len(res["results"]) > 3:
+            _fail(f"rerank did not trim to k=3: {len(res['results'])}")
+        reranked = [r["symbol"] for r in res["results"]]
+        if reranked == fused:
+            _fail(f"reversed-order reranker produced identical order: {reranked}")
+        _ok(f"rerank applied: pool={calls['n_docs']} -> top-3, order changed "
+            f"{fused} -> {reranked} (mode={res['mode']})")
+
+        rag_core.rerank = lambda q, d: None  # type: ignore[assignment]
+        fb = rag_core.search_code(q_multi, k=3)
+        if "+rerank" in fb["mode"]:
+            _fail(f"rerank returned None but +rerank stayed in mode: {fb['mode']}")
+        if not fb["results"]:
+            _fail(f"rerank-fallback returned nothing: {fb}")
+        _ok(f"rerank-unavailable fallback: fused order kept (mode={fb['mode']})")
+    finally:
+        rag_core.rerank = real  # type: ignore[assignment]
+        rag_core.RERANK_BASE_URL = ""
+
+
 async def _mcp_check(port: int) -> None:
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
@@ -180,5 +231,6 @@ def part_b() -> None:
 
 if __name__ == "__main__":
     part_a()
+    part_rerank()
     part_b()
     print("mcp-codebase-rag smoke test PASSED")

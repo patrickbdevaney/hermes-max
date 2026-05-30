@@ -11,7 +11,12 @@ is never dropped silently.
 
 Deliberately NOT built: HyDE / RAG-Fusion / ColBERT / Self-RAG / HippoRAG. Hybrid
 dense+BM25 with good code chunking is ~85% of the value at ~10% of the fragility.
-A reranker is left as one optional future step (Lane 3).
+
+The ONE sanctioned precision lever on top (Stage 1.2): an optional cross-encoder
+RERANKER (RERANK_BASE_URL). When present, the fused top-pool is re-ordered by the
+reranker before the top-k is returned; when absent, the fused order is returned
+unchanged. Both embeddings and reranker are independently optional and each
+degrades to the next-best mode with a clear stats() banner — never a hard fail.
 """
 
 from __future__ import annotations
@@ -41,8 +46,20 @@ EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "").rstrip("/")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "/model")
 EMBED_TIMEOUT = float(os.environ.get("EMBED_TIMEOUT", "30"))
 EMBED_BATCH = int(os.environ.get("EMBED_BATCH", "64"))
+# Reranker (Stage 1.2): an OPTIONAL cross-encoder that re-orders the fused
+# top-pool before returning. Blank RERANK_BASE_URL ⇒ no rerank (fused order is
+# returned unchanged). Independent of embeddings: rerank can sharpen even a
+# BM25+graph result set. The endpoint is Cohere/Jina/vLLM-rerank shaped:
+#   POST {RERANK_BASE_URL}/rerank {model, query, documents:[...]}
+#     -> {"results": [{"index": i, "relevance_score": s}, ...]}
+RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "").rstrip("/")
+RERANK_MODEL = os.environ.get("RERANK_MODEL", "/model")
+RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "30"))
+# How many fused candidates to hand the cross-encoder (it then picks the top k).
+RERANK_POOL = int(os.environ.get("RERANK_POOL", "24"))
 MAX_FILE_BYTES = int(os.environ.get("RAG_MAX_FILE_BYTES", str(1_500_000)))
 MAX_CHUNK_CHARS = int(os.environ.get("RAG_MAX_CHUNK_CHARS", "6000"))
+RERANK_DOC_CHARS = int(os.environ.get("RERANK_DOC_CHARS", "2000"))
 RRF_K = 60
 
 SKIP_DIRS = {
@@ -257,6 +274,43 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
                 data = resp.json()["data"]
                 vectors.extend(item["embedding"] for item in data)
         return vectors
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ── reranker (cross-encoder; optional, highest-precision-per-token step) ──────
+def rerank_configured() -> bool:
+    return bool(RERANK_BASE_URL)
+
+
+def rerank(query: str, documents: list[str]) -> list[int] | None:
+    """Re-order `documents` against `query` with the cross-encoder.
+
+    Returns a list of indices into `documents`, best-first, or None if the
+    endpoint is unset/unreachable/misshaped — in which case the caller keeps the
+    fused order (graceful degradation; rerank only ever sharpens, never breaks).
+    """
+    if not RERANK_BASE_URL or not documents:
+        return None
+    docs = [d[:RERANK_DOC_CHARS] for d in documents]
+    try:
+        with httpx.Client(timeout=RERANK_TIMEOUT) as client:
+            resp = client.post(
+                f"{RERANK_BASE_URL}/rerank",
+                json={"model": RERANK_MODEL, "query": query, "documents": docs},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        results = payload.get("results", payload) if isinstance(payload, dict) else payload
+        if not isinstance(results, list) or not results:
+            return None
+        order = sorted(
+            results,
+            key=lambda r: r.get("relevance_score", r.get("score", 0.0)),
+            reverse=True,
+        )
+        out = [int(r["index"]) for r in order if 0 <= int(r.get("index", -1)) < len(docs)]
+        return out or None
     except Exception:  # noqa: BLE001
         return None
 
@@ -525,12 +579,32 @@ def search_code(query: str, k: int = 8) -> dict[str, Any]:
             )
             ranked_lists.append([(cid, 0.0) for cid in gr])
 
+        # Fuse to a candidate set. When a reranker is available, fuse a LARGER
+        # pool and let the cross-encoder choose the final top-k from it; with no
+        # reranker, fuse exactly k (behaviour unchanged from before).
+        fuse_n = max(k, min(RERANK_POOL, pool)) if rerank_configured() else k
         if len(ranked_lists) > 1:
-            ids = _rrf(ranked_lists, k)
+            ids = _rrf(ranked_lists, fuse_n)
         else:
-            ids = [cid for cid, _ in bm[:k]]
+            ids = [cid for cid, _ in bm[:fuse_n]]
         mode = base + ("+graph" if graph_on else "")
         rows = pre_rows or _rows_for(con, ids)
+
+        # Cross-encoder rerank (Stage 1.2): re-order the fused pool, then trim to
+        # k. Any failure (endpoint down / misshaped reply) keeps the fused order,
+        # so this only ever sharpens precision, never breaks retrieval.
+        if rerank_configured() and len([i for i in ids if i in rows]) > 1:
+            id_for_doc = [i for i in ids if i in rows]
+            docs = [f"{rows[i]['symbol']}\n{rows[i]['content']}" for i in id_for_doc]
+            order = rerank(query, docs)
+            if order:
+                ids = [id_for_doc[j] for j in order][:k]
+                mode += "+rerank"
+            else:
+                ids = ids[:k]
+        else:
+            ids = ids[:k]
+
         results = [_fmt(rows[i]) for i in ids if i in rows]
         return {"ok": True, "query": query, "mode": mode, "results": results}
     finally:
@@ -593,6 +667,12 @@ def stats() -> dict[str, Any]:
             "repos": repos,
             "dense_available": bool(vec_ok and embeddings_configured() and _vec_table_exists(con)),
             "embeddings_configured": embeddings_configured(),
+            "rerank_configured": rerank_configured(),
+            "retrieval_mode": (
+                ("hybrid" if (vec_ok and embeddings_configured() and _vec_table_exists(con)) else "bm25")
+                + ("+graph" if graph.get("graph_available") else "")
+                + ("+rerank" if rerank_configured() else "")
+            ),
             "sqlite_vec_loaded": vec_ok,
             "db_path": DB_PATH,
             **graph,

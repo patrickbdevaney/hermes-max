@@ -22,6 +22,23 @@ for name in "${HMX_SERVERS[@]}"; do
 done
 
 echo "── supporting services (informational) ──"
+# Stage-1 local model servers (optional; RAG degrades to BM25+graph without them).
+if [ -n "${EMBED_BASE_URL:-}" ]; then
+  curl -fsS -m 3 "${EMBED_BASE_URL%/}/embeddings" -H 'Content-Type: application/json' \
+    -d '{"input":["ping"]}' >/dev/null 2>&1 \
+    && echo "  ✓ embeddings (${EMBED_BASE_URL}) — RAG dense lane ON" \
+    || echo "  • embeddings (${EMBED_BASE_URL}) down — RAG falls back to BM25+graph (run ./serve-embed.sh)"
+else
+  echo "  • EMBED_BASE_URL unset — RAG dense lane off (BM25+graph)"
+fi
+if [ -n "${RERANK_BASE_URL:-}" ]; then
+  curl -fsS -m 3 "${RERANK_BASE_URL%/}/rerank" -H 'Content-Type: application/json' \
+    -d '{"query":"ping","documents":["a"]}' >/dev/null 2>&1 \
+    && echo "  ✓ reranker (${RERANK_BASE_URL}) — RAG +rerank ON" \
+    || echo "  • reranker (${RERANK_BASE_URL}) down — RAG returns fused order (run ./serve-rerank.sh)"
+else
+  echo "  • RERANK_BASE_URL unset — RAG rerank lane off"
+fi
 hmx_phoenix_otlp_ok \
   && echo "  ✓ Phoenix OTLP (4317)" || echo "  • Phoenix OTLP down (run ./phoenix.sh)"
 curl -fsS -m 2 "http://localhost:6006" >/dev/null 2>&1 \

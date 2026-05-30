@@ -1,0 +1,9 @@
+# Dev-box (local_serve.py) backend for Stage-1 embed/rerank. NOT installed by
+# bootstrap (it's not an MCP server); serve-embed.sh / serve-rerank.sh own it.
+# Qwen3 needs transformers >= 4.51. torch is installed CPU-only by the launchers
+# (lighter + no CUDA-version risk); set SERVE_DEVICE=cuda to use a GPU if present.
+torch>=2.2
+transformers>=4.51
+sentence-transformers>=3.0
+fastapi>=0.110
+uvicorn>=0.27
