@@ -43,8 +43,17 @@ except Exception:  # noqa: BLE001 - optional; we fall back to heuristic chunking
 # ── config ──────────────────────────────────────────────────────────────────
 DB_PATH = os.path.expanduser(os.environ.get("RAG_INDEX_PATH", "~/.hermes-max/rag/index.db"))
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "/model")
-EMBED_TIMEOUT = float(os.environ.get("EMBED_TIMEOUT", "30"))
+EMBED_TIMEOUT = float(os.environ.get("EMBED_TIMEOUT", "30"))  # index-time batches may be slow
 EMBED_BATCH = int(os.environ.get("EMBED_BATCH", "64"))
+# Fail-fast bounds so an UNAVAILABLE backend (down, or up-but-not-serving) never
+# stalls an interactive call for the full 30s. Connect is short (a closed/dropped
+# port fails in ~1.5s); the QUERY path (search_code → _dense / rerank) uses a short
+# read bound — a hung backend degrades to BM25+graph in a few seconds, not 30. On
+# any failure the endpoint is marked unavailable (below), so EVERY subsequent call
+# skips the lane sub-second until the negative-cache TTL re-probes.
+_BACKEND_CONNECT_TIMEOUT = float(os.environ.get("RAG_BACKEND_CONNECT_TIMEOUT_S", "1.5"))
+QUERY_EMBED_TIMEOUT = float(os.environ.get("RAG_QUERY_EMBED_TIMEOUT_S", "4"))
+QUERY_RERANK_TIMEOUT = float(os.environ.get("RAG_QUERY_RERANK_TIMEOUT_S", "4"))
 # Reranker (Stage 1.2): an OPTIONAL cross-encoder that re-orders the fused
 # top-pool before returning. No rerank endpoint ⇒ fused order returned unchanged.
 # Independent of embeddings: rerank can sharpen even a BM25+graph result set.
@@ -128,6 +137,21 @@ def rerank_base_url() -> str:
     """Resolved rerank endpoint (explicit RERANK_BASE_URL → auto-detected serve on
     :8003 → ""). Reads the module global so tests can monkeypatch it."""
     return _resolve_base("rerank", RERANK_BASE_URL, _RERANK_PROBE_URL)
+
+
+def _mark_unavailable(kind: str) -> None:
+    """Flip a backend's availability flag to False after a failed/hung real call.
+
+    The 1s autodetect probe (/health, /v1/models) can pass on a serve that is
+    up-but-not-serving (accepts the connection, never answers /embeddings or
+    /rerank) — and a positive probe is sticky, so embeddings_configured()/
+    rerank_configured() would keep returning True and every call would eat the
+    read timeout. Recording a negative result here makes the flag honestly read
+    False, so the dense/rerank lane is SKIPPED sub-second on subsequent calls
+    until the negative-cache TTL re-probes. Only affects the autodetect path
+    (explicit env URLs are left as configured)."""
+    import time as _t
+    _resolved[kind] = ("", _t.time())
 MAX_FILE_BYTES = int(os.environ.get("RAG_MAX_FILE_BYTES", str(1_500_000)))
 MAX_CHUNK_CHARS = int(os.environ.get("RAG_MAX_CHUNK_CHARS", "6000"))
 RERANK_DOC_CHARS = int(os.environ.get("RERANK_DOC_CHARS", "2000"))
@@ -337,18 +361,24 @@ def embeddings_configured() -> bool:
     return bool(embed_base_url())
 
 
-def embed_texts(texts: list[str]) -> list[list[float]] | None:
+def embed_texts(texts: list[str], timeout: float | None = None) -> list[list[float]] | None:
     """Return one vector per text, or None if the endpoint is unusable.
 
     Returning None (rather than raising) is what lets the whole server degrade
-    to BM25-only without any caller having to know embeddings exist.
+    to BM25-only without any caller having to know embeddings exist. `timeout`
+    bounds the call — the query path (search_code → _dense) passes a SHORT one so
+    an up-but-not-serving backend degrades fast; index-time batches use the longer
+    EMBED_TIMEOUT. On failure the endpoint is marked unavailable so the next call
+    skips the dense lane sub-second instead of re-paying the timeout.
     """
     base = embed_base_url()
     if not base or not texts:
         return None
+    to = httpx.Timeout(timeout if timeout is not None else EMBED_TIMEOUT,
+                       connect=_BACKEND_CONNECT_TIMEOUT)
     vectors: list[list[float]] = []
     try:
-        with httpx.Client(timeout=EMBED_TIMEOUT) as client:
+        with httpx.Client(timeout=to) as client:
             for i in range(0, len(texts), EMBED_BATCH):
                 batch = texts[i: i + EMBED_BATCH]
                 resp = client.post(
@@ -360,6 +390,7 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
                 vectors.extend(item["embedding"] for item in data)
         return vectors
     except Exception:  # noqa: BLE001
+        _mark_unavailable("embed")  # flip dense_available False → next call skips fast
         return None
 
 
@@ -379,8 +410,11 @@ def rerank(query: str, documents: list[str]) -> list[int] | None:
     if not base or not documents:
         return None
     docs = [d[:RERANK_DOC_CHARS] for d in documents]
+    # Rerank is always interactive (query path) → short bound; a hung serve degrades
+    # to the fused order in a few seconds, not 30. RERANK_TIMEOUT remains the cap.
+    to = httpx.Timeout(min(QUERY_RERANK_TIMEOUT, RERANK_TIMEOUT), connect=_BACKEND_CONNECT_TIMEOUT)
     try:
-        with httpx.Client(timeout=RERANK_TIMEOUT) as client:
+        with httpx.Client(timeout=to) as client:
             resp = client.post(
                 f"{base}/rerank",
                 json={"model": RERANK_MODEL, "query": query, "documents": docs},
@@ -398,6 +432,7 @@ def rerank(query: str, documents: list[str]) -> list[int] | None:
         out = [int(r["index"]) for r in order if 0 <= int(r.get("index", -1)) < len(docs)]
         return out or None
     except Exception:  # noqa: BLE001
+        _mark_unavailable("rerank")  # flip rerank_configured False → next call skips fast
         return None
 
 
@@ -878,9 +913,14 @@ def _bm25(con: sqlite3.Connection, query: str, limit: int) -> list[tuple[int, fl
 
 
 def _dense(con: sqlite3.Connection, query: str, limit: int, vec_ok: bool) -> list[tuple[int, float]]:
+    # Skip the dense lane immediately if it isn't truly available (no sqlite-vec,
+    # no embed endpoint, or no vector table) — sub-second, no network call.
     if not (vec_ok and embeddings_configured() and _vec_table_exists(con)):
         return []
-    vecs = embed_texts([query])
+    # Short query-path timeout: an up-but-not-serving embed endpoint degrades to
+    # BM25+graph in a few seconds (and marks itself unavailable for next time),
+    # never the full 30s index-time budget.
+    vecs = embed_texts([query], timeout=QUERY_EMBED_TIMEOUT)
     if not vecs:
         return []
     rows = con.execute(
