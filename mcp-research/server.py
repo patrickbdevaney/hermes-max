@@ -180,5 +180,35 @@ def stackexchange_search(query: str, site: str = "stackoverflow", limit: int = 1
     return sources.stackexchange_search(query, site, limit)
 
 
+# ── Stage 2: crypto / standards adapters (keyless; the domain edge) ───────────
+@mcp.tool()
+def ethresearch_search(query: str, limit: int = 8) -> dict:
+    """Search ethresear.ch (Ethereum research forum, Discourse) — NO auth, public
+    read via .json. Returns frontier-research topics with blurbs + canonical URLs.
+    Use ethresearch_topic to pull a topic's full post text."""
+    return sources.ethresearch_search(query, limit)
+
+
+@mcp.tool()
+def ethresearch_topic(topic_id: int, slug: str = "") -> dict:
+    """Fetch one ethresear.ch topic's FULL concatenated post text (no auth)."""
+    return sources.ethresearch_topic(topic_id, slug)
+
+
+@mcp.tool()
+def eip_erc(query: str, limit: int = 6) -> dict:
+    """Read ethereum/EIPs + ethereum/ERCs FULL spec text. Naming a number
+    (EIP-4844, ERC-20) fetches the raw markdown KEYLESS with front-matter parsed
+    (status/type/author/created). The canonical spec, not a blog summary."""
+    return sources.eip_erc(query, limit)
+
+
+@mcp.tool()
+def ietf_rfc(query: str, limit: int = 5) -> dict:
+    """IETF RFC full text (keyless, RFC-Editor). Naming an RFC number fetches its
+    full text. Routed only when a query mentions rfc/ietf (optional per spec)."""
+    return sources.ietf_rfc(query, limit)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

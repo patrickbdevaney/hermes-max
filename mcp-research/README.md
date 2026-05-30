@@ -64,6 +64,9 @@ arithmetic, no model), rewarding docs that rank consistently across sources.
 | `github_search(query, search_type, limit)` | GitHub REST | **`GITHUB_TOKEN`** (free PAT) | repos/code/issues; **absent ⇒ no-op** (web layer covers it), present ⇒ 30 req/min |
 | `hn_search(query, limit, tags)` | HN Algolia | **none** | practitioner signal (points, comments) |
 | `stackexchange_search(query, site, limit)` | Stack Exchange | **none** (300/day; key ⇒ 10k) | vote/tag-ranked Q&A; routed for library/how-to |
+| `ethresearch_search(query, limit)` / `ethresearch_topic(id, slug)` | ethresear.ch (Discourse) | **none** | Ethereum-research **frontier** consumer tools miss — public `.json` read, full post text |
+| `eip_erc(query, limit)` | ethereum/EIPs + ERCs | **none** (raw md; token ⇒ code-search) | naming a number (EIP-4844, ERC-20) fetches the **full canonical spec** + parsed front-matter |
+| `ietf_rfc(query, limit)` | RFC-Editor | **none** | full RFC text by number; routed only on rfc/ietf mention (optional per spec) |
 | `multi_source_search(query)` | (orchestrator) | — | classify → route → RRF-fuse; returns fused candidates + per-source status |
 | `classify_query(query)` | (router) | — | category + source set + budgets; **always includes `searxng`** |
 

@@ -198,11 +198,8 @@ def part_e() -> None:
         _fail(f"fanout with all sources down should be ok+empty: {fo}")
     if not fo["errors"]:
         _fail(f"fanout should collect per-source errors: {fo}")
-    # ethresearch/eip_erc are not registered until Stage 2 -> reported as skipped
-    if "ethresearch" not in fo["skipped"]:
-        _fail(f"unregistered crypto sources should be skipped, not errored: {fo['skipped']}")
-    _ok(f"source_fanout all-down -> ok=True, 0 results, {len(fo['errors'])} errors, "
-        f"skipped={fo['skipped']} (web layer still answers)")
+    _ok(f"source_fanout all-down -> ok=True, 0 results, {len(fo['errors'])} errors "
+        f"collected (web layer still answers)")
 
 
 def part_f() -> None:
@@ -228,6 +225,90 @@ def part_f() -> None:
     _ok(f"citations (forward) -> {r['results'][0]['title']} edge={r['results'][0]['extra']['edge']}")
 
 
+def part_g() -> None:
+    print("[G] Stage 2 crypto/standards adapters (keyless)")
+    import sources as s
+
+    # ethresearch — Discourse /search.json joins posts to topics
+    s._get_json = lambda *a, **k: {"ok": True, "json": {
+        "topics": [{"id": 19111, "title": "Danksharding blob propagation", "slug": "danksharding",
+                    "created_at": "2026-02-01T00:00:00Z", "posts_count": 12}],
+        "posts": [{"topic_id": 19111, "username": "vbuterin", "blurb": "On blob propagation..."}]}}
+    r = s.ethresearch_search("danksharding")
+    if not (r["ok"] and r["results"][0]["source_type"] == "ethresearch"):
+        _fail(f"ethresearch parse: {r}")
+    it = r["results"][0]
+    if "ethresear.ch/t/danksharding/19111" not in it["url"] or it["authors"] != ["vbuterin"]:
+        _fail(f"ethresearch item shape: {it}")
+    _ok(f"ethresearch -> {it['title']} by {it['authors'][0]} ({it['url']})")
+
+    # ethresearch_topic — full post text from cooked HTML, stripped
+    s._get_json = lambda *a, **k: {"ok": True, "json": {
+        "title": "T", "slug": "t", "created_at": "2026-01-01",
+        "post_stream": {"posts": [{"cooked": "<p>full <b>body</b> here</p>", "username": "a"}]}}}
+    rt = s.ethresearch_topic(123, "t")
+    if not (rt["ok"] and "full" in rt["results"][0]["content"] and "<" not in rt["results"][0]["content"]):
+        _fail(f"ethresearch_topic full text/strip: {rt}")
+    _ok("ethresearch_topic -> full post text, html stripped")
+
+    # eip_erc — named number fetches raw markdown + parses front-matter
+    EIP = ("---\n"
+           "eip: 4844\n"
+           "title: Shard Blob Transactions\n"
+           "author: Vitalik Buterin, Dankrad Feist\n"
+           "status: Final\n"
+           "type: Standards Track\n"
+           "category: Core\n"
+           "created: 2022-02-25\n"
+           "---\n\n## Abstract\nIntroduces blob-carrying transactions.\n")
+    s._get_text = lambda *a, **k: {"ok": True, "text": EIP}
+    r = s.eip_erc("how does EIP-4844 blob pricing work")
+    if not (r["ok"] and r["results"]):
+        _fail(f"eip_erc parse: {r}")
+    e = r["results"][0]
+    if e["extra"]["number"] != 4844 or e["extra"]["status"] != "Final":
+        _fail(f"eip_erc front-matter: {e['extra']}")
+    if "blob-carrying" not in e["content"] or len(e["authors"]) != 2:
+        _fail(f"eip_erc body/authors: {e}")
+    _ok(f"eip_erc -> {e['title'][:40]} status={e['extra']['status']} authors={len(e['authors'])}")
+
+    # eip_erc with no number and no token -> clean no-op (not an error)
+    s.GITHUB_TOKEN = ""
+    r = s.eip_erc("general ethereum scaling discussion")
+    if not (r["ok"] and r["results"] == []):
+        _fail(f"eip_erc no-number/no-token should no-op cleanly: {r}")
+    _ok("eip_erc no number + no token -> ok=True, empty (no-op)")
+
+    # ietf_rfc — named RFC fetches full text
+    s._get_text = lambda *a, **k: {"ok": True, "text": "RFC 8446\nThe TLS 1.3 Protocol\n\nAbstract\n..."}
+    r = s.ietf_rfc("what changed in RFC 8446 TLS")
+    if not (r["ok"] and r["results"][0]["extra"]["number"] == 8446):
+        _fail(f"ietf_rfc parse: {r}")
+    _ok(f"ietf_rfc -> {r['results'][0]['title'][:40]} (#{r['results'][0]['extra']['number']})")
+
+    # routing: crypto sources now RESOLVE (registered), and rfc query routes ietf_rfc
+    reg = s._registry()
+    for need in ("ethresearch", "eip_erc", "ietf_rfc"):
+        if need not in reg:
+            _fail(f"{need} not registered: {sorted(reg)}")
+    c = s.classify_query("how does RFC 9000 QUIC handshake work")
+    if "ietf_rfc" not in c["sources"]:
+        _fail(f"rfc query should route ietf_rfc: {c['sources']}")
+    _ok(f"Stage-2 adapters registered; rfc query routes ietf_rfc; sources={c['sources']}")
+
+    # fanout over a crypto query: ethresearch/eip_erc are NO LONGER skipped
+    s._get_json = lambda *a, **k: {"ok": True, "json": {"topics": [], "posts": [], "data": [], "items": [], "hits": []}}
+    s._get_text = lambda *a, **k: {"ok": True, "text": "<feed xmlns='http://www.w3.org/2005/Atom'></feed>"}
+    s.GITHUB_TOKEN = "ghp_fake"
+    fo = s.source_fanout("zk-SNARK ethereum EIP-4844 rollup")
+    for gone in ("ethresearch", "eip_erc"):
+        if gone in fo["skipped"]:
+            _fail(f"{gone} should be registered now, not skipped: {fo['skipped']}")
+    if "ethresearch" not in fo["per_source"]:
+        _fail(f"ethresearch should be invoked in fanout: {fo['per_source'].keys()}")
+    _ok(f"crypto fanout invokes Stage-2 sources (skipped={fo['skipped']}, per_source={sorted(fo['per_source'])})")
+
+
 if __name__ == "__main__":
     sys.path.insert(0, str(HERE))
     part_a()
@@ -236,4 +317,5 @@ if __name__ == "__main__":
     part_d()
     part_e()
     part_f()
-    print("mcp-research sources (Stage 1) smoke test PASSED")
+    part_g()
+    print("mcp-research sources (Stage 1+2) smoke test PASSED")

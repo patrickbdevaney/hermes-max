@@ -343,6 +343,148 @@ def stackexchange_search(query: str, site: str = "stackoverflow",
     return {"ok": True, "source": "stackexchange", "results": results}
 
 
+# ══ STAGE 2: crypto / standards adapters (keyless; degrade to web) ════════════
+ETHRESEARCH_BASE = "https://ethresear.ch"
+EIPS_RAW = "https://raw.githubusercontent.com/ethereum/EIPs/master/EIPS"
+ERCS_RAW = "https://raw.githubusercontent.com/ethereum/ERCs/master/ERCS"
+RFC_EDITOR = "https://www.rfc-editor.org/rfc"
+
+
+def _front_matter(md: str) -> tuple[dict[str, str], str]:
+    """Split YAML-ish front-matter (--- ... ---) from a markdown body. Tolerant:
+    no real YAML parser needed for EIP/RFC headers (flat key: value lines)."""
+    fm: dict[str, str] = {}
+    body = md
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", md, re.DOTALL)
+    if m:
+        for line in m.group(1).splitlines():
+            if ":" in line:
+                k, _, v = line.partition(":")
+                fm[k.strip().lower()] = v.strip()
+        body = m.group(2)
+    return fm, body
+
+
+def ethresearch_search(query: str, limit: int = 8) -> dict[str, Any]:
+    """ethresear.ch is Discourse — public read needs NO auth (append .json). Uses
+    /search.json to find topics, joining matched posts to their topics so each
+    result carries a real blurb + the canonical topic URL. The Ethereum-research
+    frontier consumer tools miss. Degrades to an error string if unreachable."""
+    query = (query or "").strip()
+    if not query:
+        return {"ok": True, "source": "ethresearch", "results": []}
+    limit = max(1, min(int(limit), 50))
+    r = _get_json(f"{ETHRESEARCH_BASE}/search.json", params={"q": query})
+    if not r.get("ok"):
+        return {"ok": False, "source": "ethresearch", "error": r["error"], "results": []}
+    data = r["json"] if isinstance(r["json"], dict) else {}
+    topics = {t.get("id"): t for t in (data.get("topics") or [])}
+    blurbs: dict[int, dict] = {}
+    for p in (data.get("posts") or []):
+        tid = p.get("topic_id")
+        if tid is not None and tid not in blurbs:
+            blurbs[tid] = p
+    results: list[dict[str, Any]] = []
+    for tid, t in topics.items():
+        if len(results) >= limit:
+            break
+        slug = t.get("slug", "")
+        url = f"{ETHRESEARCH_BASE}/t/{slug}/{tid}" if slug else f"{ETHRESEARCH_BASE}/t/{tid}"
+        post = blurbs.get(tid, {})
+        results.append(_item(t.get("title", ""), url, post.get("blurb") or "", "ethresearch",
+                             [post.get("username", "")] if post.get("username") else [],
+                             (t.get("created_at") or "")[:10], None,
+                             posts_count=t.get("posts_count")))
+    otel_emit.record("source_ethresearch", {"query": query, "results": len(results)})
+    return {"ok": True, "source": "ethresearch", "results": results}
+
+
+def ethresearch_topic(topic_id: int | str, slug: str = "") -> dict[str, Any]:
+    """Fetch a single ethresear.ch topic's FULL post text (no auth). Returns the
+    concatenated post bodies — used to pull a frontier discussion in full."""
+    tid = str(topic_id).strip()
+    if not tid:
+        return {"ok": False, "source": "ethresearch", "error": "empty topic_id", "results": []}
+    path = f"/t/{slug}/{tid}.json" if slug else f"/t/{tid}.json"
+    r = _get_json(f"{ETHRESEARCH_BASE}{path}")
+    if not r.get("ok"):
+        return {"ok": False, "source": "ethresearch", "error": r["error"], "results": []}
+    data = r["json"] if isinstance(r["json"], dict) else {}
+    posts = ((data.get("post_stream") or {}).get("posts") or [])
+    body = "\n\n".join(re.sub(r"<[^>]+>", " ", p.get("cooked") or "") for p in posts)
+    url = f"{ETHRESEARCH_BASE}/t/{data.get('slug', slug)}/{tid}"
+    it = _item(data.get("title", ""), url, body.strip(), "ethresearch",
+               sorted({p.get("username", "") for p in posts if p.get("username")}),
+               (data.get("created_at") or "")[:10], None, posts=len(posts))
+    return {"ok": True, "source": "ethresearch", "results": [it]}
+
+
+_EIP_RE = re.compile(r"\beip[-\s]?(\d{1,5})\b", re.IGNORECASE)
+_ERC_RE = re.compile(r"\berc[-\s]?(\d{1,5})\b", re.IGNORECASE)
+
+
+def eip_erc(query: str, limit: int = 6) -> dict[str, Any]:
+    """Read ethereum/EIPs + ethereum/ERCs FULL spec text. If the query names a
+    number (EIP-4844, ERC-20) the raw markdown is fetched KEYLESS from
+    raw.githubusercontent.com (front-matter parsed). With no number AND a
+    GITHUB_TOKEN present, falls back to a code-search in the repos; otherwise no-ops
+    cleanly. High value for crypto — full canonical spec, not a blog summary."""
+    query = (query or "").strip()
+    if not query:
+        return {"ok": True, "source": "eip_erc", "results": []}
+    limit = max(1, min(int(limit), 25))
+    results: list[dict[str, Any]] = []
+    wanted = ([("eip", n, f"{EIPS_RAW}/eip-{n}.md", f"https://eips.ethereum.org/EIPS/eip-{n}")
+               for n in _EIP_RE.findall(query)]
+              + [("erc", n, f"{ERCS_RAW}/erc-{n}.md", f"https://eips.ethereum.org/EIPS/eip-{n}")
+                 for n in _ERC_RE.findall(query)])
+    for kind, n, raw_url, canon in wanted[:limit]:
+        r = _get_text(raw_url)
+        if not r.get("ok"):
+            continue
+        fm, body = _front_matter(r["text"])
+        title = fm.get("title", f"{kind.upper()}-{n}")
+        authors = [a.strip() for a in re.split(r",|;", fm.get("author", "")) if a.strip()]
+        results.append(_item(f"{kind.upper()}-{n}: {title}", canon, body.strip(),
+                             "eip_erc", authors, fm.get("created", ""), None,
+                             status=fm.get("status"), eip_type=fm.get("type"),
+                             category=fm.get("category"), number=int(n)))
+    if not results and GITHUB_TOKEN and not wanted:
+        # no explicit number — search the repos by content (presence-gated)
+        gh = github_search(f"repo:ethereum/EIPs OR repo:ethereum/ERCs {query}", "code", limit)
+        if gh.get("ok"):
+            for it in gh.get("results", []):
+                it = dict(it); it["source_type"] = "eip_erc"
+                results.append(it)
+    otel_emit.record("source_eip_erc", {"query": query, "results": len(results),
+                                        "numbered": len(wanted)})
+    return {"ok": True, "source": "eip_erc", "results": results}
+
+
+_RFC_RE = re.compile(r"\brfc[-\s]?(\d{1,5})\b", re.IGNORECASE)
+
+
+def ietf_rfc(query: str, limit: int = 5) -> dict[str, Any]:
+    """IETF RFC full text (keyless, RFC-Editor). If the query names an RFC number
+    its full text is fetched directly. Optional/deferred per spec — routed only
+    when the query mentions 'rfc'/'ietf'. Degrades to an error string."""
+    query = (query or "").strip()
+    if not query:
+        return {"ok": True, "source": "ietf_rfc", "results": []}
+    limit = max(1, min(int(limit), 15))
+    results: list[dict[str, Any]] = []
+    for n in _RFC_RE.findall(query)[:limit]:
+        r = _get_text(f"{RFC_EDITOR}/rfc{n}.txt")
+        if not r.get("ok"):
+            continue
+        text = r["text"]
+        title = next((ln.strip() for ln in text.splitlines()[:40] if len(ln.strip()) > 10), f"RFC {n}")
+        results.append(_item(f"RFC {n}: {title}"[:160], f"{RFC_EDITOR}/rfc{n}",
+                             text[:60000], "ietf_rfc", [], "", None, number=int(n)))
+    otel_emit.record("source_ietf_rfc", {"query": query, "results": len(results)})
+    return {"ok": True, "source": "ietf_rfc", "results": results}
+
+
 # ── RRF fusion (pure arithmetic, no model) ────────────────────────────────────
 def rrf_fuse(ranked_lists: list[list[dict[str, Any]]], k: int = RRF_K,
              key: str = "url") -> list[dict[str, Any]]:
@@ -417,6 +559,10 @@ def classify_query(query: str) -> dict[str, Any]:
         budgets = {"searxng": 8, "semantic_scholar": 4, "github": 4, "hn": 4}
         arxiv_cats = []
 
+    # protocol-standards signal (RFC/IETF) — keyless, only routed on demand.
+    if ("rfc" in q or "ietf" in q) and "ietf_rfc" not in budgets:
+        budgets["ietf_rfc"] = 4
+
     sources = list(budgets.keys())
     if "searxng" not in sources:  # invariant: web is always the catch-all
         sources.append("searxng")
@@ -437,6 +583,10 @@ def _registry() -> dict[str, Any]:
         "github": mod.github_search,
         "hn": mod.hn_search,
         "stackexchange": mod.stackexchange_search,
+        # Stage 2 — crypto / standards
+        "ethresearch": mod.ethresearch_search,
+        "eip_erc": mod.eip_erc,
+        "ietf_rfc": mod.ietf_rfc,
     }
 
 
@@ -493,6 +643,9 @@ def source_stats() -> dict[str, Any]:
         "github": "PAT (30 req/min)" if GITHUB_TOKEN else "SKIPPED (no GITHUB_TOKEN)",
         "hn": "keyless (Algolia)",
         "stackexchange": "keyed (10k/day)" if STACKEXCHANGE_KEY else "keyless (300/day)",
+        "ethresearch": "keyless (Discourse .json)",
+        "eip_erc": "keyless (raw.githubusercontent) + optional github code-search",
+        "ietf_rfc": "keyless (RFC-Editor)",
         "rrf_k": RRF_K,
         "registered": sorted(_registry().keys()),
     }
