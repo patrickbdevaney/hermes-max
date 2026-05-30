@@ -164,8 +164,8 @@ the always-in-context, size-bounded block the agent deliberately curates.
 **Compounding (Stages 1–3).** RAG is hybrid + cross-encoder **reranked**
 (`serve-embed.sh` / `serve-rerank.sh`, local Qwen3-0.6B models; measured MRR
 0.41→0.75). The sovereign **docs loop** self-seeds framework knowledge on demand.
-**GEPA** (`dspy-evolution/`) evolves the difficulty-classifier prompt on the
-operator's own traces — and every escalation outcome (`record_outcome`) becomes a
+**GEPA** (`dspy-evolution/`) evolves the difficulty-classifier prompt on
+your own traces — and every escalation outcome (`record_outcome`) becomes a
 labelled example, so the local model handles progressively more (the flywheel).
 
 **Sovereignty assertion (the headline).** With **all external API keys unset** and
@@ -199,7 +199,7 @@ The conductor adds OPTIONAL cloud assistance **as stateless tools** on top of th
 finished local harness. The local Qwen driver does **all** high-volume execution
 and orchestration at **$0**; cloud models are invoked rarely, behind tools, for
 cents-or-free, ONLY for work the local model can't do alone, and ONLY for the
-providers the operator actually configured. **With zero cloud keys set, every rung
+providers you actually configured. **With zero cloud keys set, every rung
 is OFF and the system is the bare local harness — nothing breaks.**
 
 **Four layers (the separation that keeps it from being a mess).** (1) **BASE** —
@@ -218,13 +218,15 @@ rungs; they never set order. Order lives in the registry defaults or an optional
 `conductor.yaml` (precedence: **hardcoded defaults < conductor.yaml**; env supplies
 keys only). `conductor_status` shows which roles are active and the resolved chains.
 
-**Default chains (US-hosted-first by construction).**
+**Default chains** — reliability-first by construction: US-hosted inference providers are
+preferred as defaults due to uptime reliability and explicit data-handling guarantees;
+direct provider endpoints are supported as opt-in alternatives via conductor.yaml.
 - **synthesize**: DeepInfra → Fireworks → Together → DeepSeek → Kimi → Opus. US hosts
   sit ABOVE direct-provider-hosted DeepSeek-direct and SG-hosted Kimi *by design*, so a present
   DeepInfra key is always preferred. Default model **DeepSeek-V4-Pro**.
 - **steer**: DeepSeek-V4-Flash@DeepInfra → Cerebras → Groq → Gemini-Flash —
   **cheap-reliable-first**: the paid V4-Flash (hundredths of a cent, 1M ctx, cache,
-  reliable) BEFORE the fragile free tiers (corrected from the operator's own pricing).
+  reliable) BEFORE the fragile free tiers (corrected from real-world pricing).
 - **parallel_draft pool** (unordered, for diversity): Cerebras GLM-4.7 + gpt-oss-120b,
   Groq gpt-oss-120b + qwen3-32b + llama-4-scout, + optional DeepInfra V4-Flash anchor.
 
@@ -248,13 +250,14 @@ must degrade the system gracefully, never break it. Verified live (2026-05):
   own Stage-0 eval Groq **429'd after one full-brief call and 413'd qwen3-32B**. The
   conductor pre-flight-checks per-model TPM (header-fed) and **caps Groq draft input to
   ~3.5K tokens** so it stays usable — proven live: the same brief that 429'd now runs.
-- **Gemini 2.5 Pro** left the free tier 2026-04; **2.5 Flash is ~20 RPD** on this
-  console — a tracked last-resort steer only.
+- **Gemini 2.5 Pro** left the free tier 2026-04; **2.5 Flash is as low as 20 RPD on free
+  accounts (verify your own console)** — a tracked last-resort steer only.
 - **Cerebras** is a real free asset (GLM-4.7 + gpt-oss-120B, ~30K TPM) but **preview**
   and can change. Stage-0: gpt-oss-120B at **1.4s**, both models **35/35** quality —
   the preferred free draft source.
-- **DeepSeek-direct** is cheapest at source but direct provider endpoint and (for this
-  operator) **unfunded** — it sits below the US hosts and its 402 just falls through.
+- **DeepSeek-direct** is cheapest at source but direct provider endpoint; sits below
+  US-hosted inference providers in the default chain as a hedge against single-region
+  availability risk.
 - **DeepInfra** is the paid default: DeepSeek **V4-Flash $0.10/$0.20**, **V4-Pro
   $1.30/$2.60** per 1M (cached far less), no-train, US. Stage-0: V4-Pro **$0.0035/brief**,
   V4-Flash **$0.00022/brief**.
@@ -447,7 +450,7 @@ EVIDENCE on three suspicion risks and each config remedy toggled A/B →
 - **Ladder cascade-escalation.** Each tier trigger is individually sane, but a hard
   subtask could cascade and burn budget. **Remedy (default on):** a **global
   per-subtask budget** (`CONDUCTOR_SUBTASK_USD_CAP` / `_MAX_TIERS`) stops + surfaces
-  to the operator regardless of per-tier triggers.
+  to the user regardless of per-tier triggers.
 
 Empty-base correctness holds on **zero data**: UCB1 optimistic prior, saturation
 disabled below 10 tasks/namespace, classifier escalate-when-uncertain. Coherence
