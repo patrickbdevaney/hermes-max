@@ -263,6 +263,10 @@ def verify(path: str, language: str = "auto") -> dict[str, Any]:
             "summary": f"unsupported or undetected language: {lang}",
         }
 
+    return _finalize(abspath, lang, stages)
+
+
+def _finalize(abspath: str, lang: str, stages: list[dict[str, Any]]) -> dict[str, Any]:
     ran = [s for s in stages if s["status"] in ("passed", "failed", "error")]
     bad = [s for s in stages if s["status"] in ("failed", "error")]
     passed = bool(ran) and not bad
@@ -281,3 +285,30 @@ def verify(path: str, language: str = "auto") -> dict[str, Any]:
         "stages": stages,
         "summary": summary,
     }
+
+
+def quick_check(path: str, language: str = "auto") -> dict[str, Any]:
+    """Fast incremental check: lint + typecheck ONLY (skips the test stage).
+
+    For the edit-format discipline — a cheap, well-formed-edit gate to run after
+    EACH diff/search-replace edit, before the heavier full verify() at subtask
+    end. Same structured shape as verify(), with `tests` omitted (not run).
+    """
+    abspath = os.path.abspath(os.path.expanduser(path))
+    if not os.path.exists(abspath):
+        return {"path": abspath, "language": language, "passed": False, "stages": [],
+                "summary": f"path does not exist: {abspath}"}
+    lang = language if language and language != "auto" else detect_language(abspath)
+    if lang in ("js", "javascript", "typescript"):
+        lang = "ts"
+    if lang == "python":
+        stages = _verify_python(abspath)
+    elif lang == "ts":
+        stages = _verify_ts(abspath)
+    elif lang == "rust":
+        stages = _verify_rust(abspath)
+    else:
+        return {"path": abspath, "language": lang, "passed": False, "stages": [],
+                "summary": f"unsupported or undetected language: {lang}"}
+    stages = [s for s in stages if s.get("name") != "tests"]  # incremental: no pytest
+    return _finalize(abspath, lang, stages)

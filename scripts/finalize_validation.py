@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -36,17 +37,20 @@ VERIFY_DIR = REPO_ROOT / "mcp-verify"
 CKPT_DIR = REPO_ROOT / "mcp-checkpoint"
 RAG_DIR = REPO_ROOT / "mcp-codebase-rag"
 WATCHDOG_DIR = REPO_ROOT / "mcp-watchdog"
+SEARCH_DIR = REPO_ROOT / "mcp-search"
 
 VERIFY_PORT = int(os.environ.get("V_VERIFY_PORT", "39101"))
 CKPT_PORT = int(os.environ.get("V_CKPT_PORT", "39106"))
 RAG_PORT = int(os.environ.get("V_RAG_PORT", "39102"))
 WATCHDOG_PORT = int(os.environ.get("V_WATCHDOG_PORT", "39107"))
+SEARCH_PORT = int(os.environ.get("V_SEARCH_PORT", "39108"))
 APP_PORT = int(os.environ.get("V_APP_PORT", "8337"))
 
 VERIFY_URL = f"http://127.0.0.1:{VERIFY_PORT}/mcp"
 CKPT_URL = f"http://127.0.0.1:{CKPT_PORT}/mcp"
 RAG_URL = f"http://127.0.0.1:{RAG_PORT}/mcp"
 WATCHDOG_URL = f"http://127.0.0.1:{WATCHDOG_PORT}/mcp"
+SEARCH_URL = f"http://127.0.0.1:{SEARCH_PORT}/mcp"
 
 REPORT = "/tmp/hermes_validation_report.md"
 _log: list[str] = []
@@ -489,6 +493,10 @@ def main() -> None:
         WATCHDOG_DIR, {"MCP_WATCHDOG_PORT": str(WATCHDOG_PORT), "WATCHDOG_STATE_DIR": wd_state},
         WATCHDOG_PORT, "mcp-watchdog",
     )
+    search_proc = start_server(
+        SEARCH_DIR, {"MCP_SEARCH_PORT": str(SEARCH_PORT), "MCP_VERIFY_PORT": str(VERIFY_PORT)},
+        SEARCH_PORT, "mcp-search",
+    )
 
     v1_checkpoints: list[str] = []
     try:
@@ -809,12 +817,98 @@ def main() -> None:
                       f"native turn-based guardrails")
         check("kill mcp-watchdog -> agent degrades gracefully (keeps working)", wd_degraded, detail)
 
+        # ═══════════════ STAGE-1 CAPABILITY (graph-RAG / verifier-guided search / effort) ═══════════════
+        banner("V-graph — graph/AST retrieval on the real multi-file project (callers/callees)")
+        gidx = call(RAG_URL, "index_repo", path=str(proj))
+        check("index_repo built the symbol graph (on top of BM25)", bool(gidx.get("graph_available")),
+              f"symbols={gidx.get('symbols')} edges={gidx.get('edges')} mode={gidx.get('mode')}")
+        # main.py handlers call db.* — retrieve_related('create_task') must surface a caller handler
+        rel = call(RAG_URL, "retrieve_related", symbol="create_task", hops=1, k=12)
+        rel_callers = [r["symbol"] for r in rel.get("results", []) if r.get("relation") == "caller"]
+        check("retrieve_related('create_task') returns its multi-hop caller(s)",
+              bool(rel.get("graph_available") and rel_callers),
+              f"callers={rel_callers} (handlers that call db.create_task)")
+        rmap = call(RAG_URL, "repo_map", token_budget=800)
+        check("repo_map returns a PageRank-ranked, token-budgeted symbol map",
+              bool(rmap.get("graph_available") and rmap.get("count", 0) >= 5),
+              f"top={[e['symbol'] for e in rmap.get('entries', [])[:5]]} truncated={rmap.get('truncated')}")
+        # search_code now folds the graph signal in (mode shows +graph) yet stays correct
+        gsc = call(RAG_URL, "search_code", query="update task status", k=5)
+        check("search_code uses the graph signal (mode shows +graph) and still retrieves db/main",
+              "+graph" in gsc.get("mode", "") and any(
+                  h.get("path") in {"db.py", "main.py"} for h in gsc.get("results", [])),
+              f"mode={gsc.get('mode')} hits={[h.get('symbol') for h in gsc.get('results', [])][:5]}")
+
+        banner("V-search — verifier-guided selection picks the green candidate (HARD-subtask lever)")
+        # 3 candidate implementations of a helper, 1 correct — selection is execution-based
+        SEARCH_TESTS = {"test_clamp.py":
+                        "from clamp import clamp\n\n\ndef test_clamp():\n"
+                        "    assert clamp(5, 0, 10) == 5\n    assert clamp(-1, 0, 10) == 0\n"
+                        "    assert clamp(99, 0, 10) == 10\n"}
+        SEARCH_CANDS = [
+            {"id": "correct", "files": {"clamp.py":
+             "def clamp(x, lo, hi):\n    return max(lo, min(x, hi))\n"}},
+            {"id": "wrong", "files": {"clamp.py":
+             "def clamp(x, lo, hi):\n    return x\n"}},
+            {"id": "broken", "files": {"clamp.py":
+             "def clamp(x, lo, hi)\n    return x\n"}},
+        ]
+        sel = call(SEARCH_URL, "generate_and_select", task_spec="clamp(x, lo, hi)",
+                   candidates=SEARCH_CANDS, tests=SEARCH_TESTS)
+        check("generate_and_select picks the GREEN candidate by execution (lossless)",
+              sel.get("selected") == "correct",
+              f"selected={sel.get('selected')} of {sel.get('n')} — {sel.get('reason')}")
+        # never returns a red patch
+        sel_none = call(SEARCH_URL, "generate_and_select", task_spec="clamp",
+                        candidates=[SEARCH_CANDS[1], SEARCH_CANDS[2]], tests=SEARCH_TESTS)
+        check("search never returns a red selection (none green -> selected None)",
+              sel_none.get("selected") is None, f"selected={sel_none.get('selected')}")
+
+        banner("V-effort — reasoning-effort default lowered to medium (caps execution spirals)")
+        hermes_cfg = os.path.expanduser("~/.hermes/config.yaml")
+        re_val = ""
+        if os.path.isfile(hermes_cfg):
+            # Parse the agent: block's reasoning_effort without a yaml dependency
+            # (the throwaway interpreter may not have PyYAML).
+            lines = Path(hermes_cfg).read_text().splitlines()
+            in_agent = False
+            for ln in lines:
+                if re.match(r"^agent:\s*$", ln):
+                    in_agent = True
+                    continue
+                if in_agent and re.match(r"^\S", ln):  # next top-level key ends the block
+                    break
+                if in_agent:
+                    m = re.match(r"^\s+reasoning_effort:\s*(\S+)", ln)
+                    if m:
+                        re_val = m.group(1).strip().strip("'\"")
+                        break
+        check("agent.reasoning_effort is medium (not high) — the spiral-cause is removed",
+              re_val == "medium",
+              f"reasoning_effort={re_val!r}; effort-routing skill raises it only for planning/hard")
+
+        banner("Stage-1 — kill mcp-search mid-run -> graceful degradation")
+        stop(search_proc)
+        time.sleep(0.5)
+        s_degraded = False
+        try:
+            call(SEARCH_URL, "generate_and_select", task_spec="x",
+                 candidates=SEARCH_CANDS, tests=SEARCH_TESTS)
+            detail = "search still reachable after kill (unexpected)"
+        except Exception as e:  # noqa: BLE001
+            rcheck = call(RAG_URL, "search_code", query="create task", k=3)
+            s_degraded = "results" in rcheck
+            detail = (f"search unreachable ({type(e).__name__}); rag still answering "
+                      f"({len(rcheck.get('results', []))} hits) — agent writes a single patch itself")
+        check("kill mcp-search -> agent degrades gracefully (writes single patch)", s_degraded, detail)
+
         say(f"\nPROJECT_DIR={proj}")
     finally:
         stop(verify_proc)
         stop(ckpt_proc)
         stop(rag_proc)
         stop(watchdog_proc)
+        stop(search_proc)
         _flush_report()
 
     n_pass = sum(1 for _, p, _ in _checks if p)

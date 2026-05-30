@@ -22,6 +22,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+import graph_core
 import rag_core
 
 PORT = int(os.environ.get("MCP_RAG_PORT", "9102"))
@@ -78,6 +79,24 @@ def get_symbol_context(symbol: str, k: int = 5) -> dict:
 def find_similar(snippet: str, k: int = 8) -> dict:
     """Find code most similar to a snippet (dense if available, else lexical)."""
     return rag_core.find_similar(snippet, k)
+
+
+@mcp.tool()
+def retrieve_related(symbol: str, hops: int = 1, k: int = 20) -> dict:
+    """Graph/AST-aware retrieval: the multi-hop neighbors of a symbol — what it
+    calls (callees), what calls it (callers), and imports. Most real fixes need
+    a multi-hop connection, so use this to pull the surrounding code after
+    search_code/get_symbol_context locates a starting symbol. Falls back with a
+    'graph retrieval unavailable' note if the graph isn't built."""
+    return graph_core.retrieve_related(symbol, hops, k)
+
+
+@mcp.tool()
+def repo_map(token_budget: int = 2000, repo: str | None = None) -> dict:
+    """A PageRank-ranked, token-budgeted map of the repo's symbols (Aider-style
+    repo map) — the highest-leverage symbols first. Use it to orient on an
+    unfamiliar codebase before diving in. Falls back gracefully if no graph."""
+    return graph_core.repo_map(token_budget, repo)
 
 
 if __name__ == "__main__":

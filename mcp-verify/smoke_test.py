@@ -48,6 +48,16 @@ def part_a() -> None:
         _fail(f"broken sample should fail but passed: {json.dumps(bad, indent=2)}")
     _ok(f"broken sample red: {bad['summary']}")
 
+    # quick_check (Stage 1.3): lint+type only, never runs the test stage
+    qc = verify_core.quick_check(str(GOOD), "python")
+    if not qc["passed"] or any(s.get("name") == "tests" for s in qc["stages"]):
+        _fail(f"quick_check should be green and skip tests: {qc}")
+    _ok(f"quick_check (incremental) green, no test stage: {qc['summary']}")
+    qcb = verify_core.quick_check(str(BAD), "python")
+    if qcb["passed"]:
+        _fail(f"quick_check on broken sample should be red: {qcb}")
+    _ok(f"quick_check catches a malformed edit fast: {qcb['summary']}")
+
 
 def _wait_health(port: int, timeout: float = 30.0) -> None:
     url = f"http://127.0.0.1:{port}/health"
@@ -76,8 +86,8 @@ async def _mcp_check(port: int) -> None:
             await session.initialize()
             tools = await session.list_tools()
             names = {t.name for t in tools.tools}
-            if "verify" not in names:
-                _fail(f"verify tool not advertised; got {names}")
+            if not {"verify", "quick_check"}.issubset(names):
+                _fail(f"verify/quick_check tools not advertised; got {names}")
             _ok(f"tools advertised: {sorted(names)}")
 
             res = await session.call_tool("verify", {"path": str(GOOD), "language": "python"})

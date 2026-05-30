@@ -31,6 +31,7 @@ export HMX_OBS_PORT="$(hmx_port observability)"
 export HMX_ESC_PORT="$(hmx_port escalation)"
 export HMX_CHECKPOINT_PORT="$(hmx_port checkpoint)"
 export HMX_WATCHDOG_PORT="$(hmx_port watchdog)"
+export HMX_SEARCH_PORT="$(hmx_port search)"
 export HMX_CONFIG="${CONFIG}"
 export HMX_SYNC_MODEL_URL="${SYNC_MODEL_URL}"
 export HMX_VLLM_BASE_URL="${VLLM_BASE_URL:-}"
@@ -59,6 +60,7 @@ servers = {
     "hermes-max-escalation":      os.environ["HMX_ESC_PORT"],
     "hermes-max-checkpoint":      os.environ["HMX_CHECKPOINT_PORT"],
     "hermes-max-watchdog":        os.environ["HMX_WATCHDOG_PORT"],
+    "hermes-max-search":          os.environ["HMX_SEARCH_PORT"],
 }
 
 mcp = cfg.setdefault("mcp_servers", {})

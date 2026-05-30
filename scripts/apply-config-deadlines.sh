@@ -4,6 +4,10 @@
 # Discovery result (scripts/finalize_validation.py V-* and the spec report):
 #   NATIVE (set here, idempotently, with a timestamped backup):
 #     • terminal.timeout            600 -> ${HERMES_TERMINAL_TIMEOUT:-120}  (per-tool wall-clock)
+#     • agent.reasoning_effort      high -> ${HERMES_REASONING_EFFORT:-medium}  (Stage 1.4)
+#         High reasoning on EXECUTION turns is what caused the spiral. Global default
+#         drops to medium; workflow-effort-routing raises it behaviorally for planning
+#         and flagged-hard subtasks, and keeps it terse on reads/mechanical edits.
 #     • agent.max_turns             confirmed present (per-task iteration budget)
 #     • tool_loop_guardrails        confirmed hard_stop_after {same_tool_failure:4,
 #                                   idempotent_no_progress:3} — left as-is (already correct)
@@ -35,6 +39,7 @@ fi
 
 export HMX_CONFIG="${CONFIG}"
 export HMX_TERMINAL_TIMEOUT="${TERMINAL_TIMEOUT}"
+export HMX_REASONING_EFFORT="${HERMES_REASONING_EFFORT:-medium}"
 
 echo "═══ applying native Hermes deadline config ═══"
 python3 - <<'PY'
@@ -42,6 +47,7 @@ import os, shutil, datetime, yaml
 
 cfg_path = os.environ["HMX_CONFIG"]
 term_timeout = int(os.environ["HMX_TERMINAL_TIMEOUT"])
+reasoning_effort = os.environ["HMX_REASONING_EFFORT"].strip().lower()
 
 with open(cfg_path) as f:
     cfg = yaml.safe_load(f) or {}
@@ -61,12 +67,20 @@ if old != term_timeout:
 else:
     print(f"  terminal.timeout already {term_timeout} (no change)")
 
-# 2. confirm per-task iteration budget (NATIVE) — report, do not lower unasked
+# 2. reasoning effort default (NATIVE) — high on execution caused the spiral
 agent = cfg.setdefault("agent", {})
+old_re = agent.get("reasoning_effort")
+if reasoning_effort in {"low", "medium", "high"} and old_re != reasoning_effort:
+    agent["reasoning_effort"] = reasoning_effort
+    changes.append(f"agent.reasoning_effort: {old_re} -> {reasoning_effort}")
+else:
+    print(f"  agent.reasoning_effort already {old_re} (no change)")
+
+# 3. confirm per-task iteration budget (NATIVE) — report, do not lower unasked
 mt = agent.get("max_turns")
 print(f"  agent.max_turns = {mt} (native per-task iteration budget; left as-is)")
 
-# 3. confirm turn-based guardrails (NATIVE) — report only
+# 4. confirm turn-based guardrails (NATIVE) — report only
 g = (cfg.get("tool_loop_guardrails") or {}).get("hard_stop_after") or {}
 print(f"  tool_loop_guardrails.hard_stop_after = {g} (left as-is; spec-correct)")
 

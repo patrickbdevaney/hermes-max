@@ -73,6 +73,54 @@ def part_a() -> None:
         _fail("find_similar returned nothing")
     _ok(f"find_similar -> {[r['symbol'] for r in sim['results']]}")
 
+    # ── graph/AST layer (Stage 1.1) ──────────────────────────────────────────
+    import graph_core
+
+    if not res.get("graph_available"):
+        _fail(f"index_repo did not build the graph: {res}")
+    _ok(f"graph built: {res.get('symbols')} symbols, {res.get('edges')} edges")
+
+    # callers: transfer() calls withdraw() -> retrieve_related('withdraw') sees transfer as a caller
+    rel = graph_core.retrieve_related("withdraw", hops=1, k=10)
+    rel_syms = {r["symbol"]: r["relation"] for r in rel["results"]}
+    if rel.get("graph_available") is not True or rel_syms.get("transfer") != "caller":
+        _fail(f"retrieve_related('withdraw') missed caller 'transfer': {rel_syms}")
+    _ok(f"retrieve_related('withdraw') -> {rel_syms} (multi-hop callers/callees)")
+
+    # callees: transfer() -> withdraw, deposit ; make_account path -> BankAccount
+    rel2 = graph_core.retrieve_related("transfer", hops=1, k=10)
+    callees = {r["symbol"] for r in rel2["results"] if r["relation"] == "callee"}
+    if not {"withdraw", "deposit"}.issubset(callees):
+        _fail(f"retrieve_related('transfer') missed callees withdraw/deposit: {callees}")
+    _ok(f"retrieve_related('transfer') callees -> {sorted(callees)}")
+
+    # repo map: ranked, budgeted; called-a-lot symbols rank above leaf functions
+    rm = graph_core.repo_map(token_budget=500)
+    if not rm.get("graph_available") or rm.get("count", 0) < 3:
+        _fail(f"repo_map did not return a ranked map: {rm}")
+    ranked = [e["symbol"] for e in rm["entries"]]
+    _ok(f"repo_map (ranked) -> {ranked[:5]}")
+
+    # search_code now folds in the graph signal (mode shows +graph) but still finds fibonacci
+    g_sc = rag_core.search_code("fibonacci sequence number", k=5)
+    if "fibonacci" not in [r["symbol"] for r in g_sc["results"]]:
+        _fail(f"graph-boosted search_code lost fibonacci: {g_sc}")
+    _ok(f"search_code graph-folded but correct (mode={g_sc['mode']})")
+
+    # ── fallback: graph unavailable -> clean degradation, BM25 still works ────
+    _real = graph_core.graph_available
+    graph_core.graph_available = lambda con: False  # type: ignore[assignment]
+    try:
+        fb = graph_core.retrieve_related("withdraw")
+        if fb.get("graph_available") is not False or "unavailable" not in fb.get("note", ""):
+            _fail(f"retrieve_related fallback note missing: {fb}")
+        fb_sc = rag_core.search_code("fibonacci", k=3)
+        if "fibonacci" not in [r["symbol"] for r in fb_sc["results"]] or "+graph" in fb_sc["mode"]:
+            _fail(f"search_code did not cleanly fall back to BM25: {fb_sc}")
+        _ok(f"graph-unavailable fallback: retrieve_related warns, search_code -> BM25 (mode={fb_sc['mode']})")
+    finally:
+        graph_core.graph_available = _real  # type: ignore[assignment]
+
 
 async def _mcp_check(port: int) -> None:
     from mcp import ClientSession
@@ -82,7 +130,8 @@ async def _mcp_check(port: int) -> None:
         async with ClientSession(read, write) as session:
             await session.initialize()
             names = {t.name for t in (await session.list_tools()).tools}
-            expected = {"index_repo", "search_code", "get_symbol_context", "find_similar"}
+            expected = {"index_repo", "search_code", "get_symbol_context", "find_similar",
+                        "retrieve_related", "repo_map"}
             if not expected.issubset(names):
                 _fail(f"missing tools; got {names}")
             _ok(f"tools advertised: {sorted(names)}")

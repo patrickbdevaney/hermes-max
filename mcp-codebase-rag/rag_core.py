@@ -394,6 +394,24 @@ def index_repo(path: str) -> dict[str, Any]:
                 con.commit()
                 embedded = True
 
+        # Graph/AST layer (Stage 1.1) — ON TOP of BM25+dense. Any failure here
+        # degrades to BM25/dense with graph_available=0; it never breaks indexing.
+        graph_info: dict[str, Any] = {"graph_available": False}
+        try:
+            import graph_core
+
+            gi = graph_core.build_graph(con, repo)
+            _meta_set(con, "graph_available", "1")
+            con.commit()
+            graph_info = {"graph_available": True, **gi}
+        except Exception as e:  # noqa: BLE001 - graph is best-effort
+            try:
+                _meta_set(con, "graph_available", "0")
+                con.commit()
+            except Exception:  # noqa: BLE001
+                pass
+            graph_info = {"graph_available": False, "graph_error": f"{type(e).__name__}: {e}"}
+
         return {
             "ok": True,
             "repo": repo,
@@ -401,6 +419,7 @@ def index_repo(path: str) -> dict[str, Any]:
             "chunks_indexed": n_chunks,
             "dense_embedded": embedded,
             "mode": "hybrid" if embedded else "bm25-only",
+            **graph_info,
         }
     finally:
         con.close()
@@ -479,12 +498,39 @@ def search_code(query: str, k: int = 8) -> dict[str, Any]:
         pool = max(k * 6, 50)
         bm = _bm25(con, query, pool)
         dn = _dense(con, query, pool, vec_ok)
-        mode = "hybrid" if dn else "bm25-only"
-        if dn:
-            ids = _rrf([bm, dn], k)
+        base = "hybrid" if dn else "bm25-only"
+
+        # Graph-rank as a THIRD fused signal (Stage 1.1): re-rank the SAME
+        # candidate pool by PageRank so well-connected symbols surface — never
+        # injecting unrelated symbols, so it only sharpens, never derails.
+        ranks: dict[str, float] = {}
+        try:
+            import graph_core
+
+            if graph_core.graph_available(con):
+                ranks = graph_core.rank_map(con)
+        except Exception:  # noqa: BLE001 - graph is best-effort
+            ranks = {}
+
+        ranked_lists = [bm] + ([dn] if dn else [])
+        graph_on = False
+        cand_ids = {cid for cid, _ in bm} | {cid for cid, _ in dn}
+        pre_rows = _rows_for(con, list(cand_ids))
+        if ranks and cand_ids:
+            graph_on = True
+            gr = sorted(
+                cand_ids,
+                key=lambda cid: ranks.get(pre_rows[cid]["symbol"], 0.0) if cid in pre_rows else 0.0,
+                reverse=True,
+            )
+            ranked_lists.append([(cid, 0.0) for cid in gr])
+
+        if len(ranked_lists) > 1:
+            ids = _rrf(ranked_lists, k)
         else:
             ids = [cid for cid, _ in bm[:k]]
-        rows = _rows_for(con, ids)
+        mode = base + ("+graph" if graph_on else "")
+        rows = pre_rows or _rows_for(con, ids)
         results = [_fmt(rows[i]) for i in ids if i in rows]
         return {"ok": True, "query": query, "mode": mode, "results": results}
     finally:
@@ -535,6 +581,13 @@ def stats() -> dict[str, Any]:
     try:
         n = con.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()["n"]
         repos = [r["repo"] for r in con.execute("SELECT DISTINCT repo FROM chunks")]
+        graph: dict[str, Any] = {"graph_available": False}
+        try:
+            import graph_core
+
+            graph = graph_core.graph_stats(con)
+        except Exception:  # noqa: BLE001
+            graph = {"graph_available": False}
         return {
             "chunks": n,
             "repos": repos,
@@ -542,6 +595,7 @@ def stats() -> dict[str, Any]:
             "embeddings_configured": embeddings_configured(),
             "sqlite_vec_loaded": vec_ok,
             "db_path": DB_PATH,
+            **graph,
         }
     finally:
         con.close()

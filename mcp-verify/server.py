@@ -55,5 +55,16 @@ def verify(path: str, language: str = "auto") -> dict:
     return verify_core.verify(path, language)
 
 
+@mcp.tool()
+def quick_check(path: str, language: str = "auto") -> dict:
+    """Fast incremental check — lint + typecheck only, NO tests.
+
+    Run this after EACH diff/search-replace edit for cheap well-formed-edit
+    feedback (the edit-format discipline), then run the full verify() at subtask
+    end. Same structured shape as verify(), with the test stage omitted.
+    """
+    return verify_core.quick_check(path, language)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
