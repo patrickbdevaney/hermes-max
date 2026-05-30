@@ -116,3 +116,12 @@ servers:
     profiles: [gpu_local, lean_cloud]
     requires: []
     degrades_to: Crawl4AI then trafilatura; distil to raw when VLLM_BASE_URL unset
+  - name: research
+    dir: mcp-research
+    port: 9110
+    port_env: MCP_RESEARCH_PORT
+    health: /health
+    register_as: hermes-max-research
+    profiles: [gpu_local, lean_cloud]
+    requires: [docs]
+    degrades_to: SearXNG+Crawl4AI/trafilatura+chat model; authority-only rank without reranker
