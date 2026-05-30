@@ -38,36 +38,37 @@ hermes-max/
   phoenix.sh  searXNG.sh  # supporting containers (already provided)
 ```
 
-## Quickstart
+## Quickstart — one frictionless command
 
 ```bash
-# 0. supporting containers (once)
-./phoenix.sh        # Phoenix: OTLP :4317, UI :6006
-./searXNG.sh        # SearXNG: :8080
+bash bootstrap.sh        # the ONE command: no chmod, auto venv/dep/MCP detection
+#   idempotent; detects OS/arch, Hermes, Docker; creates .env from .env.example;
+#   discovers every server (manifest + filesystem scan), builds venvs, installs
+#   deps, runs smoke tests, registers with Hermes + applies native deadlines.
+bash bootstrap.sh --check   # dry-run audit (what's missing), changes nothing
 
-# 1. config — the single port switch lives here
-cp .env.example .env
-#   edit VLLM_BASE_URL (dev = Tailscale IP, prod = localhost)
-
-# 2. prove each server in isolation (creates venvs on first run)
-scripts/smoke-test.sh
-
-# 3. apply native deadline/effort config (backs up ~/.hermes/config.yaml first)
-scripts/apply-config-deadlines.sh   # terminal.timeout=120, reasoning_effort=medium
-
-# 4. start all eight MCP servers (independent processes)
+# then bring the stack up and restart Hermes:
 scripts/start-all.sh
-
-# 4. register with Hermes (injects mcp_servers, installs Tier-2 skills)
-scripts/register-mcp.sh           # add --sync-model-url to also set model.base_url
-#   then restart Hermes so it loads them:  hermes
-
-# 5. confirm everything is live
-scripts/healthcheck.sh
-
-# 6. (optional) weekly self-evolution cron
-dspy-evolution/register-cron.sh
+hermes
 ```
+
+Optional supporting containers (sovereign loop): `./phoenix.sh` (OTLP :4317, UI
+:6006), `./searXNG.sh` (search :8080, JSON enabled), `./crawl4ai.sh` (extract
+:11235). Local model roles: `./serve-embed.sh` (:8002) + `./serve-rerank.sh`
+(:8003) turn RAG hybrid+reranked. Weekly self-evolution: `dspy-evolution/register-cron.sh`.
+
+<details><summary>Manual / step-by-step (what bootstrap automates)</summary>
+
+```bash
+cp .env.example .env                 # edit VLLM_BASE_URL (the one port switch)
+scripts/smoke-test.sh                # prove each server in isolation
+scripts/apply-config-deadlines.sh    # native deadline/effort knobs (backs up config)
+scripts/start-all.sh                 # start all MCP servers (independent processes)
+scripts/register-mcp.sh              # inject mcp_servers + install skills (--sync-model-url opt.)
+scripts/healthcheck.sh               # confirm everything is live
+scripts/sovereignty-test.sh          # assert the no-cloud-key property holds
+```
+</details>
 
 Stop the servers with `kill $(cat ~/.hermes-max/run/*.pid)`. Logs are under
 `~/.hermes-max/logs/`.
@@ -100,10 +101,12 @@ sed -i 's#^VLLM_BASE_URL=.*#VLLM_BASE_URL=http://localhost:8001/v1#' .env
 scripts/start-all.sh && scripts/register-mcp.sh --sync-model-url && scripts/healthcheck.sh
 ```
 
-## The eight MCP servers
+## The nine MCP servers
 
 Each has its own `README.md`, `requirements.txt`, `server.py`, `smoke_test.py`
-and `healthcheck.sh`, and runs as an independent streamable-http process.
+and `healthcheck.sh`, and runs as an independent streamable-http process. The
+single source of truth for the list is `mcp-manifest.yaml` — adding a server is
+one line there; every script picks it up.
 
 - **mcp-verify** — `verify(path)` runs **exactly** lint → typecheck → tests
   (Python/TS/Rust). `quick_check` (lint+type, fast per-edit) and `deep_verify`
@@ -133,6 +136,45 @@ and `healthcheck.sh`, and runs as an independent streamable-http process.
 - **mcp-search** *(:9108)* — `generate_and_select`: bounded best-of-N selected by
   **execution** through mcp-verify (lossless; never returns a red patch).
   Default-low N, capped; HARD subtasks only.
+- **mcp-docs** *(:9109)* — the **sovereign documentation loop**: `search_docs`
+  (SearXNG JSON), `fetch_clean` (Crawl4AI → markdown, trafilatura fallback),
+  `ingest_doc` / `research_topic` (fetch → distil with the local model → store in
+  the RAG `docs/<topic>` namespace + KG `framework→api`). Learn a novel framework
+  on demand with **no external API**.
+
+mcp-knowledge-graph also gains **self-editing core memory** (`core_memory_get` /
+`core_memory_append` / `core_memory_replace`) wired to Hermes's native MEMORY.md —
+the always-in-context, size-bounded block the agent deliberately curates.
+
+## Compounding, sovereignty & graceful degradation
+
+**Compounding (Stages 1–3).** RAG is hybrid + cross-encoder **reranked**
+(`serve-embed.sh` / `serve-rerank.sh`, local Qwen3-0.6B models; measured MRR
+0.41→0.75). The sovereign **docs loop** self-seeds framework knowledge on demand.
+**GEPA** (`dspy-evolution/`) evolves the difficulty-classifier prompt on the
+operator's own traces — and every escalation outcome (`record_outcome`) becomes a
+labelled example, so the local model handles progressively more (the flywheel).
+
+**Sovereignty assertion (the headline).** With **all external API keys unset** and
+only the local stack running (vLLM + SearXNG + Crawl4AI), the full loop — search,
+extract, distil, store, retrieve, verify, evolve — works. Prove it:
+`scripts/sovereignty-test.sh`. The ONLY hard dependency is the local vLLM chat
+model; every other capability has a local default or degrades cleanly.
+
+**Graceful-degradation matrix** — every component continues with a warning, never
+a hard fail:
+
+| Component | Backend absent/down ⇒ |
+|---|---|
+| embeddings (`EMBED_BASE_URL`) | RAG runs **BM25 + graph** (no dense lane) |
+| reranker (`RERANK_BASE_URL`) | RAG returns the **fused order** (no `+rerank`) |
+| Crawl4AI | `fetch_clean` falls back to local **trafilatura** |
+| SearXNG | `search_docs` reports unavailable (other tools unaffected) |
+| local chat model | `ingest_doc` stores **raw** markdown (no distil) |
+| RAG/KG (for docs) | note/entities not stored, reported (fetch/distil still work) |
+| dspy / gepa | `run-evolution.sh` is a no-op (exit 0) with install hint |
+| escalation cloud tier | OFF by default; local tier tried first; never required |
+| Phoenix (OTLP) | spans dropped silently; servers run unaffected |
 
 ## Tier-2 workflow skills (`skills/`)
 
