@@ -92,6 +92,54 @@ def part_a() -> None:
         _fail(f"zero-cap pre-check failed: {r3}")
     _ok("zero cap refuses before spending")
 
+    # ── Stage 3: difficulty classifier (the shared signal) ───────────────────
+    dh = ec.classify_difficulty({"file_count": 10, "prior_failures": 2, "novelty": "high"})
+    de = ec.classify_difficulty({"file_count": 1})
+    if dh["difficulty"] != "hard" or de["difficulty"] != "easy":
+        _fail(f"difficulty classifier wrong: hard={dh} easy={de}")
+    _ok(f"classify_difficulty: 10-file/2-fail/high -> {dh['difficulty']}; 1-file -> {de['difficulty']}")
+
+    # auto-triggers
+    if not ec.should_escalate({"search_exhausted": True})["escalate"]:
+        _fail("should_escalate missed search-exhausted trigger")
+    if not ec.should_escalate({"confidence_low": True, "irreversible": True})["escalate"]:
+        _fail("should_escalate missed low-confidence+irreversible trigger")
+    if ec.should_escalate({})["escalate"]:
+        _fail("should_escalate false-fired with no condition")
+    _ok("should_escalate fires on search-exhausted / low-confidence+irreversible, not otherwise")
+
+    # ── FREE local tier works even with CLOUD OFF; surgical handoff carried ───
+    ec.ENABLED = False
+    ec.DAILY_USD_CAP = 1.0
+    os.environ["ESCALATION_LOCAL_BASE_URL"] = "http://stub.invalid/v1"
+    os.environ["ESCALATION_LOCAL_MODEL"] = "stub-local-122b"
+    handoff = {"plan": "PLAN.md body", "diffs": "diff --git ...", "failure_traces": "AssertionError"}
+    rl = ec.escalate("hard kernel", tier="local", context=handoff)
+    if not rl.get("ok") or not rl.get("free") or rl.get("cost_usd") != 0.0:
+        _fail(f"free local tier should run with cloud OFF at zero cost: {rl}")
+    if not rl.get("handoff_context_included"):
+        _fail(f"surgical handoff context was not carried: {rl}")
+    _ok(f"FREE local tier runs with cloud OFF (cost=${rl['cost_usd']}, handoff carried)")
+
+    # ── tiered route: hard -> local FIRST (cloud only if local fails) ─────────
+    rt = ec.route("hard kernel", difficulty="hard", context=handoff)
+    if not rt.get("escalated") or rt.get("route") != "local":
+        _fail(f"hard route should try local tier first: {rt}")
+    _ok(f"route(hard) -> tier '{rt['route']}' first (attempts={[a['tier'] for a in rt['attempts']]})")
+
+    re_easy = ec.route("trivial", difficulty="easy")
+    if re_easy.get("escalated") or re_easy.get("route") != "local_model":
+        _fail(f"easy/medium should stay on the primary local model: {re_easy}")
+    _ok("route(easy) stays on the primary local model (no escalation)")
+
+    # ── no tier available: local gone + cloud OFF -> honest no-route ──────────
+    del os.environ["ESCALATION_LOCAL_BASE_URL"]
+    ec.ENABLED = False
+    rn = ec.route("hard kernel", difficulty="hard")
+    if rn.get("ok") or rn.get("escalated"):
+        _fail(f"with no local tier and cloud OFF, route must not escalate: {rn}")
+    _ok(f"no tier available -> honest no-route ({rn['reason'][:50]}...)")
+
 
 async def _mcp_check(port: int) -> None:
     from mcp import ClientSession
@@ -101,8 +149,9 @@ async def _mcp_check(port: int) -> None:
         async with ClientSession(read, write) as session:
             await session.initialize()
             names = {t.name for t in (await session.list_tools()).tools}
-            if "escalate" not in names:
-                _fail(f"escalate tool not advertised; got {names}")
+            expected = {"escalate", "classify_difficulty", "should_escalate", "route"}
+            if not expected.issubset(names):
+                _fail(f"escalation tools not advertised; want {expected}, got {names}")
             _ok(f"tools advertised: {sorted(names)}")
             res = await session.call_tool("escalate", {"task": "x"})
             data = res.structuredContent or (json.loads(res.content[0].text) if res.content else {})

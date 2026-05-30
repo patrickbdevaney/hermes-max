@@ -38,12 +38,15 @@ CKPT_DIR = REPO_ROOT / "mcp-checkpoint"
 RAG_DIR = REPO_ROOT / "mcp-codebase-rag"
 WATCHDOG_DIR = REPO_ROOT / "mcp-watchdog"
 SEARCH_DIR = REPO_ROOT / "mcp-search"
+ESC_DIR = REPO_ROOT / "mcp-escalation"
 
 VERIFY_PORT = int(os.environ.get("V_VERIFY_PORT", "39101"))
 CKPT_PORT = int(os.environ.get("V_CKPT_PORT", "39106"))
 RAG_PORT = int(os.environ.get("V_RAG_PORT", "39102"))
 WATCHDOG_PORT = int(os.environ.get("V_WATCHDOG_PORT", "39107"))
 SEARCH_PORT = int(os.environ.get("V_SEARCH_PORT", "39108"))
+ESC_PORT = int(os.environ.get("V_ESC_PORT", "39105"))
+STUB_MODEL_PORT = int(os.environ.get("V_STUB_MODEL_PORT", "39190"))
 APP_PORT = int(os.environ.get("V_APP_PORT", "8337"))
 
 VERIFY_URL = f"http://127.0.0.1:{VERIFY_PORT}/mcp"
@@ -51,6 +54,7 @@ CKPT_URL = f"http://127.0.0.1:{CKPT_PORT}/mcp"
 RAG_URL = f"http://127.0.0.1:{RAG_PORT}/mcp"
 WATCHDOG_URL = f"http://127.0.0.1:{WATCHDOG_PORT}/mcp"
 SEARCH_URL = f"http://127.0.0.1:{SEARCH_PORT}/mcp"
+ESC_URL = f"http://127.0.0.1:{ESC_PORT}/mcp"
 
 REPORT = "/tmp/hermes_validation_report.md"
 _log: list[str] = []
@@ -140,6 +144,39 @@ def stop(proc: subprocess.Popen | None) -> None:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
+
+
+def start_stub_model(port: int):
+    """A tiny OpenAI-compatible /chat/completions stub so the LOCAL escalation
+    tier can be exercised end-to-end without a real GPU. Echoes back that it
+    received the handoff so the test can prove the full context was carried."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _H(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: D401 - silence
+            pass
+
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(n).decode("utf-8", "replace")
+            got_handoff = "Handoff context" in body
+            resp = json.dumps({
+                "choices": [{"message": {"content":
+                    f"[local-122b] handled hard kernel (handoff_seen={got_handoff})"}}],
+                "usage": {"prompt_tokens": 60, "completion_tokens": 20},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", port), _H)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    say(f"  started stub local-tier model on :{port}")
+    return srv
 
 
 # ── project sources ──────────────────────────────────────────────────────────
@@ -497,6 +534,20 @@ def main() -> None:
         SEARCH_DIR, {"MCP_SEARCH_PORT": str(SEARCH_PORT), "MCP_VERIFY_PORT": str(VERIFY_PORT)},
         SEARCH_PORT, "mcp-search",
     )
+    # Stub local-tier model + escalation server (cloud OFF; free local tier ON).
+    stub_model = start_stub_model(STUB_MODEL_PORT)
+    esc_state = "/tmp/hermes_val_escalation_spend.json"
+    try:
+        os.remove(esc_state)
+    except OSError:
+        pass
+    esc_proc = start_server(ESC_DIR, {
+        "MCP_ESCALATION_PORT": str(ESC_PORT),
+        "ESCALATION_ENABLED": "false",  # cloud stays OFF / USD-capped
+        "ESCALATION_LOCAL_BASE_URL": f"http://127.0.0.1:{STUB_MODEL_PORT}/v1",
+        "ESCALATION_LOCAL_MODEL": "stub-122b",
+        "ESCALATION_STATE_PATH": esc_state,
+    }, ESC_PORT, "mcp-escalation")
 
     v1_checkpoints: list[str] = []
     try:
@@ -952,6 +1003,63 @@ def main() -> None:
               bool(loc.get("graph_available") and anchored) and head_before == head_after,
               f"anchors={anchored[:3]} HEAD stable={head_before == head_after}")
 
+        # ═══════════════ STAGE-3 ESCALATION (difficulty / auto-trigger / tiered / handoff) ═══════════════
+        banner("V-difficulty — the shared difficulty classifier tags tasks easy/medium/hard")
+        d_hard = call(ESC_URL, "classify_difficulty",
+                      signals={"file_count": 10, "prior_failures": 2, "novelty": "high"})
+        d_easy = call(ESC_URL, "classify_difficulty", signals={"file_count": 1})
+        check("classify_difficulty tags a big/novel/prior-failed task HARD and a 1-file task EASY",
+              d_hard.get("difficulty") == "hard" and d_easy.get("difficulty") == "easy",
+              f"hard(score={d_hard.get('score')}) vs easy(score={d_easy.get('score')})")
+
+        banner("V-autotrigger — escalation auto-fires on exhausted search / backtrack / low-confidence")
+        at1 = call(ESC_URL, "should_escalate", signals={"search_exhausted": True})
+        at2 = call(ESC_URL, "should_escalate", signals={"confidence_low": True, "irreversible": True})
+        at3 = call(ESC_URL, "should_escalate", signals={})
+        check("should_escalate fires on the auto-triggers and not otherwise",
+              at1.get("escalate") and at2.get("escalate") and not at3.get("escalate"),
+              f"search_exhausted->{at1.get('escalate')}, lowconf+irrev->{at2.get('escalate')}, none->{at3.get('escalate')}")
+
+        banner("V-route — hard kernel routes to the FREE local tier FIRST; surgical handoff carried")
+        handoff = {"plan": (proj / "PLAN.md").read_text()[:500] if (proj / "PLAN.md").exists() else "PLAN",
+                   "diffs": "diff --git a/db.py b/db.py\n+pagination", "failure_traces": "AssertionError: off-by-one"}
+        rt = call(ESC_URL, "route", task="fix the pagination off-by-one", difficulty="hard", context=handoff)
+        result = rt.get("result", {})
+        check("route(hard) escalates to the local tier first (free, $0)",
+              rt.get("escalated") and rt.get("route") == "local" and result.get("cost_usd") == 0.0,
+              f"route={rt.get('route')} attempts={[a['tier'] for a in rt.get('attempts', [])]} cost=${result.get('cost_usd')}")
+        check("surgical handoff (PLAN + diffs + traces) carried to the escalation tier — not lossy",
+              bool(result.get("handoff_context_included")) and "handoff_seen=True" in str(result.get("content")),
+              f"content={str(result.get('content'))[:70]}")
+
+        banner("V-cloud-gated — cloud tier stays OFF by default and USD-capped")
+        cloud = call(ESC_URL, "escalate", task="x", tier="cheap")
+        st = call(ESC_URL, "classify_difficulty")  # cheap reachability sanity (any tool)
+        check("cloud escalate refused while OFF (local tier remains the free default)",
+              cloud.get("disabled") is True and cloud.get("ok") is not True,
+              f"cloud disabled={cloud.get('disabled')}; reason={str(cloud.get('reason'))[:60]}")
+
+        banner("V-route easy — easy/medium stay on the primary local model (no escalation)")
+        rt_easy = call(ESC_URL, "route", task="rename a var", difficulty="easy")
+        check("route(easy) stays on the primary local model, no escalation",
+              rt_easy.get("escalated") is False and rt_easy.get("route") == "local_model",
+              f"route={rt_easy.get('route')}")
+
+        banner("Stage-3 — kill mcp-escalation mid-run -> graceful degradation (stay local)")
+        stop(esc_proc)
+        time.sleep(0.5)
+        e_degraded = False
+        try:
+            call(ESC_URL, "classify_difficulty", signals={"file_count": 1})
+            detail = "escalation still reachable after kill (unexpected)"
+        except Exception as e:  # noqa: BLE001
+            vv = call(VERIFY_URL, "verify", path=str(proj), language="python")
+            e_degraded = "passed" in vv
+            detail = (f"escalation unreachable ({type(e).__name__}); agent stays on the free local "
+                      f"model and keeps working (verify passed={vv.get('passed')})")
+        check("kill mcp-escalation -> agent degrades gracefully (stays on local model)",
+              e_degraded, detail)
+
         say(f"\nPROJECT_DIR={proj}")
     finally:
         stop(verify_proc)
@@ -959,6 +1067,11 @@ def main() -> None:
         stop(rag_proc)
         stop(watchdog_proc)
         stop(search_proc)
+        stop(esc_proc)
+        try:
+            stub_model.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
         _flush_report()
 
     n_pass = sum(1 for _, p, _ in _checks if p)

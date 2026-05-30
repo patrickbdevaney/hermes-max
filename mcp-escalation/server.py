@@ -41,15 +41,44 @@ async def health(_: Request) -> JSONResponse:
 
 
 @mcp.tool()
-def escalate(task: str, tier: str = "cheap") -> dict:
-    """Route a hard, self-contained subproblem to a cheap cloud tier.
+def escalate(task: str, tier: str = "cheap", context: dict | None = None) -> dict:
+    """Route a hard, self-contained subproblem to an escalation tier.
 
-    Returns the model's result, the call cost, and today's spend vs the cap.
-    Returns a disabled/cap-reached marker (never raises) when escalation is off
-    or the daily cap is hit — callers must fall back to local work in that case.
+    tier: "local" (a bigger LOCAL model — FREE, always on when configured),
+    "cheap"/"long" (cloud — OFF by default, hard USD-capped). `context` carries
+    the SURGICAL HANDOFF: pass {plan, diffs, failure_traces} (the full 0.5 state
+    snapshot, not a lossy summary). Returns the result + cost + today's spend.
+    Returns a disabled/cap-reached marker (never raises) on a gated cloud call;
     Tier-3 (Opus/Claude Code) is rejected by design.
     """
-    return escalation_core.escalate(task, tier)
+    return escalation_core.escalate(task, tier, context)
+
+
+@mcp.tool()
+def classify_difficulty(signals: dict | None = None) -> dict:
+    """Tag a task/subtask easy/medium/hard from cheap signals (file_count,
+    novelty, prior_failures, lines_changed, cross_module). This is the SHARED
+    difficulty signal — gate Stage-1 search N, Stage-2 verify depth, and Stage-3
+    escalation off this one tag."""
+    return escalation_core.classify_difficulty(signals)
+
+
+@mcp.tool()
+def should_escalate(signals: dict | None = None) -> dict:
+    """Auto-trigger check: escalate when verifier-guided search exhausted N
+    without green, OR backtracking exhausted approaches, OR confidence is low on
+    an irreversible/high-stakes change."""
+    return escalation_core.should_escalate(signals)
+
+
+@mcp.tool()
+def route(task: str, difficulty: str | None = None, signals: dict | None = None,
+          context: dict | None = None) -> dict:
+    """Tiered routing for a hard kernel: easy/medium stay on the primary local
+    model; hard tries the FREE local escalation tier FIRST, then a cloud tier
+    only if local is unavailable/failed (and cloud is enabled + under cap). Pass
+    `context` for the surgical handoff."""
+    return escalation_core.route(task, difficulty, signals, context)
 
 
 if __name__ == "__main__":
