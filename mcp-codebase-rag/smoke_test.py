@@ -196,6 +196,76 @@ async def _mcp_check(port: int) -> None:
             _ok(f"search_code over MCP -> {syms}")
 
 
+def part_stage2() -> None:
+    """Stage 2 — robust index init. Each assertion maps to a DoD item."""
+    print("[A3] robust index init (empty / preflight / unparseable / resume / self-check)")
+    import importlib
+
+    import rag_core
+
+    # Isolate this section in its own throwaway DB so resume/incremental counts are clean.
+    s2db = os.path.join(_TMP, "stage2.db")
+    os.environ["RAG_INDEX_PATH"] = s2db
+    os.environ["EMBED_BASE_URL"] = ""
+    importlib.reload(rag_core)
+
+    # 1. EMPTY dir -> instant clean empty success (the original failure is gone)
+    empty_dir = tempfile.mkdtemp(prefix="rag-empty-")
+    r = rag_core.index_repo(empty_dir)
+    if not (r.get("ok") and r.get("empty") and r.get("files_indexed") == 0):
+        _fail(f"empty dir did not return clean empty success: {r}")
+    if not r.get("index_health", {}).get("queryable"):
+        _fail(f"empty index not queryable per self-check: {r}")
+    _ok(f"empty dir -> clean empty success (mode={r['mode']}, note={r.get('note','')!r})")
+    # ... and it is genuinely queryable, returning no results, NOT an error
+    q = rag_core.search_code("anything", k=3)
+    if not q.get("ok") and q.get("results"):
+        _fail(f"query on empty index should be a clean no-results: {q}")
+    _ok("query on empty index is a clean no-results (not a crash)")
+
+    # 2. pre-flight scan reports scope + look-ahead BEFORE indexing
+    sc = rag_core.scan_repo(str(SAMPLE))
+    if sc["n_files"] < 1 or sc["est_s"] <= 0 or not sc["by_lang"]:
+        _fail(f"pre-flight scan_repo did not report scope: {sc}")
+    _ok(f"pre-flight scan: {sc['n_files']} files, by_lang={sc['by_lang']}, est ~{sc['est_s']}s")
+
+    # 3. real repo: batched index, self-check queryable
+    r = rag_core.index_repo(str(SAMPLE), batch_size=2)
+    if not r["ok"] or r["files_indexed"] < 1 or not r["index_health"]["queryable"]:
+        _fail(f"batched index of sample failed/self-check not queryable: {r}")
+    _ok(f"batched index: {r['files_indexed']} files, {r['chunks_indexed']} chunks, "
+        f"health={r['index_health']}")
+
+    # 4. re-run is incremental/resumable: unchanged files are RESUMED (skipped), 0 re-indexed
+    r2 = rag_core.index_repo(str(SAMPLE), batch_size=2)
+    if r2["files_indexed"] != 0 or r2["files_resumed_unchanged"] < r["files_indexed"]:
+        _fail(f"re-run not idempotent/resumable (expected all resumed): {r2}")
+    _ok(f"re-run resumes unchanged files ({r2['files_resumed_unchanged']} resumed, "
+        f"{r2['files_indexed']} re-indexed)")
+
+    # 5. unparseable file is SKIPPED, never fatal
+    junk_dir = tempfile.mkdtemp(prefix="rag-junk-")
+    # a .py that is not parseable as code and yields no chunks (whitespace only)
+    Path(junk_dir, "blank.py").write_text("   \n\n   \n")
+    Path(junk_dir, "real.py").write_text("def real_fn(x):\n    return x + 1\n")
+    r3 = rag_core.index_repo(junk_dir)
+    if not r3["ok"]:
+        _fail(f"index with an unparseable file errored instead of skipping: {r3}")
+    if r3["skipped_unparseable"] < 1 or r3["files_indexed"] < 1:
+        _fail(f"unparseable not skipped / real file not indexed: {r3}")
+    _ok(f"unparseable file skipped not fatal ({r3['skipped_unparseable']} skipped, "
+        f"{r3['files_indexed']} indexed)")
+
+    # 6. no-embed endpoint -> BM25+graph mode with a clear report (EMBED_BASE_URL blank here)
+    if r["mode"] not in ("bm25-only", "bm25+graph"):
+        _fail(f"blank EMBED_BASE_URL should degrade to BM25/graph, got mode={r['mode']}")
+    _ok(f"blank embed endpoint -> degraded mode={r['mode']} (no dense lane, clean)")
+
+    # restore the part_b DB pin
+    os.environ["RAG_INDEX_PATH"] = TEST_DB
+    importlib.reload(rag_core)
+
+
 def _wait_health(port: int, timeout: float = 30.0) -> None:
     url = f"http://127.0.0.1:{port}/health"
     deadline = time.monotonic() + timeout
@@ -232,5 +302,6 @@ def part_b() -> None:
 if __name__ == "__main__":
     part_a()
     part_rerank()
+    part_stage2()
     part_b()
     print("mcp-codebase-rag smoke test PASSED")

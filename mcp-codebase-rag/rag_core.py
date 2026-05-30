@@ -61,6 +61,19 @@ MAX_FILE_BYTES = int(os.environ.get("RAG_MAX_FILE_BYTES", str(1_500_000)))
 MAX_CHUNK_CHARS = int(os.environ.get("RAG_MAX_CHUNK_CHARS", "6000"))
 RERANK_DOC_CHARS = int(os.environ.get("RERANK_DOC_CHARS", "2000"))
 RRF_K = 60
+# Stage 2: index_repo processes files in batches, committing + heartbeating per
+# batch so a large repo reports progress, a mid-index kill keeps prior batches,
+# and the next run resumes. A heartbeat stamp file is written to the shared
+# watchdog heartbeat dir (best-effort; degrades silently) so the watchdog's
+# liveness check sees index_repo is WORKING and never false-kills a long index.
+RAG_INDEX_BATCH = int(os.environ.get("RAG_INDEX_BATCH", "64"))
+_WD_STATE_DIR = os.path.expanduser(os.environ.get("WATCHDOG_STATE_DIR", "~/.hermes-max/watchdog"))
+HEARTBEAT_DIR = os.path.expanduser(os.environ.get("HEARTBEAT_DIR", os.path.join(_WD_STATE_DIR, "heartbeats")))
+
+try:
+    import otel_emit
+except Exception:  # noqa: BLE001 - observability is best-effort; never break indexing
+    otel_emit = None  # type: ignore[assignment]
 
 SKIP_DIRS = {
     ".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
@@ -338,6 +351,15 @@ def _connect() -> tuple[sqlite3.Connection, bool]:
     )
     con.execute("CREATE INDEX IF NOT EXISTS idx_chunks_repo ON chunks(repo)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(symbol)")
+    # Per-file fingerprint table (Stage 2) — makes index_repo idempotent +
+    # resumable: a file whose fingerprint (size+mtime) is unchanged AND already has
+    # chunks is skipped on reindex, so a killed mid-index resumes instead of
+    # restarting from zero. embedded=1 once its vectors are stored.
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS files_index(
+            repo TEXT, path TEXT, fp TEXT, embedded INTEGER DEFAULT 0,
+            PRIMARY KEY(repo, path))"""
+    )
     con.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts "
         "USING fts5(symbol, content, tokenize='unicode61')"
@@ -380,103 +402,285 @@ def _vec_table_exists(con: sqlite3.Connection) -> bool:
     return row is not None
 
 
+# ── Stage 2: robust-init helpers (pre-flight scan, fingerprint, heartbeat) ────
+def _file_fp(path: str) -> str:
+    """Cheap change-detector: size+mtime. Stable enough to skip unchanged files on
+    reindex; a real content edit changes mtime so it is always re-indexed."""
+    try:
+        st = os.stat(path)
+        return f"{st.st_size}:{int(st.st_mtime)}"
+    except OSError:
+        return "0:0"
+
+
+def scan_repo(path: str) -> dict[str, Any]:
+    """Pre-flight scan: WHAT would be indexed, BEFORE touching the store. Returns
+    the indexable file list (path, lang, size, fp), counts by language, total
+    bytes, and a look-ahead duration estimate — logged so the operator sees the
+    scope upfront and the watchdog knows what's normal."""
+    repo = os.path.abspath(os.path.expanduser(path))
+    files: list[tuple[str, str, str, int, str]] = []  # (abs, rel, lang, size, fp)
+    by_lang: dict[str, int] = {}
+    total_bytes = 0
+    oversize = 0
+    for root, dirs, names in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+        for fn in names:
+            lang = EXT_LANG.get(Path(fn).suffix.lower())
+            if not lang:
+                continue
+            fp_abs = os.path.join(root, fn)
+            try:
+                size = os.path.getsize(fp_abs)
+            except OSError:
+                continue
+            if size > MAX_FILE_BYTES:
+                oversize += 1
+                continue
+            files.append((fp_abs, os.path.relpath(fp_abs, repo), lang, size, _file_fp(fp_abs)))
+            by_lang[lang] = by_lang.get(lang, 0) + 1
+            total_bytes += size
+    n = len(files)
+    # Look-ahead estimate (mirrors the watchdog's index_repo estimator).
+    per_file = float(os.environ.get("EST_INDEX_PER_FILE_S", "0.077"))
+    per_mb = float(os.environ.get("EST_INDEX_PER_MB_S", "0.5"))
+    est_s = round(max(0.5, n * per_file + (total_bytes / 1_048_576) * per_mb), 1) if n else 0.0
+    return {
+        "repo": repo, "files": files, "n_files": n, "by_lang": by_lang,
+        "total_bytes": total_bytes, "oversize_skipped": oversize, "est_s": est_s,
+    }
+
+
+def _heartbeat(tool: str, done: int, total: int, note: str = "") -> None:
+    """Best-effort liveness stamp the watchdog can read to confirm a long index is
+    WORKING (never false-killed). Also emits an index_progress OTel span. Any
+    failure here is swallowed — observability never breaks indexing."""
+    try:
+        os.makedirs(HEARTBEAT_DIR, exist_ok=True)
+        import json as _json
+        import time as _time
+        tmp = os.path.join(HEARTBEAT_DIR, f".{tool}.tmp")
+        dst = os.path.join(HEARTBEAT_DIR, f"{tool}.json")
+        with open(tmp, "w") as f:
+            _json.dump({"tool": tool, "ts": _time.time(), "done": done,
+                        "total": total, "note": note}, f)
+        os.replace(tmp, dst)
+    except Exception:  # noqa: BLE001
+        pass
+    if otel_emit is not None:
+        pct = round(100 * done / total, 1) if total else 100.0
+        otel_emit.record("index_progress", {"tool": tool, "done": done, "total": total,
+                                            "pct": pct, "note": note})
+
+
 # ── public operations ────────────────────────────────────────────────────────
-def index_repo(path: str) -> dict[str, Any]:
+def _delete_file_chunks(con: sqlite3.Connection, repo: str, rel: str) -> None:
+    """Remove a single file's chunks (+fts +vec) so it can be cleanly re-indexed."""
+    ids = [r["id"] for r in con.execute(
+        "SELECT id FROM chunks WHERE repo=? AND path=?", (repo, rel))]
+    if not ids:
+        return
+    qs = ",".join("?" * len(ids))
+    con.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({qs})", ids)
+    if _vec_table_exists(con):
+        con.execute(f"DELETE FROM chunks_vec WHERE rowid IN ({qs})", ids)
+    con.execute(f"DELETE FROM chunks WHERE id IN ({qs})", ids)
+
+
+def index_repo(path: str, batch_size: int | None = None, full: bool = False) -> dict[str, Any]:
+    """Robust, ALWAYS-usable-state indexing (Stage 2).
+
+    Empty repo ⇒ instant clean empty success (not a hang). Otherwise: pre-flight
+    scan (logged scope + look-ahead), batched indexing that commits + heartbeats
+    per batch (a kill mid-index keeps prior batches; the next run resumes via
+    per-file fingerprints), unparseable files SKIPPED not fatal, dense embeddings
+    degrade to BM25+graph when the embed endpoint is absent/down, and a post-init
+    self-check that the index is actually queryable. Never a silent failure."""
     repo = os.path.abspath(os.path.expanduser(path))
     if not os.path.isdir(repo):
         return {"ok": False, "repo": repo, "error": "not a directory"}
+    bs = max(1, int(batch_size or RAG_INDEX_BATCH))
+
+    # ── pre-flight scan: report the scope BEFORE touching the store ──────────
+    scan = scan_repo(repo)
+    files = scan["files"]
+    total = scan["n_files"]
+    _heartbeat("index_repo", 0, total or 1,
+               note=f"pre-flight: {total} files, {scan['by_lang']}, "
+                    f"{scan['total_bytes']/1_048_576:.1f}MB, est ~{scan['est_s']}s")
 
     con, vec_ok = _connect()
     try:
-        # Replace any prior index for this repo (idempotent reindex).
-        old = [r["id"] for r in con.execute("SELECT id FROM chunks WHERE repo=?", (repo,))]
-        if old:
-            qs = ",".join("?" * len(old))
-            con.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({qs})", old)
-            if _vec_table_exists(con):
-                con.execute(f"DELETE FROM chunks_vec WHERE rowid IN ({qs})", old)
-            con.execute(f"DELETE FROM chunks WHERE id IN ({qs})", old)
-        con.commit()
+        # Deletions: files previously indexed for this repo that are gone now.
+        on_disk = {rel for (_a, rel, _l, _s, _f) in files}
+        prior = {r["path"]: (r["fp"], r["embedded"])
+                 for r in con.execute(
+                     "SELECT path, fp, embedded FROM files_index WHERE repo=?", (repo,))}
+        removed = 0
+        for rel in list(prior):
+            if rel not in on_disk:
+                _delete_file_chunks(con, repo, rel)
+                con.execute("DELETE FROM files_index WHERE repo=? AND path=?", (repo, rel))
+                removed += 1
+        if removed:
+            con.commit()
 
-        n_files = 0
-        pending: list[int] = []
-        pending_text: list[str] = []
-        for root, dirs, files in os.walk(repo):
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
-            for fn in files:
-                ext = Path(fn).suffix.lower()
-                lang = EXT_LANG.get(ext)
-                if not lang:
-                    continue
-                fp = os.path.join(root, fn)
-                try:
-                    if os.path.getsize(fp) > MAX_FILE_BYTES:
-                        continue
-                except OSError:
-                    continue
-                chunks = chunk_file(fp, lang)
-                if not chunks:
-                    continue
-                n_files += 1
-                rel = os.path.relpath(fp, repo)
+        # ── empty repo: clean empty success, valid (queryable) state, no hang ─
+        embed_ok = vec_ok and embeddings_configured()
+        if total == 0:
+            graph_info = _build_graph(con, repo)
+            con.commit()
+            health = _self_check(con, repo, embed_ok)
+            note = ("indexed 0 files (empty repo) — RAG will return no results "
+                    "until files exist")
+            _heartbeat("index_repo", 1, 1, note="empty repo — clean empty success")
+            if otel_emit is not None:
+                otel_emit.record("index_repo_done", {"repo": repo, "files": 0,
+                                                     "empty": True, "note": note})
+            return {"ok": True, "repo": repo, "empty": True, "files_indexed": 0,
+                    "files_scanned": 0, "chunks_indexed": 0, "skipped_unparseable": 0,
+                    "skipped_oversize": scan["oversize_skipped"], "removed_deleted": removed,
+                    "files_resumed_unchanged": 0, "dense_embedded": False,
+                    "mode": "empty", "note": note, "index_health": health, **graph_info}
+
+        # ── decide which files actually need (re)indexing ────────────────────
+        embedded_any = False
+        n_indexed = 0
+        n_chunks = 0
+        skipped_unparseable = 0
+        resumed = 0
+        batch_ids: list[int] = []
+        batch_text: list[str] = []
+        processed = 0
+
+        def _flush_batch() -> None:
+            nonlocal embedded_any
+            con.commit()  # checkpoint: prior files are now durable (resumable)
+            if embed_ok and batch_text:
+                vectors = embed_texts(batch_text)
+                if vectors and len(vectors) == len(batch_ids):
+                    _ensure_vec_table(con, len(vectors[0]))
+                    for cid, vec in zip(batch_ids, vectors):
+                        con.execute("INSERT INTO chunks_vec(rowid, embedding) VALUES(?, ?)",
+                                    (cid, _ser(vec)))
+                    con.commit()
+                    embedded_any = True
+            batch_ids.clear()
+            batch_text.clear()
+
+        for (fp_abs, rel, lang, _size, fp) in files:
+            processed += 1
+            prev = prior.get(rel)
+            has_chunks = bool(con.execute(
+                "SELECT 1 FROM chunks WHERE repo=? AND path=? LIMIT 1", (repo, rel)).fetchone())
+            # Resume/idempotent: unchanged fingerprint AND chunks already present ⇒ skip.
+            if (not full) and prev is not None and prev[0] == fp and has_chunks:
+                resumed += 1
+                if processed % bs == 0 or processed == total:
+                    _heartbeat("index_repo", processed, total,
+                               note=f"{n_indexed} indexed · {resumed} resumed · "
+                                    f"{skipped_unparseable} skipped")
+                continue
+
+            # (re)index this file
+            _delete_file_chunks(con, repo, rel)
+            try:
+                chunks = chunk_file(fp_abs, lang)
+            except Exception:  # noqa: BLE001 - a parse blow-up is a SKIP, never fatal
+                chunks = []
+            if not chunks:
+                skipped_unparseable += 1
+                con.execute("INSERT OR REPLACE INTO files_index(repo, path, fp, embedded) "
+                            "VALUES(?,?,?,0)", (repo, rel, fp))
+            else:
                 for ch in chunks:
                     cur = con.execute(
                         "INSERT INTO chunks(repo, path, symbol, kind, lang, start_line, end_line, content) "
                         "VALUES(?,?,?,?,?,?,?,?)",
-                        (repo, rel, ch.symbol, ch.kind, lang, ch.start_line, ch.end_line, ch.content),
-                    )
+                        (repo, rel, ch.symbol, ch.kind, lang, ch.start_line, ch.end_line, ch.content))
                     cid = cur.lastrowid
-                    con.execute(
-                        "INSERT INTO chunks_fts(rowid, symbol, content) VALUES(?,?,?)",
-                        (cid, ch.symbol, ch.content),
-                    )
-                    pending.append(cid)
-                    pending_text.append(f"{ch.symbol}\n{ch.content}")
+                    con.execute("INSERT INTO chunks_fts(rowid, symbol, content) VALUES(?,?,?)",
+                                (cid, ch.symbol, ch.content))
+                    batch_ids.append(cid)
+                    batch_text.append(f"{ch.symbol}\n{ch.content}")
+                con.execute("INSERT OR REPLACE INTO files_index(repo, path, fp, embedded) "
+                            "VALUES(?,?,?,?)", (repo, rel, fp, 1 if embed_ok else 0))
+                n_indexed += 1
+                n_chunks += len(chunks)
+
+            if len(batch_ids) >= bs or processed == total:
+                _flush_batch()
+                _heartbeat("index_repo", processed, total,
+                           note=f"{n_indexed} indexed · {resumed} resumed · "
+                                f"{skipped_unparseable} skipped")
+        _flush_batch()
+
+        # Graph/AST layer — ON TOP of BM25+dense; any failure degrades cleanly.
+        graph_info = _build_graph(con, repo)
         con.commit()
 
-        n_chunks = len(pending)
-        embedded = False
-        if vec_ok and embeddings_configured() and pending_text:
-            vectors = embed_texts(pending_text)
-            if vectors and len(vectors) == len(pending):
-                _ensure_vec_table(con, len(vectors[0]))
-                for cid, vec in zip(pending, vectors):
-                    con.execute(
-                        "INSERT INTO chunks_vec(rowid, embedding) VALUES(?, ?)",
-                        (cid, _ser(vec)),
-                    )
-                con.commit()
-                embedded = True
-
-        # Graph/AST layer (Stage 1.1) — ON TOP of BM25+dense. Any failure here
-        # degrades to BM25/dense with graph_available=0; it never breaks indexing.
-        graph_info: dict[str, Any] = {"graph_available": False}
-        try:
-            import graph_core
-
-            gi = graph_core.build_graph(con, repo)
-            _meta_set(con, "graph_available", "1")
-            con.commit()
-            graph_info = {"graph_available": True, **gi}
-        except Exception as e:  # noqa: BLE001 - graph is best-effort
-            try:
-                _meta_set(con, "graph_available", "0")
-                con.commit()
-            except Exception:  # noqa: BLE001
-                pass
-            graph_info = {"graph_available": False, "graph_error": f"{type(e).__name__}: {e}"}
-
-        return {
-            "ok": True,
-            "repo": repo,
-            "files_indexed": n_files,
-            "chunks_indexed": n_chunks,
-            "dense_embedded": embedded,
-            "mode": "hybrid" if embedded else "bm25-only",
-            **graph_info,
+        # ── post-init self-check: prove the index is queryable NOW ───────────
+        health = _self_check(con, repo, embed_ok)
+        mode = ("hybrid" if embedded_any else
+                ("bm25+graph" if graph_info.get("graph_available") else "bm25-only"))
+        degraded_note = None
+        if embeddings_configured() and not embedded_any:
+            degraded_note = "dense embeddings unavailable — indexed in BM25+graph mode"
+        result = {
+            "ok": True, "repo": repo, "empty": False,
+            "files_indexed": n_indexed, "files_scanned": total,
+            "files_resumed_unchanged": resumed, "chunks_indexed": n_chunks,
+            "skipped_unparseable": skipped_unparseable,
+            "skipped_oversize": scan["oversize_skipped"], "removed_deleted": removed,
+            "dense_embedded": embedded_any, "mode": mode,
+            "est_s": scan["est_s"], "index_health": health, **graph_info,
         }
+        if degraded_note:
+            result["degraded_note"] = degraded_note
+        if otel_emit is not None:
+            otel_emit.record("index_repo_done", {"repo": repo, "files": n_indexed,
+                                                "chunks": n_chunks, "mode": mode,
+                                                "skipped": skipped_unparseable, "resumed": resumed})
+        return result
     finally:
         con.close()
+
+
+def _build_graph(con: sqlite3.Connection, repo: str) -> dict[str, Any]:
+    """Build the AST/graph layer; best-effort, never breaks indexing."""
+    try:
+        import graph_core
+        gi = graph_core.build_graph(con, repo)
+        _meta_set(con, "graph_available", "1")
+        con.commit()
+        return {"graph_available": True, **gi}
+    except Exception as e:  # noqa: BLE001 - graph is best-effort
+        try:
+            _meta_set(con, "graph_available", "0")
+            con.commit()
+        except Exception:  # noqa: BLE001
+            pass
+        return {"graph_available": False, "graph_error": f"{type(e).__name__}: {e}"}
+
+
+def _self_check(con: sqlite3.Connection, repo: str, embed_ok: bool) -> dict[str, Any]:
+    """Confirm the freshly-built index is actually QUERYABLE (a corrupt/empty index
+    is caught at init, not at first use mid-task). Runs a trivial count + FTS probe
+    + vec-table check and reports health rather than raising."""
+    health: dict[str, Any] = {"queryable": False}
+    try:
+        n = con.execute("SELECT count(*) AS c FROM chunks WHERE repo=?", (repo,)).fetchone()["c"]
+        health["chunks_for_repo"] = int(n)
+        # FTS probe — exercises the lexical lane end-to-end.
+        con.execute("SELECT rowid FROM chunks_fts LIMIT 1").fetchone()
+        health["fts_ok"] = True
+        if embed_ok and _vec_table_exists(con):
+            vc = con.execute("SELECT count(*) AS c FROM chunks_vec").fetchone()["c"]
+            health["vectors"] = int(vc)
+        health["queryable"] = True
+    except Exception as e:  # noqa: BLE001
+        health["error"] = f"{type(e).__name__}: {e}"
+    return health
 
 
 def _markdown_chunks(text: str, source: str) -> list[Chunk]:

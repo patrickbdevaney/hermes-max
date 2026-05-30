@@ -49,14 +49,31 @@ async def health(_: Request) -> JSONResponse:
 
 
 @mcp.tool()
-def index_repo(path: str) -> dict:
-    """Index (or re-index) a repository directory into the hybrid store.
+def index_repo(path: str, batch_size: int | None = None, full: bool = False) -> dict:
+    """Index (or re-index) a repository directory into the hybrid store — robust init.
 
-    Code-aware chunking (tree-sitter by function/class, heuristic fallback),
-    lexical FTS5 + optional dense embeddings. Re-indexing replaces the repo's
-    prior entries. Returns counts and whether dense embeddings were applied.
+    Code-aware chunking (tree-sitter by function/class, heuristic fallback), lexical
+    FTS5 + optional dense embeddings. ALWAYS leaves a usable state: an empty repo is
+    an instant clean empty success (not a hang); a large repo is pre-flight-scanned,
+    batched, heartbeated and resumable (a killed run resumes via per-file
+    fingerprints); unparseable files are skipped, not fatal; a missing embed endpoint
+    degrades to BM25+graph; and a post-init self-check confirms the index is
+    queryable. Re-indexing is incremental (only changed files). Pass full=True to
+    force a full rebuild, batch_size to tune the per-batch commit/heartbeat size.
+    Returns counts, skips, resume count, mode, and index_health.
     """
-    return rag_core.index_repo(path)
+    return rag_core.index_repo(path, batch_size=batch_size, full=full)
+
+
+@mcp.tool()
+def scan_repo(path: str) -> dict:
+    """Pre-flight scan ONLY (no indexing): report what index_repo WOULD do — file
+    count by language, total bytes, oversize skips, and a look-ahead duration
+    estimate. Use it to see the scope/ETA before committing to a large index."""
+    s = rag_core.scan_repo(path)
+    return {"ok": True, "repo": s["repo"], "n_files": s["n_files"], "by_lang": s["by_lang"],
+            "total_bytes": s["total_bytes"], "oversize_skipped": s["oversize_skipped"],
+            "est_s": s["est_s"]}
 
 
 @mcp.tool()

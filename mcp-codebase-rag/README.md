@@ -10,8 +10,12 @@ which lanes were active, so degradation is never silent.
 
 ## Tools (dual-mode retrieval)
 
-- `index_repo(path)` — code-aware index of a repo (tree-sitter chunking by
-  function/class, heuristic fallback). Re-indexing replaces the repo's entries.
+- `index_repo(path, batch_size=None, full=False)` — code-aware, **robust-init**
+  index of a repo (tree-sitter chunking by function/class, heuristic fallback).
+  Always leaves a usable state (see below). Re-indexing is **incremental** (only
+  changed files); `full=True` forces a rebuild.
+- `scan_repo(path)` — **pre-flight scan only** (no indexing): file count by
+  language, total bytes, oversize skips, and a look-ahead duration estimate.
 - `search_code(query, k=8)` — hybrid search (RRF over BM25 + dense). Used both
   for **per-task injection** (the `workflow-task-start` skill calls it at job
   start) and **agent-initiated** mid-task retrieval.
@@ -29,6 +33,30 @@ which lanes were active, so degradation is never silent.
   serve embeddings; point `EMBED_BASE_URL` at a dedicated embed model (e.g. a
   second vLLM serving an embedding model) to enable hybrid mode.
 - **The index starts EMPTY.** No seed corpus — it indexes the repos you give it.
+
+## Robust init (Stage 2) — always a usable state, never a silent hang
+
+`index_repo` is bulletproof across edge cases and ALWAYS reports what happened:
+
+- **Empty / near-empty repo** → instant clean *empty success* (`mode: "empty"`,
+  a valid queryable empty index), **not** a hang or a timeout — the original
+  observed failure is gone.
+- **Pre-flight scan** first: counts by language, total size, look-ahead ETA, all
+  logged so the operator sees the scope upfront.
+- **Large repo** → indexed in **batches**, committing + **heartbeating** per batch
+  (a heartbeat stamp the watchdog reads, so a long index is never false-killed; an
+  `index_progress` OTel span per batch). A kill mid-index keeps prior batches.
+- **Idempotent + resumable** → per-file fingerprints (size+mtime) mean a re-run
+  skips unchanged files (`files_resumed_unchanged`) and a killed run resumes from
+  where it stopped instead of restarting from zero. Deleted files are pruned.
+- **Unparseable file** → **skipped** with a count (`skipped_unparseable`), never
+  fatal.
+- **Missing embed endpoint** (`EMBED_BASE_URL` blank/down) → BM25+graph mode
+  (`mode: "bm25+graph"`, `dense_embedded: false`) with a clear report — no dense
+  lane, never a failure.
+- **Post-init self-check** → a trivial count + FTS probe (+ vec check) confirms the
+  index is queryable *at init*, returned as `index_health`, so a corrupt/empty
+  index is caught now, not at first use mid-task.
 
 ## Run / health / test
 
