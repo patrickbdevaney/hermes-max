@@ -76,5 +76,30 @@ def recall_about(name: str) -> dict:
     return kg_core.recall_about(name)
 
 
+@mcp.tool()
+def core_memory_get() -> dict:
+    """Read the agent-curated CORE MEMORY — the always-in-context, size-bounded
+    block of highest-signal facts (conventions, gotchas, the architecture
+    one-liner). Wired to Hermes's native MEMORY.md, so it's auto-loaded into
+    context. Distinct from the auto-accumulated KG triples / RAG chunks."""
+    return kg_core.core_memory_get()
+
+
+@mcp.tool()
+def core_memory_append(fact: str) -> dict:
+    """Append ONE high-signal fact to core memory. Rejected if it would overflow
+    the char limit (prune with core_memory_replace first) — protect the window."""
+    return kg_core.core_memory_append(fact)
+
+
+@mcp.tool()
+def core_memory_replace(old: str | None = None, new: str | None = None,
+                        block: str | None = None) -> dict:
+    """Deliberately edit core memory: substring-replace (old→new) for a targeted
+    prune/update, or pass `block` to replace the whole block (task-boundary
+    curation). The MemGPT 'agent owns its working memory' move. Char-bounded."""
+    return kg_core.core_memory_replace(old, new, block)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

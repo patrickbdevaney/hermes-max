@@ -18,6 +18,27 @@ from typing import Any
 
 DB_PATH = os.path.expanduser(os.environ.get("KG_DB_PATH", "~/.hermes-max/kg/graph.db"))
 
+# ── self-editing core memory (MemGPT pattern, WIRED TO Hermes's native memory) ─
+# Discovery-first: Hermes already keeps an always-in-context, char-limited
+# MEMORY.md (built-in memory, memory_char_limit ~2200). Rather than duplicate
+# that always-in-context block, these tools let the agent DELIBERATELY curate the
+# SAME native file — the explicit get/append/replace control the passive native
+# monitor doesn't expose (MemGPT's "let the model own its working memory"). Single
+# source of truth: Hermes auto-loads MEMORY.md into context, so edits show up
+# there with no parallel store. Size-bounded to protect the window.
+HERMES_MEMORY_PATH = os.path.expanduser(
+    os.environ.get("HERMES_MEMORY_PATH", "~/.hermes/MEMORY.md"))
+CORE_MEMORY_CHAR_LIMIT = int(os.environ.get("CORE_MEMORY_CHAR_LIMIT", "2200"))
+
+try:
+    import otel_emit  # best-effort core_memory_edited span
+except Exception:  # noqa: BLE001
+    class _NoOtel:
+        @staticmethod
+        def record(*a, **k):
+            return {"ok": False}
+    otel_emit = _NoOtel()  # type: ignore
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -233,6 +254,93 @@ def stats() -> dict[str, Any]:
     try:
         ne = con.execute("SELECT COUNT(*) AS n FROM entities").fetchone()["n"]
         nr = con.execute("SELECT COUNT(*) AS n FROM relations").fetchone()["n"]
-        return {"entities": ne, "relations": nr, "db_path": DB_PATH}
+        core_chars = 0
+        if os.path.isfile(HERMES_MEMORY_PATH):
+            try:
+                core_chars = len(open(HERMES_MEMORY_PATH).read())
+            except Exception:  # noqa: BLE001
+                core_chars = -1
+        return {"entities": ne, "relations": nr, "db_path": DB_PATH,
+                "core_memory_path": HERMES_MEMORY_PATH, "core_memory_chars": core_chars,
+                "core_memory_limit": CORE_MEMORY_CHAR_LIMIT}
     finally:
         con.close()
+
+
+# ── self-editing core memory ─────────────────────────────────────────────────
+def _read_core() -> str:
+    if os.path.isfile(HERMES_MEMORY_PATH):
+        try:
+            with open(HERMES_MEMORY_PATH) as f:
+                return f.read()
+        except Exception:  # noqa: BLE001
+            return ""
+    return ""
+
+
+def _write_core(text: str) -> None:
+    from pathlib import Path
+
+    Path(HERMES_MEMORY_PATH).parent.mkdir(parents=True, exist_ok=True)
+    tmp = HERMES_MEMORY_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, HERMES_MEMORY_PATH)
+
+
+def core_memory_get() -> dict[str, Any]:
+    """Return the agent-curated core-memory block (Hermes's native MEMORY.md) and
+    its char usage vs the bound — the highest-signal facts kept always-in-context."""
+    text = _read_core()
+    return {"ok": True, "path": HERMES_MEMORY_PATH, "content": text, "chars": len(text),
+            "limit": CORE_MEMORY_CHAR_LIMIT, "over_limit": len(text) > CORE_MEMORY_CHAR_LIMIT}
+
+
+def core_memory_append(fact: str) -> dict[str, Any]:
+    """Append ONE high-signal fact (a convention, gotcha, the architecture
+    one-liner) to core memory. Enforces the char limit: if the append would
+    overflow the always-in-context block, it's REJECTED with a nudge to
+    core_memory_replace (prune stale facts first) — protecting the window."""
+    fact = (fact or "").strip()
+    if not fact:
+        return {"ok": False, "error": "empty fact"}
+    cur = _read_core()
+    bullet = fact if fact.startswith(("- ", "* ", "#")) else f"- {fact}"
+    new = (cur.rstrip() + "\n" + bullet + "\n") if cur.strip() else (bullet + "\n")
+    if len(new) > CORE_MEMORY_CHAR_LIMIT:
+        return {"ok": False, "error": "would exceed core-memory char limit",
+                "chars": len(cur), "would_be": len(new), "limit": CORE_MEMORY_CHAR_LIMIT,
+                "hint": "prune with core_memory_replace (evict stale facts) first"}
+    _write_core(new)
+    otel_emit.record("core_memory_edited", {"op": "append", "chars": len(new),
+                                            "limit": CORE_MEMORY_CHAR_LIMIT})
+    return {"ok": True, "op": "append", "chars": len(new), "limit": CORE_MEMORY_CHAR_LIMIT,
+            "appended": bullet}
+
+
+def core_memory_replace(old: str | None = None, new: str | None = None,
+                        block: str | None = None) -> dict[str, Any]:
+    """Deliberately edit core memory — MemGPT's "agent owns its working memory".
+    Either substring-replace (old → new) for a targeted prune/update, OR pass
+    `block` to replace the ENTIRE core-memory block (the task-boundary curation
+    pass). Enforces the char limit; rejects an over-limit result."""
+    if block is not None:
+        text = block.strip() + "\n"
+        op = "replace_block"
+    else:
+        if old is None:
+            return {"ok": False, "error": "provide old (+new), or block"}
+        cur = _read_core()
+        if old not in cur:
+            return {"ok": False, "error": "old text not found in core memory"}
+        text = cur.replace(old, new or "")
+        text = "\n".join(ln for ln in text.splitlines() if ln.strip() != "")
+        text = (text + "\n") if text else ""
+        op = "replace"
+    if len(text) > CORE_MEMORY_CHAR_LIMIT:
+        return {"ok": False, "error": "result exceeds core-memory char limit",
+                "chars": len(text), "limit": CORE_MEMORY_CHAR_LIMIT}
+    _write_core(text)
+    otel_emit.record("core_memory_edited", {"op": op, "chars": len(text),
+                                            "limit": CORE_MEMORY_CHAR_LIMIT})
+    return {"ok": True, "op": op, "chars": len(text), "limit": CORE_MEMORY_CHAR_LIMIT}

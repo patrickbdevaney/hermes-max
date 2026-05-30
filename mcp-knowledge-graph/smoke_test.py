@@ -60,6 +60,28 @@ def part_a() -> None:
         _fail(f"recall_about missing incoming relation: {rec}")
     _ok(f"recall_about('rag_core.py') incoming -> {[r['src'] for r in rec['incoming']]}")
 
+    # ── self-editing core memory (Stage 4) — throwaway MEMORY.md, tiny bound ──
+    import tempfile
+
+    kg_core.HERMES_MEMORY_PATH = os.path.join(tempfile.mkdtemp(prefix="cm-"), "MEMORY.md")
+    kg_core.CORE_MEMORY_CHAR_LIMIT = 120
+    if kg_core.core_memory_get()["chars"] != 0:
+        _fail("core memory should start empty")
+    if not kg_core.core_memory_append("Use ruff + black")["ok"]:
+        _fail("core_memory_append failed")
+    kg_core.core_memory_append("Arch: 9 MCP servers")
+    if not kg_core.core_memory_replace(old="ruff + black", new="ruff")["ok"]:
+        _fail("core_memory_replace(old,new) failed")
+    # size bound: a fact past the limit must be REJECTED (protect the window)
+    if kg_core.core_memory_append("x" * 200)["ok"]:
+        _fail("overflow append should be rejected (size bound)")
+    # block-replace curation pass round-trips
+    kg_core.core_memory_replace(block="- Arch: 9 servers, two-axis stack")
+    g = kg_core.core_memory_get()
+    if "two-axis" not in g["content"] or g["chars"] > g["limit"]:
+        _fail(f"core memory curation round-trip wrong: {g}")
+    _ok(f"core memory: append/replace/block + size-bound enforced ({g['chars']}/{g['limit']} chars)")
+
 
 async def _mcp_check(port: int) -> None:
     from mcp import ClientSession
