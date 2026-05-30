@@ -46,6 +46,10 @@ VERIFY_PORT = int(os.environ.get("MCP_VERIFY_PORT", "9101"))
 VERIFY_HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
 VERIFY_CALL_TIMEOUT = float(os.environ.get("SEARCH_VERIFY_TIMEOUT", "600"))
 
+# Stage 4: the conductor's parallel_draft POOL lives on the escalation server.
+ESCALATION_PORT = int(os.environ.get("MCP_ESCALATION_PORT", "9105"))
+POOL_CALL_TIMEOUT = float(os.environ.get("SEARCH_POOL_TIMEOUT", "120"))
+
 
 # ── verify boundary (graceful-degrade if mcp-verify is unreachable) ──────────
 async def _call_verify(path: str, language: str) -> dict[str, Any]:
@@ -215,6 +219,100 @@ def generate_and_select(task_spec: str, n: int = 0, language: str = "python",
     return select_from_candidates(candidates, tests, language, base_files)
 
 
+# ── Stage 4: verifier-selected parallel_draft across the conductor pool ───────
+async def _call_pool_async(prompt: str, n: int) -> dict[str, Any]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    url = f"http://{VERIFY_HOST}:{ESCALATION_PORT}/mcp"
+    async with streamablehttp_client(url) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            res = await session.call_tool("parallel_draft_pool", {"prompt": prompt, "n": n})
+            text = getattr(res.content[0], "text", "") if res.content else ""
+            data = res.structuredContent or (json.loads(text) if text else {})
+            if isinstance(data, dict) and "result" in data and "candidates" not in data:
+                data = data["result"]
+            return data if isinstance(data, dict) else {}
+
+
+def _call_pool(prompt: str, n: int) -> dict[str, Any]:
+    """Get cross-family draft candidates from the conductor pool (escalation
+    server). Degrades to an empty result if the server/role is unavailable."""
+    def _runner() -> dict[str, Any]:
+        return asyncio.run(asyncio.wait_for(_call_pool_async(prompt, n), timeout=POOL_CALL_TIMEOUT))
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_runner).result(timeout=POOL_CALL_TIMEOUT + 30)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "candidates": [], "error": f"{type(e).__name__}: {e}"}
+
+
+def parallel_draft(task_spec: str, language: str = "python",
+                   target_path: str = "solution.py", tests: dict | None = None,
+                   base_files: dict | None = None, n: int = 0,
+                   draft_brief: str | None = None) -> dict[str, Any]:
+    """Verifier-selected best-of-N across the FREE/cheap conductor pool — the
+    optimal use of 'slop' models. ONLY for VERIFIABLE subtasks: `tests` (the
+    objective oracle) is REQUIRED; without it this is an ambiguous task that must
+    route to the synthesize role instead (returned as route_to='synthesize').
+
+    Flow: fan out one draft per present pool family (cross-family DIVERSITY, not
+    temperature sampling), extract each candidate's code, run EVERY candidate
+    through mcp-verify, and select the one that goes green (most tests, smallest
+    diff). If NONE pass -> route_to='synthesize'. If the pool is empty/unreachable
+    -> degrade to local generation ($VLLM_BASE_URL) or route_to='local'. The local
+    model integrates + checkpoints the winning diff (slop models never touch the
+    repo). Never raises."""
+    # ── GATE: verifiable subtasks only (objective oracle present) ─────────────
+    if not tests:
+        return {"ok": False, "verifiable": False, "route_to": "synthesize",
+                "reason": "no test oracle supplied — this subtask is AMBIGUOUS; route to the "
+                          "synthesize role (no oracle => the verifier can't select). parallel_draft "
+                          "is only for verifiable subtasks."}
+    n = DEFAULT_N if not n else n
+    n = max(1, min(int(n), MAX_N))
+
+    spec = draft_brief or task_spec
+    prompt = (f"{spec}\n\nOutput ONLY the complete content of `{target_path}` in a single fenced "
+              f"{language} code block, no prose.")
+
+    pool = _call_pool(prompt, n)
+    candidates: list[dict] = []
+    sources: list[str] = []
+    for c in pool.get("candidates", []) if isinstance(pool, dict) else []:
+        if c.get("ok") and c.get("content"):
+            cid = f"{c.get('provider')}:{str(c.get('model', '')).split('/')[-1]}"
+            candidates.append({"id": cid, "files": {target_path: _extract_code(c["content"])}})
+            sources.append(cid)
+
+    if not candidates:
+        # degrade: local best-of-N if the model endpoint is up, else route local
+        if VLLM_BASE_URL:
+            gen = generate_and_select(task_spec, n, language, target_path, tests, base_files)
+            gen["draft_source"] = "local_fallback"
+            gen["reason"] = (gen.get("reason", "") +
+                             " | pool empty/unreachable -> local generation fallback").strip(" |")
+            return gen
+        otel_emit.record("draft_fanout", {"n_sources": 0, "degraded": "local"}, status="error")
+        return {"ok": False, "route_to": "local", "candidates_from": [],
+                "pool_error": pool.get("error") if isinstance(pool, dict) else None,
+                "reason": "draft pool empty/unreachable and no $VLLM_BASE_URL — write the patch yourself"}
+
+    otel_emit.record("draft_fanout", {"n_sources": len(candidates),
+                                     "families": ",".join(sources)}, status="ok")
+    sel = select_from_candidates(candidates, tests, language, base_files)
+    sel["draft_source"] = "pool"
+    sel["candidates_from"] = sources
+    # none-pass fallback: the subtask was harder than 'verifiable-slop' assumed
+    if sel.get("ok") and sel.get("selected") is None:
+        sel["route_to"] = "synthesize"
+        sel["reason"] = (sel.get("reason", "") +
+                         " | none of the pool drafts passed -> route to the synthesize role").strip()
+    return sel
+
+
 def status() -> dict[str, Any]:
     return {
         "generation_available": bool(VLLM_BASE_URL),
@@ -222,6 +320,8 @@ def status() -> dict[str, Any]:
         "default_n": DEFAULT_N,
         "max_n": MAX_N,
         "verify_endpoint": f"http://{VERIFY_HOST}:{VERIFY_PORT}/mcp",
+        "pool_endpoint": f"http://{VERIFY_HOST}:{ESCALATION_PORT}/mcp",
         "note": "selector (candidates supplied) is always available; generation needs $VLLM_BASE_URL. "
+                "parallel_draft fans the conductor pool over verifiable subtasks only. "
                 "Use on HARD subtasks only — best-of-N competes for the one your inference host GPU.",
     }

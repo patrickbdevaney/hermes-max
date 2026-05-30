@@ -69,5 +69,26 @@ def generate_and_select(task_spec: str, n: int = 0, language: str = "python",
                                             base_files, candidates)
 
 
+@mcp.tool()
+def parallel_draft(task_spec: str, language: str = "python",
+                   target_path: str = "solution.py", tests: dict | None = None,
+                   base_files: dict | None = None, n: int = 0,
+                   draft_brief: str | None = None) -> dict:
+    """Verifier-selected best-of-N across the FREE/cheap conductor pool (Cerebras/
+    Groq/… + optional DeepInfra anchor) — the optimal use of 'slop' models.
+
+    VERIFIABLE subtasks ONLY: `tests` (the objective oracle, {path:content}) is
+    REQUIRED. Without it the subtask is AMBIGUOUS and is routed to the synthesize
+    role (route_to='synthesize') — no oracle means the verifier can't select.
+
+    Fans out ONE draft per present pool family for cross-family DIVERSITY, runs
+    every candidate through mcp-verify, and returns the one that goes GREEN (most
+    tests, smallest diff) in `selected_files` for the LOCAL model to integrate +
+    checkpoint. None pass -> route_to='synthesize'. Pool empty/unreachable ->
+    local generation fallback or route_to='local'. Never raises."""
+    return search_core.parallel_draft(task_spec, language, target_path, tests,
+                                       base_files, n, draft_brief)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
