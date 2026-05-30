@@ -1,6 +1,6 @@
 # dry_run_trace.md — Stage-4 reliability + observability dry-run
 
-_Generated 2026-05-30 16:10:47 · model-independent reliability sequence (watchdog / RAG / KG / checkpoint + live log + summary)._
+_Generated 2026-05-30 16:15:53 · model-independent reliability sequence (watchdog / RAG / KG / checkpoint + live log + summary)._
 
 Run `scripts/watch.sh` in a side terminal to see this stream live; the same events feed Phoenix. The model-dependent steps (deep_research, parallel_draft, verify) run in `scripts/dry_run.py` and stream here too via the otel→livelog bridge.
 
