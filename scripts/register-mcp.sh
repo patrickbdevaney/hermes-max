@@ -22,19 +22,21 @@ if [ ! -f "${CONFIG}" ]; then
   exit 1
 fi
 
-# Export resolved values for the python step.
+# Export resolved values for the python step. The server list is built from the
+# manifest (single source of truth) — adding a server there registers it here too.
 export HMX_HOST="$(hmx_bind_host)"
-export HMX_VERIFY_PORT="$(hmx_port verify)"
-export HMX_RAG_PORT="$(hmx_port rag)"
-export HMX_KG_PORT="$(hmx_port kg)"
-export HMX_OBS_PORT="$(hmx_port observability)"
-export HMX_ESC_PORT="$(hmx_port escalation)"
-export HMX_CHECKPOINT_PORT="$(hmx_port checkpoint)"
-export HMX_WATCHDOG_PORT="$(hmx_port watchdog)"
-export HMX_SEARCH_PORT="$(hmx_port search)"
 export HMX_CONFIG="${CONFIG}"
 export HMX_SYNC_MODEL_URL="${SYNC_MODEL_URL}"
 export HMX_VLLM_BASE_URL="${VLLM_BASE_URL:-}"
+
+# One "register_as<TAB>url" line per manifest server, passed to the python step.
+_host="$(hmx_bind_host)"
+_lines=""
+for _name in "${HMX_SERVERS[@]}"; do
+  _reg="${HMX_REGISTER_AS[$_name]:-hermes-max-$_name}"
+  _lines+="${_reg}	http://${_host}:$(hmx_port "$_name")/mcp"$'\n'
+done
+export HMX_SERVER_LINES="${_lines}"
 
 echo "═══ registering hermes-max with Hermes ═══"
 
@@ -52,21 +54,20 @@ backup = f"{cfg_path}.hermes-max.bak.{datetime.datetime.now():%Y%m%d_%H%M%S}"
 shutil.copy2(cfg_path, backup)
 print(f"  backup: {backup}")
 
-servers = {
-    "hermes-max-verify":          os.environ["HMX_VERIFY_PORT"],
-    "hermes-max-codebase-rag":    os.environ["HMX_RAG_PORT"],
-    "hermes-max-knowledge-graph": os.environ["HMX_KG_PORT"],
-    "hermes-max-observability":   os.environ["HMX_OBS_PORT"],
-    "hermes-max-escalation":      os.environ["HMX_ESC_PORT"],
-    "hermes-max-checkpoint":      os.environ["HMX_CHECKPOINT_PORT"],
-    "hermes-max-watchdog":        os.environ["HMX_WATCHDOG_PORT"],
-    "hermes-max-search":          os.environ["HMX_SEARCH_PORT"],
-}
+# Built from the manifest by the shell step (register_as<TAB>url per line).
+servers = {}
+for ln in os.environ.get("HMX_SERVER_LINES", "").splitlines():
+    ln = ln.strip()
+    if not ln:
+        continue
+    name, _, url = ln.partition("\t")
+    if name and url:
+        servers[name] = url
 
 mcp = cfg.setdefault("mcp_servers", {})
-for name, port in servers.items():
-    mcp[name] = {"url": f"http://{host}:{port}/mcp", "enabled": True, "timeout": 120}
-    print(f"  + {name} -> http://{host}:{port}/mcp")
+for name, url in servers.items():
+    mcp[name] = {"url": url, "enabled": True, "timeout": 120}
+    print(f"  + {name} -> {url}")
 
 if os.environ.get("HMX_SYNC_MODEL_URL") == "1":
     url = os.environ.get("HMX_VLLM_BASE_URL", "")

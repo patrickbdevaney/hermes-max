@@ -11,40 +11,26 @@ REPO_ROOT="$(cd "${HMX_LIB_DIR}/.." && pwd)"
 HMX_RUN_DIR="${HOME}/.hermes-max/run"
 HMX_LOG_DIR="${HOME}/.hermes-max/logs"
 
-# The servers: name -> directory, port env var, default port. mcp-verify is
-# listed first so that, in smoke-test ordering, its venv exists before
-# mcp-checkpoint's smoke test boots a throwaway verify against the real boundary.
-HMX_SERVERS=(verify rag kg observability escalation checkpoint watchdog search)
-declare -A HMX_DIR=(
-  [verify]="mcp-verify"
-  [rag]="mcp-codebase-rag"
-  [kg]="mcp-knowledge-graph"
-  [observability]="mcp-observability"
-  [escalation]="mcp-escalation"
-  [checkpoint]="mcp-checkpoint"
-  [watchdog]="mcp-watchdog"
-  [search]="mcp-search"
-)
-declare -A HMX_PORTVAR=(
-  [verify]="MCP_VERIFY_PORT"
-  [rag]="MCP_RAG_PORT"
-  [kg]="MCP_KG_PORT"
-  [observability]="MCP_OBSERVABILITY_PORT"
-  [escalation]="MCP_ESCALATION_PORT"
-  [checkpoint]="MCP_CHECKPOINT_PORT"
-  [watchdog]="MCP_WATCHDOG_PORT"
-  [search]="MCP_SEARCH_PORT"
-)
-declare -A HMX_PORTDEF=(
-  [verify]="9101"
-  [rag]="9102"
-  [kg]="9103"
-  [observability]="9104"
-  [escalation]="9105"
-  [checkpoint]="9106"
-  [watchdog]="9107"
-  [search]="9108"
-)
+# The servers are NOT hardcoded here anymore — they are loaded from the single
+# source of truth, mcp-manifest.yaml, via scripts/manifest.py (stdlib-only, so
+# this works on a freshly-cloned machine before bootstrap installs anything).
+# Adding a server = one manifest entry; every script that sources lib.sh picks
+# it up automatically. The variable NAMES are unchanged, so all existing scripts
+# (start-all/healthcheck/smoke-test, which loop over HMX_SERVERS) keep working.
+#
+# Ordering note preserved from the manifest: mcp-verify is listed first so that,
+# in smoke-test ordering, its venv exists before mcp-checkpoint's smoke test
+# boots a throwaway verify against the real boundary.
+HMX_MANIFEST="${HMX_MANIFEST:-${REPO_ROOT}/mcp-manifest.yaml}"
+declare -a HMX_SERVERS=()
+declare -A HMX_DIR HMX_PORTVAR HMX_PORTDEF HMX_REGISTER_AS HMX_HEALTH
+if [ -f "${HMX_MANIFEST}" ]; then
+  if ! eval "$(HMX_MANIFEST="${HMX_MANIFEST}" python3 "${HMX_LIB_DIR}/manifest.py" 2>/dev/null)"; then
+    echo "lib.sh: WARNING — failed to parse ${HMX_MANIFEST}; server list is empty" >&2
+  fi
+else
+  echo "lib.sh: WARNING — manifest ${HMX_MANIFEST} not found; server list is empty" >&2
+fi
 
 hmx_load_env() {
   if [ -f "${REPO_ROOT}/.env" ]; then
@@ -92,7 +78,8 @@ hmx_ensure_venv() {
 
 hmx_health_url() {
   local name="$1"
-  echo "http://$(hmx_bind_host):$(hmx_port "$name")/health"
+  local path="${HMX_HEALTH[$name]:-/health}"
+  echo "http://$(hmx_bind_host):$(hmx_port "$name")${path}"
 }
 
 # TCP reachability (for gRPC/OTLP ports that don't answer plain HTTP GET).

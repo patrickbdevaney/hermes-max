@@ -1,0 +1,68 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# mcp-manifest.yaml — the SINGLE SOURCE OF TRUTH for every hermes-max MCP server.
+#
+# Adding a server = ONE entry here. Every script (scripts/lib.sh, register-mcp.sh,
+# start-all.sh, healthcheck.sh, smoke-test.sh, bootstrap.sh) reads this file via
+# scripts/manifest.py, so a new server is picked up automatically — no script edits.
+#
+# Fields per server:
+#   name         short key used everywhere (HMX_SERVERS, $(hmx_port name), …)
+#   dir          directory under the repo root (holds server.py + requirements.txt)
+#   port         default port (overridable by the port_env var below)
+#   port_env     env var that overrides `port` (read from .env)
+#   health       health endpoint path (default /health)
+#   register_as  name injected into ~/.hermes/config.yaml mcp_servers
+#
+# Format is a constrained YAML subset (a `servers:` list of flat maps) so
+# scripts/manifest.py can parse it with the Python stdlib alone — no PyYAML
+# needed on a freshly-cloned machine before bootstrap installs anything.
+# ═══════════════════════════════════════════════════════════════════════════
+servers:
+  - name: verify
+    dir: mcp-verify
+    port: 9101
+    port_env: MCP_VERIFY_PORT
+    health: /health
+    register_as: hermes-max-verify
+  - name: rag
+    dir: mcp-codebase-rag
+    port: 9102
+    port_env: MCP_RAG_PORT
+    health: /health
+    register_as: hermes-max-codebase-rag
+  - name: kg
+    dir: mcp-knowledge-graph
+    port: 9103
+    port_env: MCP_KG_PORT
+    health: /health
+    register_as: hermes-max-knowledge-graph
+  - name: observability
+    dir: mcp-observability
+    port: 9104
+    port_env: MCP_OBSERVABILITY_PORT
+    health: /health
+    register_as: hermes-max-observability
+  - name: escalation
+    dir: mcp-escalation
+    port: 9105
+    port_env: MCP_ESCALATION_PORT
+    health: /health
+    register_as: hermes-max-escalation
+  - name: checkpoint
+    dir: mcp-checkpoint
+    port: 9106
+    port_env: MCP_CHECKPOINT_PORT
+    health: /health
+    register_as: hermes-max-checkpoint
+  - name: watchdog
+    dir: mcp-watchdog
+    port: 9107
+    port_env: MCP_WATCHDOG_PORT
+    health: /health
+    register_as: hermes-max-watchdog
+  - name: search
+    dir: mcp-search
+    port: 9108
+    port_env: MCP_SEARCH_PORT
+    health: /health
+    register_as: hermes-max-search
