@@ -77,6 +77,37 @@ scripts/watch.sh                     # live tool-call stream (Stage 3) · run-su
 scripts/sovereignty-test.sh          # assert the no-cloud-key property holds
 ```
 
+### One ergonomic command — `hm` (Stage 8)
+
+`hm` is a thin dispatch wrapper over the scripts above — sugar, **not** a
+replacement: every `scripts/*.sh` still runs directly, unchanged. Install it onto
+PATH with `./hm install` (or it's set up by `bootstrap.sh`); it also runs as `./hm`
+from the repo root.
+
+```bash
+hm up                  # start all MCPs            (scripts/start-all.sh)
+hm down                # stop everything           (scripts/stop-all.sh)
+hm restart research    # restart one server or all (scripts/restart.sh)
+hm status              # UP/DOWN · port · PID · uptime · health  (scripts/status.sh)
+hm watch               # live tool-call stream     (scripts/watch.sh)
+hm logs research       # tail a server's log
+hm run "fix the test"  # launch hermes with a task (hermes)
+hm snapshot baseline   # store snapshot/restore    (scripts/snapshot-stores.sh)
+hm summary             # per-task summary + bottleneck split
+hm dev                 # the tmux cockpit (below)
+hm attach              # reattach to the cockpit
+hm health              # pass/fail healthcheck     (scripts/healthcheck.sh)
+```
+
+**`hm dev` — the one-command tmux cockpit.** Brings the servers up backgrounded
+and spawns a detachable `hermes-max` tmux session: a large **hermes** pane, a
+**`watch.sh`** live-stream pane, and an auto-refreshing **`status.sh`** pane.
+Detach with the usual tmux binding and the session + servers keep running (24/7
+unattended grind); **reattach from anywhere** — e.g. laptop → inference host over
+the network — with `hm attach`. If tmux isn't installed, `hm dev` prints clear
+manual instructions instead of failing, and every individual script still works
+without it.
+
 **Process lifecycle (Stage 5)** is three reliable, manifest-driven commands:
 `stop-all.sh` (kills each MCP by its PID file, falls back to a port-based kill,
 confirms every MCP + embed/rerank port is free — idempotent), `restart.sh

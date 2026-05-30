@@ -373,6 +373,31 @@ else
   fi
 fi
 
+# ── 5.5 ergonomic launcher (hm) + tmux cockpit dep ───────────────────────────
+if [ "${CHECK}" -eq 0 ]; then
+  hdr "ergonomic launcher (hm)"
+  if [ -x "${REPO_ROOT}/hm" ]; then
+    bindir="${HOME}/.local/bin"
+    mkdir -p "${bindir}"
+    if ln -sf "${REPO_ROOT}/hm" "${bindir}/hm"; then
+      c_ok "linked ${bindir}/hm -> ${REPO_ROOT}/hm  (also runnable as ./hm)"
+      case ":${PATH}:" in *":${bindir}:"*) : ;;
+        *) c_warn "${bindir} not on PATH — add:  export PATH=\"${bindir}:\$PATH\"" ;;
+      esac
+    fi
+  fi
+  # tmux powers `hm dev` (the cockpit). Absent → install if trivially possible,
+  # else just note it — hm dev degrades to manual instructions, never a hard fail.
+  if command -v tmux >/dev/null 2>&1; then
+    c_ok "tmux present ($(tmux -V 2>/dev/null)) — 'hm dev' cockpit available"
+  elif command -v brew >/dev/null 2>&1; then
+    brew install tmux >/dev/null 2>&1 && c_ok "installed tmux via brew" \
+      || c_warn "could not install tmux via brew — 'hm dev' will show manual instructions"
+  else
+    c_warn "tmux not installed — 'hm dev' will print manual instructions. Install it for the cockpit:  sudo apt install tmux  (or brew install tmux)"
+  fi
+fi
+
 # ── 6. summary ────────────────────────────────────────────────────────────────
 hdr "summary"
 if [ "${CHECK}" -eq 1 ]; then

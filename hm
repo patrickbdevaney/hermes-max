@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# hm — one ergonomic terminal-native command over the whole hermes-max stack.
+#
+# Pure DISPATCH over the existing scripts — every verb maps to a scripts/*.sh that
+# STILL runs directly on its own (`./scripts/start-all.sh` etc. unchanged). `hm` is
+# sugar, the scripts are the substance. Runnable as `./hm` from the repo root, or
+# install onto PATH (`hm install`, or via bootstrap.sh).
+#
+#   hm up                 start all MCPs (+ embed/rerank hint)         scripts/start-all.sh
+#   hm down               stop everything (PID + port fallback)        scripts/stop-all.sh
+#   hm restart [srv|all]  restart one server or all                    scripts/restart.sh
+#   hm status             UP/DOWN · port · PID · uptime · health       scripts/status.sh
+#   hm watch              live tool-call stream                        scripts/watch.sh
+#   hm logs [server]      tail a server's log (or the live log)        ~/.hermes-max/logs/
+#   hm run "task"         launch hermes with a task                    hermes
+#   hm snapshot <name>    snapshot RAG+KG+corpus stores                scripts/snapshot-stores.sh
+#   hm restore <name>     restore a named snapshot                     scripts/restore-stores.sh
+#   hm dev                the tmux cockpit (hermes + watch + status)   (this script)
+#   hm attach             reattach to the running tmux cockpit         tmux attach
+#   hm health             pass/fail healthcheck (for scripting)        scripts/healthcheck.sh
+#   hm summary            per-task tool-call summary + bottleneck split scripts/run-summary.sh
+#   hm bottleneck         full-vs-bare timing eval                     scripts/bottleneck-eval.sh
+#   hm install            symlink hm onto PATH (~/.local/bin)
+set -uo pipefail
+
+HM_SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)"
+SCRIPTS="${REPO_ROOT}/scripts"
+TMUX_SESSION="hermes-max"
+LOG_DIR="${HERMES_MAX_LOG_DIR:-${HOME}/.hermes-max/logs}"
+LOG_DIR="${LOG_DIR/#\~/$HOME}"
+
+# In HM_PRINT mode, echo the command that WOULD run instead of executing it. Used
+# by the smoke test to prove `hm <verb>` maps to the right standalone script,
+# without side effects.
+_dispatch() {
+  if [ -n "${HM_PRINT:-}" ]; then echo "$*"; exit 0; fi
+  exec "$@"
+}
+
+usage() {
+  sed -n '3,26p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
+}
+
+_install() {
+  local bindir="${HOME}/.local/bin"
+  mkdir -p "${bindir}"
+  ln -sf "${HM_SELF}" "${bindir}/hm"
+  echo "✓ linked ${bindir}/hm -> ${HM_SELF}"
+  case ":${PATH}:" in *":${bindir}:"*) : ;;
+    *) echo "  note: ${bindir} is not on PATH — add it: export PATH=\"${bindir}:\$PATH\"" ;;
+  esac
+}
+
+_attach() {
+  if [ -n "${HM_PRINT:-}" ]; then echo "tmux attach -t ${TMUX_SESSION}"; exit 0; fi
+  command -v tmux >/dev/null 2>&1 || { echo "✗ tmux not installed"; exit 1; }
+  tmux has-session -t "${TMUX_SESSION}" 2>/dev/null || { echo "no '${TMUX_SESSION}' session — start it with: hm dev"; exit 1; }
+  exec tmux attach -t "${TMUX_SESSION}"
+}
+
+# The one-command tmux cockpit: hermes pane + live-watch pane + status pane.
+# Detachable, reattach-from-anywhere (hm attach), 24/7. If the session already
+# exists, just attach. tmux absent → clear manual instructions (never a hard fail).
+_dev() {
+  if [ -n "${HM_PRINT:-}" ]; then echo "tmux new-session -s ${TMUX_SESSION} (hermes | watch | status)"; exit 0; fi
+  if ! command -v tmux >/dev/null 2>&1; then
+    cat <<EOF
+tmux is not installed — the cockpit needs it. Install it (apt: 'sudo apt install tmux',
+brew: 'brew install tmux'), or run the panes manually in three terminals:
+  1) ${SCRIPTS}/start-all.sh        # bring the stack up
+  2) ${SCRIPTS}/watch.sh            # live tool-call stream
+  3) watch -n3 ${SCRIPTS}/status.sh # stack health
+  4) hermes                         # the agent prompt
+The individual scripts work without tmux — hm dev is only the convenience cockpit.
+EOF
+    exit 1
+  fi
+  # already running → just attach (from anywhere, incl. over the network)
+  if tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
+    echo "• '${TMUX_SESSION}' already running — attaching"
+    exec tmux attach -t "${TMUX_SESSION}"
+  fi
+  # bring servers up if not already healthy (backgrounded inside start-all)
+  "${SCRIPTS}/healthcheck.sh" >/dev/null 2>&1 || "${SCRIPTS}/start-all.sh" || true
+  # pane 1 (large): an interactive shell ready for `hermes`
+  tmux new-session -d -s "${TMUX_SESSION}" -n cockpit -x 220 -y 50
+  tmux send-keys -t "${TMUX_SESSION}" \
+    "echo '── hermes pane — type: hermes ──'; command -v hermes >/dev/null && echo '(hermes ready)' || echo '(hermes not on PATH)'" C-m
+  # pane 2: live watch stream
+  tmux split-window -h -t "${TMUX_SESSION}"
+  tmux send-keys -t "${TMUX_SESSION}" "${SCRIPTS}/watch.sh" C-m
+  # pane 3: auto-refreshing status (use watch if present, else a sleep loop)
+  tmux split-window -v -t "${TMUX_SESSION}"
+  if command -v watch >/dev/null 2>&1; then
+    tmux send-keys -t "${TMUX_SESSION}" "watch -t -n 4 ${SCRIPTS}/status.sh" C-m
+  else
+    tmux send-keys -t "${TMUX_SESSION}" \
+      "while true; do clear; ${SCRIPTS}/status.sh; sleep 4; done" C-m
+  fi
+  tmux select-pane -t "${TMUX_SESSION}.0"
+  [ -n "${HM_NO_ATTACH:-}" ] && { echo "✓ cockpit '${TMUX_SESSION}' started (detached). hm attach to join."; return 0; }
+  exec tmux attach -t "${TMUX_SESSION}"
+}
+
+cmd="${1:-}"; shift || true
+case "${cmd}" in
+  up)
+    if [ -n "${HM_PRINT:-}" ]; then echo "${SCRIPTS}/start-all.sh"; exit 0; fi
+    "${SCRIPTS}/start-all.sh" "$@"
+    # embed/rerank are optional gpu_local serves — started on request only (they
+    # need CUDA + a model; auto-spawning them on a constrained box is unsafe).
+    if [ -n "${HM_WITH_EMBED:-}" ]; then "${REPO_ROOT}/serve-embed.sh" & fi
+    if [ -n "${HM_WITH_RERANK:-}" ]; then "${REPO_ROOT}/serve-rerank.sh" & fi
+    [ -z "${HM_WITH_EMBED:-}${HM_WITH_RERANK:-}" ] && \
+      echo "  (embed/rerank serves: HM_WITH_EMBED=1 / HM_WITH_RERANK=1 hm up, or ./serve-embed.sh)"
+    ;;
+  down)        _dispatch "${SCRIPTS}/stop-all.sh" "$@" ;;
+  restart)     _dispatch "${SCRIPTS}/restart.sh" "$@" ;;
+  status)      _dispatch "${SCRIPTS}/status.sh" "$@" ;;
+  watch)       _dispatch "${SCRIPTS}/watch.sh" "$@" ;;
+  health)      _dispatch "${SCRIPTS}/healthcheck.sh" "$@" ;;
+  summary)     _dispatch "${SCRIPTS}/run-summary.sh" "$@" ;;
+  bottleneck)  _dispatch "${SCRIPTS}/bottleneck-eval.sh" "$@" ;;
+  snapshot)    _dispatch "${SCRIPTS}/snapshot-stores.sh" "$@" ;;
+  restore)     _dispatch "${SCRIPTS}/restore-stores.sh" "$@" ;;
+  logs)
+    srv="${1:-live}"
+    if [ "${srv}" = "live" ]; then f="${LOG_DIR}/live.log"; else f="${LOG_DIR}/${srv#mcp-}.log"; fi
+    if [ -n "${HM_PRINT:-}" ]; then echo "tail -F ${f}"; exit 0; fi
+    [ -f "${f}" ] || { echo "no log at ${f}"; exit 1; }
+    exec tail -n "${HM_LOG_LINES:-60}" -F "${f}"
+    ;;
+  run)
+    if [ -n "${HM_PRINT:-}" ]; then echo "hermes $*"; exit 0; fi
+    command -v hermes >/dev/null 2>&1 || { echo "✗ 'hermes' not on PATH — install/activate Hermes first."; exit 127; }
+    exec hermes "$@"
+    ;;
+  dev)     _dev "$@" ;;
+  attach)  _attach ;;
+  install) _install ;;
+  ""|-h|--help|help) usage ;;
+  *) echo "hm: unknown verb '${cmd}'"; echo; usage; exit 2 ;;
+esac
