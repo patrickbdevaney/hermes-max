@@ -347,11 +347,22 @@ def decompose_question(question: str, hyde: bool = False) -> dict:
 # ── Stage 6: Banyan content-evolution (CONTENT only — never machinery) ────────
 @mcp.tool()
 def banyan_select(c: float = 1.414) -> dict:
-    """Pick the next research direction for an unattended cycle. A pending human
-    DIRECTIVE preempts (operator steer); else UCB1 explore-exploit over non-saturated
-    namespaces (unvisited get an infinite exploration bonus). Returns mode + chosen
-    namespace + UCB scores. Selection only — the agent runs the research."""
+    """Pick the next RESEARCH direction for an unattended cycle (UCB1 is scoped to
+    RESEARCH/search ONLY — do NOT use it to pick a code/build subtask; use
+    build_select_subtask for that). A pending human DIRECTIVE preempts (operator
+    steer); else UCB1 explore-exploit over non-saturated namespaces (unvisited get
+    an infinite exploration bonus). Returns mode + chosen namespace + UCB scores."""
     return banyan.banyan_select(c)
+
+
+@mcp.tool()
+def build_select_subtask(subtasks: list[dict], in_progress: str | None = None) -> dict:
+    """Pick the next BUILD/coding subtask WITHOUT UCB1 — the build loop needs
+    sustained focus, so this is finish-what-you-started then dependency-order
+    (BANYAN_SCOPE=research_only, the default: UCB1 governs research only, never code).
+    Each subtask: {id, status:'complete'|'incomplete', deps:[ids]}. Keeps an
+    in-progress incomplete subtask rather than switching to a shinier one."""
+    return banyan.select_next("build", subtasks=subtasks, in_progress=in_progress)
 
 
 @mcp.tool()
