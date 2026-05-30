@@ -142,3 +142,88 @@ hmx_phoenix_otlp_ok() {
   ep="${ep#*://}"
   hmx_tcp_ok "${ep%%:*}" "${ep##*:}"
 }
+
+# ── process lifecycle helpers (Stage 5) ───────────────────────────────────────
+# All manifest-driven: stop-all/restart/status use these so adding a server (one
+# manifest entry) needs no lifecycle-script edits.
+
+hmx_pidfile() { echo "${HMX_RUN_DIR}/$1.pid"; }
+hmx_logfile() { echo "${HMX_LOG_DIR}/$1.log"; }
+
+# PID(s) listening on a TCP port — lsof, then ss, then fuser (whichever exists).
+hmx_port_pids() {
+  local port="$1" pids=""
+  if command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -ti :"${port}" -sTCP:LISTEN 2>/dev/null)"
+  fi
+  if [ -z "${pids}" ] && command -v ss >/dev/null 2>&1; then
+    pids="$(ss -ltnpH "sport = :${port}" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)"
+  fi
+  if [ -z "${pids}" ] && command -v fuser >/dev/null 2>&1; then
+    pids="$(fuser "${port}"/tcp 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$')"
+  fi
+  echo "${pids}" | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//'
+}
+
+hmx_pid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+
+# Human uptime of a PID (etimes -> Xs / Xm Ys / Xh Ym). Empty if not running.
+hmx_pid_uptime() {
+  local pid="$1" s
+  s="$(ps -o etimes= -p "${pid}" 2>/dev/null | tr -d ' ')"
+  [ -z "${s}" ] && { echo ""; return; }
+  if   [ "${s}" -lt 60 ];   then echo "${s}s"
+  elif [ "${s}" -lt 3600 ]; then echo "$((s/60))m $((s%60))s"
+  else echo "$((s/3600))h $(((s%3600)/60))m"; fi
+}
+
+# Stop ONE server: TERM the pidfile PID, then any port listener, KILL if stubborn.
+# Echoes a short what-happened note. Idempotent (no-op if already down).
+hmx_stop_one() {
+  local name="$1" port pidfile pid stopped="" leftover
+  port="$(hmx_port "${name}")"
+  pidfile="$(hmx_pidfile "${name}")"
+  if [ -f "${pidfile}" ]; then
+    pid="$(cat "${pidfile}" 2>/dev/null)"
+    if hmx_pid_alive "${pid}"; then
+      kill "${pid}" 2>/dev/null
+      for _ in 1 2 3 4 5 6 7 8 9 10; do hmx_pid_alive "${pid}" || break; sleep 0.3; done
+      hmx_pid_alive "${pid}" && kill -9 "${pid}" 2>/dev/null
+      stopped="pid ${pid}"
+    fi
+    rm -f "${pidfile}"
+  fi
+  # Port fallback: anything still listening on the server's port.
+  leftover="$(hmx_port_pids "${port}")"
+  if [ -n "${leftover}" ]; then
+    kill ${leftover} 2>/dev/null
+    for _ in 1 2 3 4 5 6; do [ -z "$(hmx_port_pids "${port}")" ] && break; sleep 0.3; done
+    leftover="$(hmx_port_pids "${port}")"
+    [ -n "${leftover}" ] && kill -9 ${leftover} 2>/dev/null
+    stopped="${stopped:+${stopped}, }port ${port}"
+  fi
+  echo "${stopped}"
+}
+
+# Start ONE server in the background (mirrors start-all.sh; pidfile holds the real
+# python PID). No-op-friendly: caller decides whether to skip an already-healthy one.
+hmx_start_one() {
+  local name="$1" dir host port log pidfile
+  dir="${HMX_DIR[$name]}"; host="$(hmx_bind_host)"; port="$(hmx_port "${name}")"
+  log="$(hmx_logfile "${name}")"; pidfile="$(hmx_pidfile "${name}")"
+  mkdir -p "${HMX_RUN_DIR}" "${HMX_LOG_DIR}"
+  hmx_ensure_venv "${dir}"
+  nohup "${REPO_ROOT}/${dir}/.venv/bin/python" "${REPO_ROOT}/${dir}/server.py" >>"${log}" 2>&1 &
+  echo $! >"${pidfile}"
+}
+
+# Poll a server's /health until ok or timeout. Returns 0/1.
+hmx_wait_health() {
+  local name="$1" timeout="${2:-15}" url; url="$(hmx_health_url "${name}")"
+  local end=$(( $(date +%s) + timeout ))
+  while [ "$(date +%s)" -lt "${end}" ]; do
+    curl -fsS -m 2 "${url}" >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  return 1
+}

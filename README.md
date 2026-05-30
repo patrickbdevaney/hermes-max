@@ -68,10 +68,22 @@ cp .env.example .env                 # edit VLLM_BASE_URL (the one port switch)
 scripts/smoke-test.sh                # prove each server in isolation
 scripts/apply-config-deadlines.sh    # native deadline/effort knobs (backs up config)
 scripts/start-all.sh                 # start all MCP servers (independent processes)
+scripts/stop-all.sh                  # stop everything (PID file, port fallback); confirm ports free
+scripts/restart.sh [server|all]      # restart one server (e.g. `restart.sh research`) or all
+scripts/status.sh                    # human view: UP/DOWN · port · PID · uptime · health per server
 scripts/register-mcp.sh              # inject mcp_servers + install skills (--sync-model-url opt.)
-scripts/healthcheck.sh               # confirm everything is live
+scripts/healthcheck.sh               # confirm everything is live (pass/fail, for scripting)
+scripts/watch.sh                     # live tool-call stream (Stage 3) · run-summary.sh for the table
 scripts/sovereignty-test.sh          # assert the no-cloud-key property holds
 ```
+
+**Process lifecycle (Stage 5)** is three reliable, manifest-driven commands:
+`stop-all.sh` (kills each MCP by its PID file, falls back to a port-based kill,
+confirms every MCP + embed/rerank port is free — idempotent), `restart.sh
+[server|all]` (stop→start one named server or the whole stack, re-runs health),
+and `status.sh` (the at-a-glance human table — distinct from `healthcheck.sh`,
+which is the pass/fail scripting check). Adding a server is still one manifest
+entry — none of these scripts need editing.
 </details>
 
 Stop the servers with `kill $(cat ~/.hermes-max/run/*.pid)`. Logs are under
