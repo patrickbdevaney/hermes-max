@@ -424,22 +424,50 @@ Inference server per platform — all expose an OpenAI-compatible endpoint, so t
 orchestration is identical above it: **vLLM** (CUDA), **llama.cpp** (any/GGUF),
 **MLX** (Apple). Point `$VLLM_BASE_URL` at whichever you run.
 
-## Cloud-spend modes — `local` / `free` / `full`
+## Cloud-spend modes — `local` / `free` / `full` / `frontier`
 
-`CONDUCTOR_MODE` (in `.env`) is a **hard spend-tier cap**, orthogonal to
-`DEPLOY_PROFILE` (which picks the *hardware* lane). It bounds *which cloud tiers
-may fire at all*, independent of which keys are present:
+The mode is a **hard spend-tier cap** (the *ceiling* on which cloud tiers may fire),
+orthogonal to `DEPLOY_PROFILE` (the *hardware* lane). Select it with `hm up --MODE`
+(default `--full`) — it persists to `CONDUCTOR_MODE` in `.env` and the conductor
+reads it live:
 
-| Mode | Cloud tiers used | Cost | Use |
+```bash
+hm up --local      # fully sovereign, $0 cloud
+hm up --free       # + free draft/steer (Cerebras/Groq/Gemini)
+hm up              # = --full (DEFAULT): + DeepSeek V4 synth/steer (~$10/mo)
+hm up --frontier   # + SPARING Opus 4.8 escalation (~$12-15/mo) — needs ANTHROPIC_API_KEY
+```
+
+| Mode | Cloud tiers (ceiling) | Cost | Use |
 |---|---|---|---|
-| `local` | **none** — local vLLM only | $0, offline, fully sovereign | The guaranteed-correct base case. Any present paid/free keys are ignored. |
-| `free` | local + **free** tiers (Cerebras steer/draft, Groq cascade + slop-draft, Gemini-Flash last-resort) | $0 | Real cloud uplift with no bill; the live budget tracker keeps it inside free rate limits. |
-| `full` | adds **paid** synth/steer (DeepInfra) + rare Opus escalate | metered, capped | The ideal/recommended mode. |
+| `local` | **none** — local vLLM only | $0, offline, fully sovereign | The guaranteed-correct base case. Present keys are ignored. |
+| `free` | + **free** tiers (Cerebras/Groq/Gemini) | $0 | Real cloud uplift with no bill; live budget tracker keeps it inside free rate limits. |
+| `full` | + **paid** DeepSeek V4 synth/steer (DeepInfra) | ~$10/mo | The recommended daily driver. **Does NOT include Opus.** |
+| `frontier` | + **SPARING Opus 4.8** escalation (`claude-opus-4-8`) | ~$12-15/mo | Closes the last gap to Opus/Claude-Code on genuine blue-ocean frontier-novel work. |
 
-Each mode falls back **through** the ones below it as keys/endpoints disappear:
-`full → free → local`. So `full` on a box with only free keys behaves exactly like
-`free`, and with no keys like `local`. Mode is a documented preference, not a hard
-requirement — set it once in `.env` (default `full`).
+Each mode falls back **through** the ones below it to the highest tier whose keys
+are present: `frontier → full → free → local`. `hm up --frontier` without
+`ANTHROPIC_API_KEY` warns and falls back to `--full` (Opus OFF) — it never silently
+pretends frontier is active.
+
+**The frontier (Opus 4.8) tier is deliberately RARE.** It is the top rung of the
+escalate role and fires ONLY when **all three gates** trip: (1) `--frontier` mode +
+`ANTHROPIC_API_KEY`; (2) the classifier flags the subtask **frontier-novel** (genuinely
+blue-ocean — merely-HARD-but-known stays at V4-Pro); (3) V4-Pro synth has **already
+failed verify twice** on the subtask (or two opinions disagree on a high-blast change).
+When it fires it uses **compress-then-reason** — V4-Pro (the cheap model) compresses the
+full situation into a dense ~12K brief, then Opus reasons on that brief (~$0.18/call,
+→ ~$0.10 cached) — writes the result to a durable `FRONTIER_PLAN.md` + RAG/KG with
+provenance, and passes it through `directive_verify` (advisory, not trusted-blind). A
+hard frontier USD cap (`FRONTIER_USD_CAP_MONTHLY=10`, `_DAILY=2`) blocks and falls back
+to V4-Pro when hit.
+
+`hm cost` proves it stays sparing: month-to-date per-tier spend, the Opus call count +
+cost vs the sparing target (≤15/mo, `FRONTIER_TARGET_CALLS_MONTHLY`), the frontier-mode
+total vs Claude Code's flat $20/mo, and a **warning** if Opus drifts over the target
+(which means the difficulty gate is too loose — or the work is genuinely blue-ocean and
+Claude Code may fit better; reported honestly). `hm status` shows the active mode + live
+tiers + (in frontier mode) Opus spend-vs-cap.
 
 ## Tier-2 workflow skills (`skills/`)
 
