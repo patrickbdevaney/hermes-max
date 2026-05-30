@@ -10,9 +10,18 @@ This module DETERMINISTICALLY pulls harness state into a structured brief:
 The LOCAL model writes ONLY two fields, passed in as params: `current_blocker`
 and `decision_needed`. Everything else is assembled from ground truth.
 
-Three profiles: compact (<=~8K tok, for steer), full (~15-30K tok, for synth),
-draft (tight task-spec, for parallel_draft = the verifiable subtask + its
-acceptance tests + minimal context). Progressive disclosure via brief_request_more.
+Three profiles:
+  • compact (~3-4K tok, for GROQ-destined steer) — the ONLY place we keep briefs
+    short, because Groq free-tier TPM is tiny (GPT-OSS-120B 8K, Qwen3-32B 6K); a
+    bigger brief 413s/429s there. Kept Groq-safe with output headroom.
+  • full (GENEROUS, UNTRUNCATED, for DeepInfra synth) — precision of context
+    selection matters, not size: top 10-15 RAG-ranked code excerpts, the COMPLETE
+    architecture state + COMPLETE failed-approaches history from the KG, and NO
+    truncation of content fields. At DeepInfra cached rates the 30K-vs-80K cost
+    difference is negligible, and V4-Pro has 1M ctx — so spend the context budget.
+  • draft (tight task-spec, for parallel_draft = the verifiable subtask + its
+    acceptance tests + minimal context).
+Progressive disclosure via brief_request_more.
 
 GRACEFUL DEGRADATION is a hard requirement: every external pull is wrapped; if a
 server is down or a file is missing, that section is simply empty/marked
@@ -47,14 +56,20 @@ DIRECTIVE_SCHEMA: dict[str, Any] = {
     "assumptions": ["<a checkable fact about the repo you assumed>"],
 }
 
-# Per-profile budgets (chars). RAG excerpts absorb the flexible remainder.
-PROFILES: dict[str, dict[str, int]] = {
-    "compact": {"max_chars": 32_000, "rag_k": 4, "code_chars": 9_000,
-                "decisions": 6, "failed": 6, "plan_chars": 6_000},
-    "full":    {"max_chars": 110_000, "rag_k": 10, "code_chars": 60_000,
-                "decisions": 20, "failed": 20, "plan_chars": 24_000},
+# Per-profile budgets (chars). `generous` profiles pull COMPLETE context and skip
+# every truncation step (content fields are never trimmed) — the gather counts
+# (rag_k / decisions / failed) are the only bound. CHARS_PER_TOKEN≈4, so the token
+# estimates below are max_chars/4.
+PROFILES: dict[str, dict[str, Any]] = {
+    # GROQ-safe steer: ~3.5K tokens so it fits Qwen3-32B's 6K TPM with output headroom.
+    "compact": {"max_chars": 14_000, "rag_k": 4, "code_chars": 6_000,
+                "decisions": 4, "failed": 4, "plan_chars": 4_000, "generous": False},
+    # DeepInfra synth: generous + UNTRUNCATED. rag_k 15 (top 10-15 excerpts), the
+    # COMPLETE architecture state + failed-approaches history, no content trimming.
+    "full":    {"max_chars": 400_000, "rag_k": 15, "code_chars": 0,
+                "decisions": 500, "failed": 500, "plan_chars": 0, "generous": True},
     "draft":   {"max_chars": 12_000, "rag_k": 3, "code_chars": 4_000,
-                "decisions": 0, "failed": 6, "plan_chars": 1_500},
+                "decisions": 0, "failed": 6, "plan_chars": 1_500, "generous": False},
 }
 
 
@@ -186,15 +201,17 @@ def _gather_watchdog(task_id: str | None) -> dict[str, Any]:
 
 
 def _gather_code(query: str, k: int, char_budget: int) -> tuple[list[dict], int]:
-    """Token-budgeted code excerpts from codebase-rag. Returns (kept, total_found)."""
+    """Code excerpts from codebase-rag. Returns (kept, total_found). char_budget<=0
+    means UNLIMITED (generous synth profile): pull complete snippets, never trim."""
     r = _mcp(RAG_PORT, "search_code", {"query": query, "k": k})
     results = (r or {}).get("results", []) if r else []
+    unlimited = char_budget <= 0
     kept, used = [], 0
     for res in results:
         snip = res.get("snippet", "")
         entry = {"location": res.get("location"), "symbol": res.get("symbol"),
                  "lang": res.get("lang"), "snippet": snip}
-        if used + len(snip) > char_budget and kept:  # keep at least one
+        if not unlimited and used + len(snip) > char_budget and kept:  # keep at least one
             break
         used += len(snip)
         kept.append(entry)
@@ -217,11 +234,13 @@ def brief_assemble(task_id: str, current_blocker: str, decision_needed: str,
     query = query or f"{current_blocker} {decision_needed}".strip()
 
     plan = _parse_plan(repo)
-    # trim plan sections to the profile's plan_chars (split across the 4 sections)
-    per = max(400, prof["plan_chars"] // 4)
-    for k in ("goal", "done_so_far", "original_directives", "success_criteria"):
-        if len(plan[k]) > per:
-            plan[k] = plan[k][:per] + "\n[...trimmed...]"
+    # trim plan sections to the profile's plan_chars (split across the 4 sections).
+    # GENEROUS profiles (synth) never trim content fields.
+    if not prof.get("generous"):
+        per = max(400, prof["plan_chars"] // 4)
+        for k in ("goal", "done_so_far", "original_directives", "success_criteria"):
+            if len(plan[k]) > per:
+                plan[k] = plan[k][:per] + "\n[...trimmed...]"
 
     decisions = _gather_decisions(prof["decisions"])
     failed = _gather_failed(prof["failed"])
@@ -267,11 +286,14 @@ def brief_assemble(task_id: str, current_blocker: str, decision_needed: str,
                "expansions": expansions}
     text = json.dumps(payload)
     truncated: list[str] = []
-    # final hard budget: if over the profile ceiling, drop code excerpts tail first
-    while len(text) > prof["max_chars"] and brief["code_excerpts"]:
-        brief["code_excerpts"].pop()
-        truncated.append("code_excerpt")
-        text = json.dumps(payload)
+    # final hard budget: if over the profile ceiling, drop code excerpts tail first.
+    # GENEROUS profiles (synth) skip this entirely — precision over minimization;
+    # the rag_k / decisions / failed counts are the only bound.
+    if not prof.get("generous"):
+        while len(text) > prof["max_chars"] and brief["code_excerpts"]:
+            brief["code_excerpts"].pop()
+            truncated.append("code_excerpt")
+            text = json.dumps(payload)
 
     return {"ok": True, "profile": profile, "brief": brief,
             "directive_schema": DIRECTIVE_SCHEMA, "expansions": expansions,
