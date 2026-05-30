@@ -72,6 +72,14 @@ detect_cmd() {
     echo "${DSPY_PYTHON} -m hermes_agent_self_evolution"
     return 0
   fi
+  # 3) optional first-run install (opt-in; respects the no-lazy-install default)
+  if [ "${DSPY_AUTO_INSTALL:-false}" = "true" ]; then
+    if "${DSPY_PYTHON}" -m pip install -q hermes-agent-self-evolution >/dev/null 2>&1 \
+       && "${DSPY_PYTHON}" -c "import hermes_agent_self_evolution" >/dev/null 2>&1; then
+      echo "${DSPY_PYTHON} -m hermes_agent_self_evolution"
+      return 0
+    fi
+  fi
   return 1
 }
 

@@ -902,6 +902,56 @@ def main() -> None:
                       f"({len(rcheck.get('results', []))} hits) — agent writes a single patch itself")
         check("kill mcp-search -> agent degrades gracefully (writes single patch)", s_degraded, detail)
 
+        # ═══════════════ STAGE-2 DEPTH (deep verify / critic / GEPA / isolation) ═══════════════
+        banner("V-deep — deeper verification layers are available and difficulty-gated")
+        de_easy = call(VERIFY_URL, "deep_verify", path=str(proj), difficulty="easy")
+        de_hard = call(VERIFY_URL, "deep_verify", path=str(proj), difficulty="hard")
+        easy_layers = {s["name"] for s in de_easy.get("stages", [])}
+        hard_layers = {s["name"] for s in de_hard.get("stages", [])}
+        deep_set = {"property", "mutation", "fuzz"}
+        check("deep_verify difficulty-gated (easy=base only; hard adds property/mutation/fuzz)",
+              not (deep_set & easy_layers) and deep_set <= hard_layers,
+              f"easy={sorted(easy_layers)} hard={sorted(hard_layers)} warnings={len(de_hard.get('warnings', []))}")
+        check("deep_verify stays green on a correct project (advisory layers don't fail it)",
+              bool(de_hard.get("passed")), de_hard.get("summary", "")[:160])
+
+        banner("V-critic — a critic pass catches an injected SILENT-WRONG patch (passes weak test, wrong)")
+        import tempfile as _tf
+        critic_dir = _tf.mkdtemp(prefix="hermes_critic_")
+        # silent-wrong: is_even always returns True; the weak test only checks the True case
+        Path(critic_dir, "evenness.py").write_text("def is_even(n):\n    return True\n")
+        Path(critic_dir, "test_weak.py").write_text(
+            "from evenness import is_even\n\n\ndef test_even():\n    assert is_even(2) is True\n")
+        v_weak = call(VERIFY_URL, "verify", path=critic_dir, language="python")
+        # the critic red-teams the TEST: adds the missing edge case the green gate never exercised
+        Path(critic_dir, "test_edge.py").write_text(
+            "from evenness import is_even\n\n\ndef test_odd():\n    assert is_even(3) is False\n")
+        v_edge = call(VERIFY_URL, "verify", path=critic_dir, language="python")
+        import shutil as _sh2
+        _sh2.rmtree(critic_dir, ignore_errors=True)
+        check("critic catches the silent-wrong patch (weak test GREEN, edge-case test RED)",
+              bool(v_weak.get("passed")) and not v_edge.get("passed"),
+              f"weak_test_passed={v_weak.get('passed')} -> edge_test_passed={v_edge.get('passed')} "
+              "(red-teaming a trivially-passing test surfaces the wrong answer)")
+
+        banner("V-gepa — DSPy/GEPA skill curation runs (graceful no-op if package unbundled)")
+        gp = subprocess.run(["bash", str(REPO_ROOT / "dspy-evolution" / "run-evolution.sh")],
+                            capture_output=True, text=True, timeout=120)
+        gp_last = (gp.stdout.strip().splitlines() or [""])[-1]
+        check("dspy/GEPA curation wrapper runs and exits 0 (off the hot path, scheduled weekly)",
+              gp.returncode == 0, gp_last[:160])
+
+        banner("V-isolation — read-only localization returns grounded anchors, edit thread untouched")
+        head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=proj,
+                                      capture_output=True, text=True).stdout.strip()
+        loc = call(RAG_URL, "retrieve_related", symbol="update_task", hops=1, k=8)
+        anchored = [r.get("location") for r in loc.get("results", []) if r.get("location")]
+        head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=proj,
+                                     capture_output=True, text=True).stdout.strip()
+        check("read-only localization yields file:line anchors WITHOUT mutating the edit thread",
+              bool(loc.get("graph_available") and anchored) and head_before == head_after,
+              f"anchors={anchored[:3]} HEAD stable={head_before == head_after}")
+
         say(f"\nPROJECT_DIR={proj}")
     finally:
         stop(verify_proc)

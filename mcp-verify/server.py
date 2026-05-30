@@ -66,5 +66,20 @@ def quick_check(path: str, language: str = "auto") -> dict:
     return verify_core.quick_check(path, language)
 
 
+@mcp.tool()
+def deep_verify(path: str, language: str = "auto", difficulty: str = "medium",
+                layers: list | None = None) -> dict:
+    """Full gate PLUS difficulty-gated deeper layers — closes silent-wrong-answer.
+
+    difficulty: easy -> base only; medium -> +property(hypothesis);
+    hard -> +property, mutation(mutmut, reports surviving mutants), fuzz(atheris).
+    Each extra layer is independently skippable (missing tool -> skipped+warning)
+    and advisory (won't flip a green base gate red, except property test failures).
+    Use on subtasks the difficulty classifier flags non-trivial; don't run
+    mutation testing on trivial changes.
+    """
+    return verify_core.deep_verify(path, language, difficulty, layers)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

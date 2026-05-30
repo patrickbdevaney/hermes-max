@@ -58,6 +58,24 @@ def part_a() -> None:
         _fail(f"quick_check on broken sample should be red: {qcb}")
     _ok(f"quick_check catches a malformed edit fast: {qcb['summary']}")
 
+    # deep_verify (Stage 2.1): difficulty-gated, skippable, advisory layers
+    easy = verify_core.deep_verify(str(GOOD), "python", difficulty="easy")
+    if not easy["passed"] or any(s["name"] in ("property", "mutation", "fuzz") for s in easy["stages"]):
+        _fail(f"deep_verify(easy) should run base only: {easy}")
+    _ok(f"deep_verify(easy) base-only green: {easy['summary']}")
+
+    hard = verify_core.deep_verify(str(GOOD), "python", difficulty="hard")
+    deep_names = {s["name"]: s["status"] for s in hard["stages"]}
+    if not {"property", "mutation", "fuzz"}.issubset(deep_names):
+        _fail(f"deep_verify(hard) should request property/mutation/fuzz: {deep_names}")
+    if not hard["passed"]:
+        _fail(f"deep_verify(hard) should stay green (advisory layers don't fail it): {hard}")
+    # every extra layer either ran or skipped-with-warning — never a hard error
+    for name in ("property", "mutation", "fuzz"):
+        if deep_names[name] not in ("passed", "skipped", "failed"):
+            _fail(f"layer {name} errored instead of skipping cleanly: {deep_names}")
+    _ok(f"deep_verify(hard) layers {deep_names}; warnings={len(hard['warnings'])} (advisory, gate green)")
+
 
 def _wait_health(port: int, timeout: float = 30.0) -> None:
     url = f"http://127.0.0.1:{port}/health"
@@ -86,8 +104,8 @@ async def _mcp_check(port: int) -> None:
             await session.initialize()
             tools = await session.list_tools()
             names = {t.name for t in tools.tools}
-            if not {"verify", "quick_check"}.issubset(names):
-                _fail(f"verify/quick_check tools not advertised; got {names}")
+            if not {"verify", "quick_check", "deep_verify"}.issubset(names):
+                _fail(f"verify/quick_check/deep_verify tools not advertised; got {names}")
             _ok(f"tools advertised: {sorted(names)}")
 
             res = await session.call_tool("verify", {"path": str(GOOD), "language": "python"})

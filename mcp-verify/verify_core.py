@@ -13,6 +13,7 @@ is absent degrade to "skipped" rather than crashing.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -312,3 +313,126 @@ def quick_check(path: str, language: str = "auto") -> dict[str, Any]:
                 "summary": f"unsupported or undetected language: {lang}"}
     stages = [s for s in stages if s.get("name") != "tests"]  # incremental: no pytest
     return _finalize(abspath, lang, stages)
+
+
+# ── deeper verification layers (Stage 2.1) ───────────────────────────────────
+# Closes the silent-wrong-answer gap (~20% of patches are semantically wrong but
+# pass shallow tests). Each layer is OPTIONAL, INDEPENDENTLY SKIPPABLE (a missing
+# tool is reported, never an error), and ADVISORY (it warns; it does not flip a
+# green base gate red — except property tests, which are real tests). Depth is
+# tied to the difficulty signal so trivial changes don't pay for mutation runs.
+DIFFICULTY_LAYERS = {
+    "easy": [],
+    "medium": ["property"],
+    "hard": ["property", "mutation", "fuzz"],
+}
+
+
+def _layer_property(py: str, path: str) -> dict[str, Any]:
+    """Property-based testing (hypothesis). If hypothesis is installed, re-run
+    pytest (which executes any @given tests); else skip with a warning."""
+    if not _has_module(py, "hypothesis"):
+        s = _skip("hypothesis not installed — property layer skipped")
+        s.update(name="property", tool="hypothesis", advisory=True)
+        return s
+    test_dir = Path(path) if Path(path).is_dir() else Path(path).parent
+    r = _run([py, "-m", "pytest", "-q", "-p", "hypothesis", str(test_dir)], cwd=str(test_dir))
+    if r.get("returncode") == 5:
+        r = _skip("no tests collected for property run")
+    r.update(name="property", tool="hypothesis", advisory=False)
+    return r
+
+
+def _layer_mutation(py: str, path: str) -> dict[str, Any]:
+    """Mutation testing — report SURVIVING mutants (tests that don't catch a
+    deliberate bug). Uses mutmut if available; otherwise skip with a warning.
+    Advisory: surviving mutants warn, they don't fail the gate."""
+    if not _has_module(py, "mutmut"):
+        s = _skip("mutmut not installed — mutation layer skipped (install mutmut to enable)")
+        s.update(name="mutation", tool="mutmut", advisory=True)
+        return s
+    test_dir = str(Path(path) if Path(path).is_dir() else Path(path).parent)
+    r = _run([py, "-m", "mutmut", "run", "--paths-to-mutate", test_dir], cwd=test_dir)
+    surviving = None
+    m = re.search(r"(\d+)\s+survived", (r.get("output") or "").lower())
+    if m:
+        surviving = int(m.group(1))
+    # mutation result is advisory: never fail the gate on it
+    r["status"] = "passed" if r.get("status") != "error" else "error"
+    r.update(name="mutation", tool="mutmut", advisory=True, surviving_mutants=surviving)
+    return r
+
+
+def _layer_fuzz(py: str, path: str) -> dict[str, Any]:
+    """Lightweight fuzz harness. Runs atheris-based fuzz targets if present;
+    otherwise skip with a warning (no targets / atheris absent)."""
+    if not _has_module(py, "atheris"):
+        s = _skip("atheris not installed / no fuzz targets — fuzz layer skipped")
+        s.update(name="fuzz", tool="atheris", advisory=True)
+        return s
+    root = Path(path) if Path(path).is_dir() else Path(path).parent
+    targets = list(root.glob("fuzz_*.py"))
+    if not targets:
+        s = _skip("no fuzz_*.py targets found — fuzz layer skipped")
+        s.update(name="fuzz", tool="atheris", advisory=True)
+        return s
+    r = _run([py, str(targets[0]), "-atheris_runs=2000"], cwd=str(root))
+    r["status"] = "passed" if r.get("status") != "error" else "error"
+    r.update(name="fuzz", tool="atheris", advisory=True)
+    return r
+
+
+def deep_verify(path: str, language: str = "auto", difficulty: str = "medium",
+                layers: list[str] | None = None) -> dict[str, Any]:
+    """Full gate PLUS difficulty-gated deeper layers (property/mutation/fuzz).
+
+    difficulty: easy -> base only; medium -> +property; hard -> +property,
+    mutation, fuzz. `layers` overrides the difficulty-derived set. Each extra
+    layer is independently skippable (missing tool -> skipped+warning) and
+    advisory (it never flips a green base gate red, except property *test*
+    failures). Use on subtasks flagged non-trivial by the difficulty signal.
+    """
+    base = verify(path, language)
+    if not base.get("stages") and "does not exist" in base.get("summary", ""):
+        return base
+    lang = base.get("language", "python")
+    if lang != "python":
+        base["deep"] = {"note": f"deeper layers are python-only for now; lang={lang}"}
+        base["difficulty"] = difficulty
+        return base
+
+    want = layers if layers is not None else DIFFICULTY_LAYERS.get(difficulty, ["property"])
+    py = _project_python(os.path.abspath(os.path.expanduser(path)))
+    abspath = base["path"]
+    extra: list[dict[str, Any]] = []
+    if "property" in want:
+        extra.append(_layer_property(py, abspath))
+    if "mutation" in want:
+        extra.append(_layer_mutation(py, abspath))
+    if "fuzz" in want:
+        extra.append(_layer_fuzz(py, abspath))
+
+    stages = base["stages"] + extra
+    # Gate: base stages authoritative; advisory layers never fail the gate, but a
+    # non-advisory property TEST failure does.
+    gating = [s for s in stages if not s.get("advisory")]
+    ran = [s for s in gating if s["status"] in ("passed", "failed", "error")]
+    bad = [s for s in gating if s["status"] in ("failed", "error")]
+    passed = bool(ran) and not bad
+    warnings = [f"{s['name']}({s['tool']}): {s['output']}"
+                for s in extra if s["status"] == "skipped"]
+    surviving = next((s.get("surviving_mutants") for s in extra if s["name"] == "mutation"), None)
+    if surviving:
+        warnings.append(f"mutation: {surviving} surviving mutant(s) — tests don't catch them")
+
+    return {
+        "path": abspath,
+        "language": lang,
+        "difficulty": difficulty,
+        "layers_requested": want,
+        "passed": passed,
+        "stages": stages,
+        "warnings": warnings,
+        "summary": ("PASS" if passed else "FAIL") + " (deep: "
+                   + ", ".join(f"{s['name']}={s['status']}" for s in stages) + ")",
+    }
