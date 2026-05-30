@@ -1,7 +1,8 @@
 """mcp-research — SOTA local deep-research (port 9110).
 
 Transport: streamable-http on $MCP_RESEARCH_PORT (default 9110), path /mcp.
-Health:    GET /health (reports backends + bounds).
+Health:    GET /health (LIVENESS — fast, no upstream calls, the UP/DOWN signal).
+           GET /ready  (READINESS — backends + bounds; informational, may probe).
 
 The canonical four-stage deep-research loop — plan -> develop -> explore -> verify
 -> synthesize — built as bounded, deterministic MCP tools on TOP of the existing
@@ -56,7 +57,26 @@ mcp = FastMCP(
 
 
 @mcp.custom_route("/health", methods=["GET"])
-async def health(_: Request) -> JSONResponse:
+async def health(request: Request) -> JSONResponse:
+    """LIVENESS — is this process up and answering HTTP? Returns 200 immediately
+    with NO upstream network calls (sub-10ms). This is the UP/DOWN signal used by
+    status.sh / healthcheck.sh: a live server must NEVER show DOWN because a
+    dependency (SearXNG / Crawl4AI / the chat model / a source API) is slow or
+    down. Dependency status lives at /ready (informational). `?deep=1` forwards to
+    the readiness check for convenience."""
+    if request.query_params.get("deep", "").lower() in ("1", "true", "yes"):
+        return await ready(request)
+    return JSONResponse({"status": "ok", "server": "mcp-research", "port": PORT})
+
+
+@mcp.custom_route("/ready", methods=["GET"])
+async def ready(_: Request) -> JSONResponse:
+    """READINESS — the rich, INFORMATIONAL dependency snapshot (sources, docs_up,
+    chat-model endpoint, corpus state, rank/extract/verify/banyan config). MAY do
+    bounded upstream probes, so it can be slow; a failing dependency here is a
+    WARNING (status.sh shows it as a readiness note), never DOWN. The agent can
+    still call every tool — individual tools degrade per the graceful-degradation
+    matrix if a dependency is actually down."""
     return JSONResponse({"status": "ok", "server": "mcp-research", "port": PORT,
                          **research_core.stats(), "sources": sources.source_stats(),
                          "corpus": corpus.corpus_stats(), "extract": extract.extract_stats(),

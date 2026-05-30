@@ -1,7 +1,8 @@
 """mcp-observability — OpenTelemetry traces/metrics to Phoenix as an MCP server.
 
 Transport: streamable-http on $MCP_OBSERVABILITY_PORT (default 9104), path /mcp.
-Health:    GET /health (includes Phoenix reachability).
+Health:    GET /health (LIVENESS — fast, no upstream calls, the UP/DOWN signal).
+           GET /ready  (READINESS — Phoenix reachability; informational).
 
 Independent process. If killed, Hermes reports the tools unavailable; nothing
 else is affected. If Phoenix itself is down, recording still succeeds locally
@@ -36,7 +37,21 @@ mcp = FastMCP(
 
 
 @mcp.custom_route("/health", methods=["GET"])
-async def health(_: Request) -> JSONResponse:
+async def health(request: Request) -> JSONResponse:
+    """LIVENESS — process up + HTTP answering, returned immediately with NO
+    upstream calls (sub-10ms). The UP/DOWN signal: a live span-emitter must NEVER
+    show DOWN because Phoenix is unreachable (spans just drop on export, the agent
+    is never blocked). Phoenix reachability moved to /ready. `?deep=1` forwards."""
+    if request.query_params.get("deep", "").lower() in ("1", "true", "yes"):
+        return await ready(request)
+    return JSONResponse({"status": "ok", "server": "mcp-observability", "port": PORT})
+
+
+@mcp.custom_route("/ready", methods=["GET"])
+async def ready(_: Request) -> JSONResponse:
+    """READINESS — informational: exporter config + a live Phoenix-reachability
+    TCP probe. A down Phoenix is a WARNING here, never DOWN; recording still
+    succeeds locally and spans drop silently on export."""
     return JSONResponse({"status": "ok", "server": "mcp-observability", "port": PORT,
                          **observability_core.status()})
 

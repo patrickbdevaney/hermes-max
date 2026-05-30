@@ -1,7 +1,8 @@
 """mcp-docs — sovereign documentation ingestion as an MCP server.
 
 Transport: streamable-http on $MCP_DOCS_PORT (default 9109), path /mcp.
-Health:    GET /health.
+Health:    GET /health (LIVENESS — fast, no upstream calls, the UP/DOWN signal).
+           GET /ready  (READINESS — searxng/crawl4ai/distil; informational).
 
 The self-hosted knowledge loop: SearXNG → Crawl4AI → local distil → RAG + KG.
 Independent process; if killed, Hermes reports the tools unavailable and the
@@ -39,7 +40,22 @@ mcp = FastMCP(
 
 
 @mcp.custom_route("/health", methods=["GET"])
-async def health(_: Request) -> JSONResponse:
+async def health(request: Request) -> JSONResponse:
+    """LIVENESS — process up + HTTP answering, returned immediately with NO
+    upstream calls (sub-10ms). The UP/DOWN signal for status.sh / healthcheck.sh:
+    a live docs server must NEVER show DOWN because SearXNG or Crawl4AI is slow.
+    Dependency status moved to /ready (informational). `?deep=1` forwards there."""
+    if request.query_params.get("deep", "").lower() in ("1", "true", "yes"):
+        return await ready(request)
+    return JSONResponse({"status": "ok", "server": "mcp-docs", "port": PORT})
+
+
+@mcp.custom_route("/ready", methods=["GET"])
+async def ready(_: Request) -> JSONResponse:
+    """READINESS — informational dependency snapshot (searxng_up, crawl4ai_up,
+    distill model, rag/kg). MAY probe upstreams (so it can be slow); a failing
+    dependency here is a WARNING, never DOWN. fetch_clean still falls back
+    trafilatura→Crawl4AI and search degrades gracefully per the matrix."""
     return JSONResponse({"status": "ok", "server": "mcp-docs", "port": PORT, **docs_core.stats()})
 
 

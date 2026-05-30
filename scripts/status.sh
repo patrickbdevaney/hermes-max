@@ -45,6 +45,41 @@ done
 printf '%s\n' "$(printf '─%.0s' $(seq 1 64))"
 echo "${UP}/${TOTAL} servers up"
 
+# ── readiness (informational) ──────────────────────────────────────────────
+# Liveness above answers UP/DOWN. Readiness is the SEPARATE question "are this
+# server's optional dependencies reachable?" — a failing dependency is a WARNING
+# here, NEVER a DOWN (the server is live and its tools degrade gracefully). Only
+# servers that expose /ready (research, docs) print a line; others are skipped.
+# Bounded per-probe timeout so this never blocks the status view. Skip with
+# HMX_NO_READINESS=1.
+if [ -z "${HMX_NO_READINESS:-}" ]; then
+  printed_hdr=""
+  for name in "${HMX_ACTIVE_SERVERS[@]}"; do
+    rurl="http://$(hmx_bind_host):$(hmx_port "${name}")/ready"
+    rbody="$(curl -fsS -m 4 "${rurl}" 2>/dev/null)" || continue   # no /ready or unreachable → skip
+    summary="$(printf '%s' "${rbody}" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+parts=[]
+for k,v in d.items():
+    if k.endswith("_up"):
+        parts.append(("%s " % k[:-3]) + ("✓" if v else "✗"))
+    elif k.endswith("_reachable"):
+        parts.append(("%s " % k[:-10]) + ("✓" if v else "✗"))
+src=d.get("sources") or {}
+reg=src.get("registered") if isinstance(src,dict) else None
+if isinstance(reg,list): parts.append("sources %d" % len(reg))
+cm=d.get("chat_model")
+if isinstance(cm,str): parts.append("chat " + ("set" if "unset" not in cm else "deterministic"))
+print(" · ".join(parts))
+' 2>/dev/null)"
+    [ -z "${summary}" ] && continue
+    [ -z "${printed_hdr}" ] && { echo "── readiness (informational · deps, not UP/DOWN) ──"; printed_hdr=1; }
+    printf '  %s%-14s%s %s\n' "${D}" "${HMX_DIR[$name]#mcp-}" "${Z}" "${summary}"
+  done
+fi
+
 echo "── supporting (informational) ──"
 hmx_phoenix_otlp_ok && echo "  ${G}✓${Z} Phoenix OTLP ${PHOENIX_COLLECTOR_ENDPOINT:-http://localhost:4317}" \
                     || echo "  ${D}• Phoenix OTLP down (./phoenix.sh)${Z}"
