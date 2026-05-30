@@ -12,10 +12,27 @@
 #   port_env     env var that overrides `port` (read from .env)
 #   health       health endpoint path (default /health)
 #   register_as  name injected into ~/.hermes/config.yaml mcp_servers
+#   profiles     deploy profiles this server RUNS IN (subset of: gpu_local,
+#                lean_cloud). Default (if omitted) = both. The active profile is
+#                $DEPLOY_PROFILE (gpu_local DEFAULT | lean_cloud). bootstrap.sh,
+#                start-all.sh, healthcheck.sh, register-mcp.sh, smoke-test.sh all
+#                FILTER by it: a future gpu_local-only capability is ONE line
+#                (`profiles: [gpu_local]`) and lean is unaffected — and full is
+#                never capped to serve lean.
+#   requires     hard local dependencies (informational; e.g. a sibling MCP).
+#   degrades_to  one-line note on how the server degrades when an OPTIONAL
+#                backend is absent (no colons — constrained-YAML-subset parser).
+#
+# NOTE: NO MCP server imports torch/CUDA — every server reaches the model(s) over
+# HTTP ($VLLM_BASE_URL / EMBED_BASE_URL / RERANK_BASE_URL). The only torch/CUDA
+# touchpoints are the OPTIONAL, gpu_local-only embed/rerank vLLM serves started by
+# serve-embed.sh / serve-rerank.sh — never by an MCP venv. So lean_cloud (CPU /
+# Mac-mini / VPS) needs no CUDA at all. bootstrap.sh asserts this (greps reqs).
 #
 # Format is a constrained YAML subset (a `servers:` list of flat maps) so
 # scripts/manifest.py can parse it with the Python stdlib alone — no PyYAML
-# needed on a freshly-cloned machine before bootstrap installs anything.
+# needed on a freshly-cloned machine before bootstrap installs anything. List
+# values use the inline `[a, b]` form (parsed by manifest.py).
 # ═══════════════════════════════════════════════════════════════════════════
 servers:
   - name: verify
@@ -24,51 +41,78 @@ servers:
     port_env: MCP_VERIFY_PORT
     health: /health
     register_as: hermes-max-verify
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: pure-Python; full on both profiles (no GPU)
   - name: rag
     dir: mcp-codebase-rag
     port: 9102
     port_env: MCP_RAG_PORT
     health: /health
     register_as: hermes-max-codebase-rag
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: BM25+AST-graph when EMBED_BASE_URL/RERANK_BASE_URL unset (lean default)
   - name: kg
     dir: mcp-knowledge-graph
     port: 9103
     port_env: MCP_KG_PORT
     health: /health
     register_as: hermes-max-knowledge-graph
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: pure-Python sqlite graph; full on both profiles
   - name: observability
     dir: mcp-observability
     port: 9104
     port_env: MCP_OBSERVABILITY_PORT
     health: /health
     register_as: hermes-max-observability
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: no-op spans when Phoenix OTLP is down
   - name: escalation
     dir: mcp-escalation
     port: 9105
     port_env: MCP_ESCALATION_PORT
     health: /health
     register_as: hermes-max-escalation
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: OFF by default; cloud tiers gated, free local tier optional
   - name: checkpoint
     dir: mcp-checkpoint
     port: 9106
     port_env: MCP_CHECKPOINT_PORT
     health: /health
     register_as: hermes-max-checkpoint
+    profiles: [gpu_local, lean_cloud]
+    requires: [verify]
+    degrades_to: pure-Python git checkpointing; full on both profiles
   - name: watchdog
     dir: mcp-watchdog
     port: 9107
     port_env: MCP_WATCHDOG_PORT
     health: /health
     register_as: hermes-max-watchdog
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: pure-Python detectors; full on both profiles
   - name: search
     dir: mcp-search
     port: 9108
     port_env: MCP_SEARCH_PORT
     health: /health
     register_as: hermes-max-search
+    profiles: [gpu_local, lean_cloud]
+    requires: [verify]
+    degrades_to: selector always on; generation path needs VLLM_BASE_URL
   - name: docs
     dir: mcp-docs
     port: 9109
     port_env: MCP_DOCS_PORT
     health: /health
     register_as: hermes-max-docs
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: Crawl4AI then trafilatura; distil to raw when VLLM_BASE_URL unset

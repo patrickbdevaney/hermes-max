@@ -22,7 +22,9 @@ echo "═══ starting hermes-max MCP servers ═══"
 echo "VLLM_BASE_URL=${VLLM_BASE_URL:-<unset!>}"
 [ -z "${VLLM_BASE_URL:-}" ] && echo "  WARNING: VLLM_BASE_URL is unset — copy .env.example to .env"
 
-for name in "${HMX_SERVERS[@]}"; do
+echo "DEPLOY_PROFILE=${HMX_PROFILE}  (active servers: ${HMX_ACTIVE_SERVERS[*]})"
+
+for name in "${HMX_ACTIVE_SERVERS[@]}"; do
   dir="${HMX_DIR[$name]}"
   host="$(hmx_bind_host)"
   port="$(hmx_port "$name")"
@@ -48,7 +50,7 @@ echo
 echo "waiting for health…"
 sleep 2
 ALL_OK=1
-for name in "${HMX_SERVERS[@]}"; do
+for name in "${HMX_ACTIVE_SERVERS[@]}"; do
   url="$(hmx_health_url "$name")"
   ok=0
   for _ in 1 2 3 4 5 6 7 8 9 10; do

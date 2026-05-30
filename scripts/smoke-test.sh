@@ -10,8 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 hmx_load_env
 
 echo "═══ hermes-max standalone smoke tests ═══"
+echo "DEPLOY_PROFILE=${HMX_PROFILE}  (active servers: ${HMX_ACTIVE_SERVERS[*]})"
 declare -a FAILED=()
-for name in "${HMX_SERVERS[@]}"; do
+for name in "${HMX_ACTIVE_SERVERS[@]}"; do
   dir="${HMX_DIR[$name]}"
   echo
   echo "── ${dir} ──"

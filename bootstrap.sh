@@ -34,16 +34,25 @@ REPO_ROOT="${SCRIPT_DIR}"
 
 CHECK=0
 DO_SMOKE=1
-for arg in "$@"; do
+EXPLICIT_PROFILE=""   # --profile X (or DEPLOY_PROFILE env) — never silently overridden
+while [ "$#" -gt 0 ]; do
+  arg="$1"
   case "${arg}" in
     --check)    CHECK=1 ;;
     --no-smoke) DO_SMOKE=0 ;;
+    --profile)  shift; EXPLICIT_PROFILE="${1:-}" ;;
+    --profile=*) EXPLICIT_PROFILE="${arg#--profile=}" ;;
     -h|--help)
       sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "bootstrap.sh: unknown arg '${arg}' (try --help)" >&2; exit 2 ;;
   esac
+  shift
 done
+case "${EXPLICIT_PROFILE}" in
+  ""|gpu_local|lean_cloud) ;;
+  *) echo "bootstrap.sh: --profile must be gpu_local or lean_cloud (got '${EXPLICIT_PROFILE}')" >&2; exit 2 ;;
+esac
 
 # ── tiny output helpers ───────────────────────────────────────────────────────
 c_ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -128,6 +137,80 @@ else
   c_warn "docker NOT found — Phoenix/SearXNG/Crawl4AI are optional; core stack runs without them"
 fi
 
+# ── 2b. deploy profile (the bifurcation) ──────────────────────────────────────
+# Auto-DETECT signals and SUGGEST a profile; never silently override an explicit
+# one. Precedence: --profile / DEPLOY_PROFILE env > existing .env > detection.
+hdr "2b. deploy profile"
+# CUDA present + working?
+_has_cuda=0
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then _has_cuda=1; fi
+# total RAM in GiB (Linux /proc/meminfo, macOS sysctl).
+_ram_gib=0
+if [ -r /proc/meminfo ]; then
+  _ram_gib=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 0)
+elif command -v sysctl >/dev/null 2>&1; then
+  _ram_gib=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 / 1024 ))
+fi
+# chat endpoint localhost vs remote (from env or, if present, .env — .env not
+# sourced yet, so peek at it for the suggestion only).
+_vllm_peek="${VLLM_BASE_URL:-}"
+if [ -z "${_vllm_peek}" ] && [ -f "${REPO_ROOT}/.env" ]; then
+  _vllm_peek="$(sed -n 's/^VLLM_BASE_URL=//p' "${REPO_ROOT}/.env" | head -1)"
+fi
+case "${_vllm_peek}" in
+  *localhost*|*127.0.0.1*|"") _endpoint_kind="local" ;;
+  *)                          _endpoint_kind="remote" ;;
+esac
+# Apple Silicon?
+_apple_si=0
+[ "${OS}" = "Darwin" ] && [ "${ARCH}" = "arm64" ] && _apple_si=1
+# Suggestion heuristic.
+if [ "${_has_cuda}" -eq 1 ] && [ "${_ram_gib}" -ge 32 ]; then
+  _suggest=gpu_local
+elif [ "${_has_cuda}" -eq 0 ] || [ "${_apple_si}" -eq 1 ] || { [ "${_ram_gib}" -gt 0 ] && [ "${_ram_gib}" -lt 16 ]; }; then
+  _suggest=lean_cloud
+else
+  _suggest=gpu_local
+fi
+# Existing explicit choice in .env (user/prior run) ranks above detection.
+_env_profile=""
+[ -f "${REPO_ROOT}/.env" ] && _env_profile="$(sed -n 's/^DEPLOY_PROFILE=//p' "${REPO_ROOT}/.env" | head -1)"
+if [ -n "${EXPLICIT_PROFILE}" ]; then
+  PROFILE="${EXPLICIT_PROFILE}"; _profile_src="--profile/env (explicit)"
+elif [ -n "${DEPLOY_PROFILE:-}" ]; then
+  PROFILE="${DEPLOY_PROFILE}"; _profile_src="DEPLOY_PROFILE env (explicit)"
+elif [ -n "${_env_profile}" ]; then
+  PROFILE="${_env_profile}"; _profile_src=".env (explicit)"
+else
+  PROFILE="${_suggest}"; _profile_src="detection (suggested)"
+fi
+printf '  %-22s %s\n' "CUDA working:"      "$([ "${_has_cuda}" -eq 1 ] && echo yes || echo no)"
+printf '  %-22s %s\n' "arch:"             "${ARCH_RAW} ($([ "${_apple_si}" -eq 1 ] && echo 'Apple Silicon' || echo "${OS}"))"
+printf '  %-22s %s\n' "total RAM (GiB):"  "${_ram_gib}"
+printf '  %-22s %s\n' "chat endpoint:"    "${_endpoint_kind} (${_vllm_peek:-unset})"
+printf '  %-22s %s\n' "suggested:"        "${_suggest}"
+c_ok "DEPLOY_PROFILE=${PROFILE}  [${_profile_src}]"
+[ "${PROFILE}" != "${_suggest}" ] && [ "${_profile_src}" = "detection (suggested)" ] || true
+if [ "${PROFILE}" = "lean_cloud" ] && [ "${_endpoint_kind}" = "local" ] && [ "${_vllm_peek}" != "" ]; then
+  c_warn "lean_cloud assumes a CLOUD chat endpoint, but VLLM_BASE_URL looks local — set it to your cloud \$VLLM_BASE_URL"
+fi
+# Export so hmx_load_env keeps it (env wins over .env) and section 4 filters by it.
+export DEPLOY_PROFILE="${PROFILE}"
+HMX_PROFILE="${PROFILE}"
+
+# ── 2c. torch/CUDA isolation assertion (the lean guarantee) ───────────────────
+# NO MCP server may pull torch/CUDA — they all reach models over HTTP. The only
+# CUDA touchpoints are the OPTIONAL gpu_local serve-embed.sh/serve-rerank.sh.
+hdr "2c. torch/CUDA isolation"
+_torch_hits="$(grep -rniE '^[[:space:]]*(torch|nvidia-|tensorflow|cupy)' "${REPO_ROOT}"/*/requirements.txt 2>/dev/null || true)"
+if [ -z "${_torch_hits}" ]; then
+  c_ok "no MCP server requirements pull torch/CUDA — lean_cloud needs no GPU stack"
+else
+  c_bad "a server requirements.txt pulls torch/CUDA — breaks the lean guarantee:"
+  printf '%s\n' "${_torch_hits}" | sed 's/^/      /'
+  MISSING=$((MISSING + 1))
+fi
+
 # ── 3. .env from .env.example ─────────────────────────────────────────────────
 hdr "3. .env"
 if [ -f "${REPO_ROOT}/.env" ]; then
@@ -157,6 +240,21 @@ PY
     fi
   fi
 fi
+# Persist the resolved DEPLOY_PROFILE into .env (upsert) so every later script and
+# the two thin wrappers agree on the active profile. Skipped in --check (read-only).
+if [ "${CHECK}" -eq 0 ] && [ -f "${REPO_ROOT}/.env" ]; then
+  PROFILE="${PROFILE}" python3 - "${REPO_ROOT}/.env" <<'PY'
+import os, re, sys
+path = sys.argv[1]; prof = os.environ["PROFILE"]
+txt = open(path).read()
+if re.search(r'(?m)^DEPLOY_PROFILE=', txt):
+    txt = re.sub(r'(?m)^DEPLOY_PROFILE=.*$', f'DEPLOY_PROFILE={prof}', txt, count=1)
+else:
+    txt = txt.rstrip('\n') + f'\nDEPLOY_PROFILE={prof}\n'
+open(path, 'w').write(txt)
+PY
+  c_ok ".env DEPLOY_PROFILE=${PROFILE}"
+fi
 # (re)load env now that .env exists
 hmx_load_env
 
@@ -185,6 +283,10 @@ for dir in "${_server_dirs[@]}"; do
   py="${path}/.venv/bin/python"
   printf '\n── %s ──\n' "${dir}"
   [ -n "${_in_manifest[$dir]:-}" ] || c_warn "NOT in mcp-manifest.yaml — add an entry so all scripts pick it up"
+  if ! hmx_dir_in_profile "${dir}"; then
+    c_warn "skipped — not in DEPLOY_PROFILE=${HMX_PROFILE} (manifest profiles)"
+    continue
+  fi
 
   if [ "${CHECK}" -eq 1 ]; then
     [ -x "${py}" ] && c_ok "venv present" || { c_warn "venv missing — would create"; MISSING=$((MISSING + 1)); }
@@ -223,7 +325,7 @@ hdr "5. register with Hermes"
 if [ "${CHECK}" -eq 1 ]; then
   if [ -f "${HERMES_HOME}/config.yaml" ]; then
     _expected=""
-    for n in "${HMX_SERVERS[@]}"; do _expected+="${HMX_REGISTER_AS[$n]} "; done
+    for n in "${HMX_ACTIVE_SERVERS[@]}"; do _expected+="${HMX_REGISTER_AS[$n]} "; done
     if HMX_EXPECTED="${_expected}" HMX_CFG="${HERMES_HOME}/config.yaml" python3 - <<'PY' 2>/dev/null; then
 import os, sys, yaml
 cfg = yaml.safe_load(open(os.environ["HMX_CFG"])) or {}
@@ -260,7 +362,7 @@ if [ "${CHECK}" -eq 1 ]; then
   exit 1
 fi
 
-echo "Discovered servers: ${#_server_dirs[@]}   manifest servers: ${#HMX_SERVERS[@]}"
+echo "Discovered servers: ${#_server_dirs[@]}   manifest: ${#HMX_SERVERS[@]}   active (${HMX_PROFILE}): ${#HMX_ACTIVE_SERVERS[@]}"
 if [ "${#SMOKE_FAIL[@]}" -gt 0 ]; then
   c_bad "smoke failures: ${SMOKE_FAIL[*]}"
 fi

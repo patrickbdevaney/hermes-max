@@ -32,7 +32,8 @@ export HMX_VLLM_BASE_URL="${VLLM_BASE_URL:-}"
 # One "register_as<TAB>url" line per manifest server, passed to the python step.
 _host="$(hmx_bind_host)"
 _lines=""
-for _name in "${HMX_SERVERS[@]}"; do
+echo "  profile: ${HMX_PROFILE}  (registering: ${HMX_ACTIVE_SERVERS[*]})"
+for _name in "${HMX_ACTIVE_SERVERS[@]}"; do
   _reg="${HMX_REGISTER_AS[$_name]:-hermes-max-$_name}"
   _lines+="${_reg}	http://${_host}:$(hmx_port "$_name")/mcp"$'\n'
 done

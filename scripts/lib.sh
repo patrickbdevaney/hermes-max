@@ -24,6 +24,7 @@ HMX_LOG_DIR="${HOME}/.hermes-max/logs"
 HMX_MANIFEST="${HMX_MANIFEST:-${REPO_ROOT}/mcp-manifest.yaml}"
 declare -a HMX_SERVERS=()
 declare -A HMX_DIR HMX_PORTVAR HMX_PORTDEF HMX_REGISTER_AS HMX_HEALTH
+declare -A HMX_PROFILES HMX_REQUIRES HMX_DEGRADES
 if [ -f "${HMX_MANIFEST}" ]; then
   if ! eval "$(HMX_MANIFEST="${HMX_MANIFEST}" python3 "${HMX_LIB_DIR}/manifest.py" 2>/dev/null)"; then
     echo "lib.sh: WARNING — failed to parse ${HMX_MANIFEST}; server list is empty" >&2
@@ -32,13 +33,60 @@ else
   echo "lib.sh: WARNING — manifest ${HMX_MANIFEST} not found; server list is empty" >&2
 fi
 
+# ── deploy-profile bifurcation (Stage 0) ──────────────────────────────────────
+# ONE codebase, two profiles: gpu_local (DEFAULT — maximalist; CUDA embed/rerank
+# is optional and started by serve-*.sh, NOT by any MCP venv) and lean_cloud
+# (CPU / Mac-mini / VPS; no torch/CUDA anywhere; cloud chat via $VLLM_BASE_URL).
+# Profiles filter WHICH manifest servers run — never cap a gpu_local capability.
+# Resolution order (highest first): explicit env/CLI DEPLOY_PROFILE > .env > default.
+HMX_VALID_PROFILES="gpu_local lean_cloud"
+HMX_PROFILE="${DEPLOY_PROFILE:-gpu_local}"
+
+# True if a server (by manifest name) runs in the active profile. Servers with no
+# `profiles:` entry default to BOTH (manifest.py fills that in).
+hmx_in_profile() {
+  # NOTE: keep these as SEPARATE `local` statements — a single
+  # `local name=$1 profs=${HMX_PROFILES[$name]...}` expands profs' RHS before
+  # `name` is bound (bash gotcha → empty subscript / unbound under set -u).
+  local name="$1"
+  local profs="${HMX_PROFILES[$name]:-gpu_local lean_cloud}"
+  case " ${profs} " in *" ${HMX_PROFILE} "*) return 0 ;; *) return 1 ;; esac
+}
+
+# Same check by DIRECTORY (used by bootstrap's filesystem discovery). Unknown
+# dirs (not in the manifest) are NOT filtered out — they are warned about instead.
+hmx_dir_in_profile() {
+  local dir="$1" n
+  for n in "${HMX_SERVERS[@]}"; do
+    if [ "${HMX_DIR[$n]}" = "${dir}" ]; then hmx_in_profile "${n}"; return $?; fi
+  done
+  return 0
+}
+
+# Rebuild HMX_ACTIVE_SERVERS for the current HMX_PROFILE.
+declare -a HMX_ACTIVE_SERVERS=()
+hmx_compute_active() {
+  HMX_ACTIVE_SERVERS=()
+  local n
+  for n in "${HMX_SERVERS[@]}"; do
+    hmx_in_profile "${n}" && HMX_ACTIVE_SERVERS+=("${n}")
+  done
+}
+hmx_compute_active
+
 hmx_load_env() {
+  # An explicit env/CLI DEPLOY_PROFILE (e.g. from bootstrap-lean.sh) must win over
+  # whatever .env says, so capture it before sourcing .env, then restore it.
+  local _pre_profile="${DEPLOY_PROFILE:-}"
   if [ -f "${REPO_ROOT}/.env" ]; then
     set -a
     # shellcheck disable=SC1091
     . "${REPO_ROOT}/.env"
     set +a
   fi
+  [ -n "${_pre_profile}" ] && DEPLOY_PROFILE="${_pre_profile}"
+  HMX_PROFILE="${DEPLOY_PROFILE:-gpu_local}"
+  hmx_compute_active
 }
 
 # Echo the resolved port for a server (env override or default).

@@ -10,8 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 hmx_load_env
 
 echo "═══ hermes-max healthcheck ═══"
+echo "DEPLOY_PROFILE=${HMX_PROFILE}  (active servers: ${HMX_ACTIVE_SERVERS[*]})"
 DOWN=0
-for name in "${HMX_SERVERS[@]}"; do
+for name in "${HMX_ACTIVE_SERVERS[@]}"; do
   url="$(hmx_health_url "$name")"
   if body="$(curl -fsS -m 5 "${url}" 2>/dev/null)"; then
     echo "  ✓ ${HMX_DIR[$name]}  ($(hmx_port "$name"))  ${body}"

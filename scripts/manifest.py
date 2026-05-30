@@ -15,12 +15,26 @@ Reads the manifest path from $HMX_MANIFEST. Emits, for `eval` in bash:
     HMX_PORTDEF[verify]='9101'
     HMX_REGISTER_AS[verify]='hermes-max-verify'
     HMX_HEALTH[verify]='/health'
+    HMX_PROFILES[verify]='gpu_local lean_cloud'
+    HMX_REQUIRES[verify]=''
+    HMX_DEGRADES[verify]='...'
 
 The associative arrays are pre-declared (`declare -A`) by lib.sh before the eval.
+Inline list values (`profiles: [gpu_local, lean_cloud]`) are normalized to a
+space-separated string so bash can membership-test them with a simple `case`.
 """
 import os
 import shlex
 import sys
+
+
+def _norm_list(v):
+    """Normalize an inline `[a, b]` (or bare) value to a space-separated string."""
+    v = v.strip()
+    if v.startswith("[") and v.endswith("]"):
+        v = v[1:-1]
+    parts = [p.strip().strip('"').strip("'") for p in v.replace(",", " ").split()]
+    return " ".join(p for p in parts if p)
 
 
 def parse(path):
@@ -79,6 +93,11 @@ def main():
             "HMX_REGISTER_AS[%s]=%s" % (n, shlex.quote(s.get("register_as", "hermes-max-%s" % n)))
         )
         out.append("HMX_HEALTH[%s]=%s" % (n, shlex.quote(s.get("health", "/health"))))
+        # profiles: default to BOTH when omitted (graceful subset, never a ceiling).
+        profiles = _norm_list(s.get("profiles", "")) or "gpu_local lean_cloud"
+        out.append("HMX_PROFILES[%s]=%s" % (n, shlex.quote(profiles)))
+        out.append("HMX_REQUIRES[%s]=%s" % (n, shlex.quote(_norm_list(s.get("requires", "")))))
+        out.append("HMX_DEGRADES[%s]=%s" % (n, shlex.quote(s.get("degrades_to", "").strip())))
     sys.stdout.write("\n".join(out) + "\n")
     return 0
 
