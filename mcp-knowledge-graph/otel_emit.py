@@ -50,8 +50,33 @@ def _init() -> None:
         _exporter_ok = False
 
 
+# ── live tool-call log bridge (Stage 3) — forward every span event to the
+# operator-facing live stream too; best-effort, never breaks span emission. ─────
+_livelog = None
+_livelog_tried = False
+
+
+def _to_livelog(name: str, attributes: dict | None, status: str) -> None:
+    global _livelog, _livelog_tried
+    try:
+        if not _livelog_tried:
+            _livelog_tried = True
+            import sys as _sys
+            _lib = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
+            if _lib not in _sys.path:
+                _sys.path.insert(0, _lib)
+            import livelog as _ll  # type: ignore
+            _livelog = _ll
+        if _livelog is not None:
+            _livelog.forward(name, attributes or {}, status)
+    except Exception:  # noqa: BLE001 - live log is best-effort, always
+        pass
+
+
 def record(name: str, attributes: dict | None = None, status: str = "ok") -> dict[str, Any]:
     """Emit one span. Never raises. Returns {ok, exported}."""
+    _to_livelog(name, attributes, status)
     try:
         _init()
         if _tracer is None:

@@ -407,6 +407,37 @@ scripts/healthcheck.sh                 # kg shows DOWN, others ✓, exit 1
 scripts/start-all.sh                   # restarts only the dead one
 ```
 
+## Live observability — see what the agent is doing in real time (Stage 3)
+
+Beyond the post-hoc Phoenix spans there is a **live, operator-facing tool-call
+stream**. Run one command in a side terminal:
+
+```bash
+scripts/watch.sh        # live, colourised tail of every tool call
+```
+
+and watch the entire agent loop moment-to-moment — which tool is running, its
+input, how long it ran, what it returned, every heartbeat, every fallback, and
+every routing/kill **DECISION** with its reason:
+
+```
+[14:03:01] → TOOL index_repo (rag:9102) | input: {path=/repo} | est: ~98s
+[14:03:46] ⟳ index_repo heartbeat | progress: 400/1240 (32%) | elapsed 45s
+[14:04:33] ✓ index_repo OK | 92.3s (est ~98s) | returned: {files=1240, mode=hybrid}
+[14:04:34] ✗ groq FAILED | reason: 429 | falling back to: deepinfra
+[14:04:34] • DECISION route → synth (DeepInfra) | reason: generative, not steering
+```
+
+Verbosity is `.env`-controlled (`HERMES_MAX_VERBOSITY=quiet|normal|verbose|debug`,
+**default `verbose`** so you always see what's happening). The stream is fed by
+`lib/livelog.py` via every server's `otel_emit` — it emits **alongside** the
+Phoenix/OTel spans, never replacing them, and degrades silently (a logging
+failure never breaks a tool). At task end, a per-tool summary table:
+
+```bash
+scripts/run-summary.sh  # count · total time · failures · fallbacks · est-vs-actual, per tool
+```
+
 ## Validate the whole system — dry-run & rate-limit check
 
 ```bash
