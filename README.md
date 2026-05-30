@@ -404,6 +404,29 @@ scripts/healthcheck.sh                 # kg shows DOWN, others ✓, exit 1
 scripts/start-all.sh                   # restarts only the dead one
 ```
 
+## Validate the whole system — dry-run & rate-limit check
+
+```bash
+bash scripts/dry_run.sh --mode local   # base case: zero cloud, every cloud step skip-logged
+bash scripts/dry_run.sh --mode free    # + real free cloud (Cerebras/Groq)
+bash scripts/dry_run.sh --mode full    # + paid synth/steer (DeepInfra)
+```
+
+A **rapid real-inference smoke** (~15s) that fires every component once end-to-end
+(driver → classifier → watchdog → steer → research → corpus → KG → RAG → synth →
+verify → draft-pool → verifier-select → Banyan → checkpoint → escalation-DRY) and
+writes a readable **`dry_run_trace.md`**: per step the component, provider/model
+used (or skipped + why), latency, tokens/cost, PASS/FAIL, and the real I/O snippet.
+The `local` run passes with **zero cloud keys** — the one hard dependency is the
+local model at `$VLLM_BASE_URL`.
+
+```bash
+bash scripts/rate-limit-validation.sh   # prove the free-tier budget tracker ($0)
+```
+Drives the best-of-N draft pool until Groq's per-model TPM exhausts and shows the
+live tracker **pre-flight-skipping** the over-limit call (never a 429/413 crash) →
+`rate_limit_validation_trace.md`.
+
 ## Acceptance test
 
 Give Hermes an unattended task: *"Implement feature X across ≥5 files in `<repo>`
