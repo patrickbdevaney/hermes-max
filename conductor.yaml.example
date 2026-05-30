@@ -1,0 +1,48 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# conductor.yaml — OPTIONAL override for the presence-gated conductor.
+#
+# Copy to `conductor.yaml` (repo root) to use it. ABSENT = pure hardcoded
+# defaults (see mcp-escalation/conductor_registry.py). This file controls ORDER
+# and per-rung MODEL strings ONLY. It NEVER controls which providers are enabled
+# — that is decided solely by whether each provider's *_API_KEY is set in .env
+# (presence). Precedence: hardcoded defaults  <  conductor.yaml.
+#
+# Parsed by a stdlib-only reader (no PyYAML needed): 2-space nesting, inline
+# [a, b] lists, inline {k: v} maps. Keep to the shapes shown below.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Per-role provider ORDER (first PRESENT rung wins; absent rungs are skipped;
+# on failure/429/5xx the executor silently falls to the next present rung).
+#   synth default: US hosts first, then opt-in non-US, then Opus at the top.
+#   steer default: cheap-reliable-first — paid V4-Flash BEFORE the fragile free
+#                  tiers (corrected from the operator's own pricing).
+roles:
+  synth: [deepinfra, fireworks, together, deepseek, moonshot, anthropic]
+  steer: [deepinfra, cerebras, groq, gemini]
+  escalate: [anthropic]
+
+# The parallel_draft POOL (UNORDERED; fanned out for cross-family diversity).
+# Each entry pins a (provider, model) — one provider may contribute several
+# families. Membership is still presence-gated (absent keys are not drafted).
+draft_pool:
+  - {provider: cerebras, model: zai-glm-4.7}
+  - {provider: cerebras, model: gpt-oss-120b}
+  - {provider: groq, model: openai/gpt-oss-120b}
+  - {provider: groq, model: qwen/qwen3-32b}
+  - {provider: groq, model: meta-llama/llama-4-scout-17b-16e-instruct}
+  - {provider: deepinfra, model: deepseek-ai/DeepSeek-V4-Flash}
+
+# Per-provider MODEL overrides (optional). Only the providers/roles you list are
+# overridden; everything else keeps the registry default.
+models:
+  deepinfra:
+    synth: deepseek-ai/DeepSeek-V4-Pro
+    steer: deepseek-ai/DeepSeek-V4-Flash
+    draft: deepseek-ai/DeepSeek-V4-Flash
+
+# Spend + fan-out caps. Env vars (CONDUCTOR_USD_CAP_DAILY/MONTHLY,
+# CONDUCTOR_DRAFT_MAX_N) set the defaults; these override them if present.
+caps:
+  usd_daily: 1.0
+  usd_monthly: 5.0
+  draft_max_n: 5

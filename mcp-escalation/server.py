@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+import conductor_core
 import escalation_core
 
 PORT = int(os.environ.get("MCP_ESCALATION_PORT", "9105"))
@@ -91,6 +92,61 @@ def route(task: str, difficulty: str | None = None, signals: dict | None = None,
     only if local is unavailable/failed (and cloud is enabled + under cap). Pass
     `context` for the surgical handoff."""
     return escalation_core.route(task, difficulty, signals, context)
+
+
+# ── conductor (optional, presence-gated) ─────────────────────────────────────
+# Cloud help as STATELESS TOOLS, never a backend swap. Each tool walks a per-role
+# provider chain, uses the first PRESENT rung, silently falls-with-log on failure,
+# and returns a graceful proceed_local signal when a role is OFF or capped. With
+# no cloud keys set these all return proceed_local and the driver stays local.
+@mcp.tool()
+def conductor_steer(prompt: str, max_tokens: int | None = None) -> dict:
+    """Get a CHEAP cloud NUDGE on an ambiguous-but-not-deep blocker. Walks the
+    steer chain (default: DeepSeek-V4-Flash@DeepInfra -> Cerebras -> Groq ->
+    Gemini), first present rung wins. Returns {ok, provider, content, cost_usd} or
+    {proceed_local:True} if steer is OFF/failed. Never raises. Pass a compact
+    brief (Stage-2 'compact' profile), not raw scrollback."""
+    return conductor_core.run_role("steer", prompt=prompt, max_tokens=max_tokens)
+
+
+@mcp.tool()
+def conductor_synthesize(prompt: str, max_tokens: int | None = None) -> dict:
+    """Get a DEEP decomposition / novel-architecture directive on a genuinely-hard,
+    AMBIGUOUS blocker (no cheap verifiable oracle). Walks the synth chain (default:
+    DeepInfra V4-Pro -> Fireworks -> Together -> DeepSeek -> Kimi -> Opus),
+    US-hosted-first, first present rung wins, silent fall-with-log. Returns a
+    structured directive in `content` or {proceed_local:True}. Stateless: pass the
+    Stage-2 'full' brief; the cloud returns a directive, the LOCAL model executes."""
+    return conductor_core.run_role("synth", prompt=prompt, max_tokens=max_tokens)
+
+
+@mcp.tool()
+def parallel_draft_pool(prompt: str, n: int | None = None,
+                        max_tokens: int | None = None) -> dict:
+    """Fan a draft brief out across the FREE/cheap parallel_draft POOL concurrently
+    (Cerebras GLM + gpt-oss, Groq gpt-oss + qwen3 + llama-4, + optional DeepSeek
+    V4-Flash anchor) for cross-family DIVERSITY, respecting each provider's live
+    RPM/RPD budget (exhausted sources skipped). Returns the RAW candidates; the
+    deterministic VERIFIER selects the winner (use mcp-search's verifier-guided
+    selection — Stage 4 — on VERIFIABLE subtasks only). Degrades to N=1-local with
+    zero keys. Never raises."""
+    return conductor_core.draft_fanout(prompt=prompt, n=n, max_tokens=max_tokens)
+
+
+@mcp.tool()
+def conductor_status() -> dict:
+    """Report which conductor ROLES are active (>=1 present key), the resolved
+    present chain per role, the present draft-pool members, the USD caps + today's
+    /this-month's spend, whether conductor.yaml overrode defaults, and recent
+    silent rung-falls. The at-a-glance 'what cloud help is on' view."""
+    return conductor_core.status()
+
+
+@mcp.tool()
+def conductor_cost_report() -> dict:
+    """Per-day + per-month conductor spend, broken down by provider and by role,
+    plus call count — the honest cost ledger feeding the Stage-5 report."""
+    return conductor_core.cost_report()
 
 
 if __name__ == "__main__":
