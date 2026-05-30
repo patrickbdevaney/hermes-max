@@ -113,6 +113,30 @@ Asserted in `smoke_corpus.py` (temp dir, monkeypatched RAG/LLM/conductor): full
 untruncated write, idempotency, full-content RAG index with resolvable source,
 density routing (all four paths), provenance round-trip, 45K-char paper untruncated.
 
+## Extraction ladder + dedup / authority / citation-graph (research_engine Stage 4)
+
+- **Extraction ladder** — `extract_url(url)` falls through **Trafilatura** (fast,
+  CPU, static articles) → **Crawl4AI** (JS-rendered, via `mcp-docs.fetch_clean`) →
+  **Jina Reader** (`r.jina.ai`, blocked/complex pages + PDFs; `JINA_API_KEY` lifts
+  the limit). The order is chosen by page type (PDFs and JS hosts reorder), each
+  rung is best-effort, and a rung that fails *or raises* falls through to the next.
+  *(Trafilatura isn't installed in this venv → that rung no-ops and the ladder
+  starts at Crawl4AI; add `trafilatura` to enable the fast first rung.)*
+- **Semantic dedup** — `semantic_dedup(items)` collapses near-duplicates by
+  **embedding cosine** (not just URL/n-gram), keeping the most authoritative
+  instance of each cluster so paraphrased SEO mirrors don't dominate. Degrades to
+  n-gram Jaccard when the embedding endpoint is down.
+- **Authority ranking** — `authority_rank(items)` scores `domain authority +
+  log(citation_count) + recency`, surfacing an arXiv primary over a blog summary
+  while anchoring to seminal work.
+- **Citation-graph edges** — `citation_edges(paper, refs, cites)` turns Semantic
+  Scholar references/citations into normalized `{src, rel:'cites', dst}` edges with
+  provenance, ready to become KG edges in Stage 5.
+
+Asserted in `smoke_extract.py`: ladder fall-through (incl. a raising rung) +
+PDF reorder + all-fail, primary-over-blog ranking, embedding + n-gram dedup, edge
+directions.
+
 ## Backends (all local; each degrades gracefully)
 
 | Env var | Default | Down ⇒ |
@@ -141,6 +165,7 @@ MCP_RESEARCH_PORT=9110 .venv/bin/python server.py
 .venv/bin/python smoke_test.py     # A pure, B degraded, C 4 invariants, D e2e, E boot
 .venv/bin/python smoke_sources.py  # Stage 1+2: adapter parsing, gating, RRF, routing, degrade
 .venv/bin/python smoke_corpus.py   # Stage 3: on-disk corpus, provenance, lazy distill, resolve
+.venv/bin/python smoke_extract.py  # Stage 4: extraction ladder, dedup, authority, citation edges
 bash ../scripts/eval-research.sh    # honest quality number on a small fixed set
 ```
 

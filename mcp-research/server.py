@@ -26,6 +26,8 @@ from starlette.responses import JSONResponse
 import research_core
 import sources
 import corpus
+import extract
+import rank
 
 PORT = int(os.environ.get("MCP_RESEARCH_PORT", "9110"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
@@ -54,7 +56,8 @@ mcp = FastMCP(
 async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "mcp-research", "port": PORT,
                          **research_core.stats(), "sources": sources.source_stats(),
-                         "corpus": corpus.corpus_stats()})
+                         "corpus": corpus.corpus_stats(), "extract": extract.extract_stats(),
+                         "rank": rank.rank_stats()})
 
 
 @mcp.tool()
@@ -241,6 +244,39 @@ def resolve_source(source: str) -> dict:
     document: full content + parsed front-matter provenance. The seam the Stage-5
     verify gate uses to map a claim -> the exact stored chunk it came from."""
     return corpus.resolve_source(source)
+
+
+# ── Stage 4: extraction ladder + dedup/authority/citation-graph ───────────────
+@mcp.tool()
+def extract_url(url: str, prefer: list | None = None) -> dict:
+    """Extraction ladder: Trafilatura (fast, static) -> Crawl4AI (JS, via mcp-docs)
+    -> Jina Reader (blocked/complex/PDF). Picks the order by page type and falls
+    through on failure/empty. Returns markdown + which rung produced it + attempts."""
+    return extract.extract_url(url, prefer)
+
+
+@mcp.tool()
+def semantic_dedup(items: list, threshold: float = 0.92) -> dict:
+    """Collapse NEAR-duplicate sources by embedding cosine (not just URL/n-gram),
+    keeping the most AUTHORITATIVE instance of each cluster — so paraphrased SEO
+    mirrors don't dominate. Degrades to n-gram Jaccard if embeddings are down."""
+    return rank.semantic_dedup(items, threshold)
+
+
+@mcp.tool()
+def authority_rank(items: list) -> dict:
+    """Rank sources by composite authority = domain authority + log(citation_count)
+    + recency. Surfaces an arXiv primary over a blog summary; anchors to seminal
+    work while rewarding recency. Returns items sorted with the score annotated."""
+    return {"ok": True, "ranked": rank.authority_rank(items)}
+
+
+@mcp.tool()
+def citation_edges(paper: dict, refs: list | None = None, cites: list | None = None) -> dict:
+    """Turn a paper + its Semantic Scholar references (backward) / citations
+    (forward) into normalized {src, rel:'cites', dst} edges with provenance, ready
+    to become KG edges in Stage 5. Pure transform."""
+    return rank.citation_edges(paper, refs, cites)
 
 
 if __name__ == "__main__":
