@@ -28,6 +28,8 @@ import sources
 import corpus
 import extract
 import rank
+import kg_provenance
+import verify_gate
 
 PORT = int(os.environ.get("MCP_RESEARCH_PORT", "9110"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
@@ -57,7 +59,8 @@ async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "mcp-research", "port": PORT,
                          **research_core.stats(), "sources": sources.source_stats(),
                          "corpus": corpus.corpus_stats(), "extract": extract.extract_stats(),
-                         "rank": rank.rank_stats()})
+                         "rank": rank.rank_stats(), "kg_provenance": kg_provenance.kg_provenance_stats(),
+                         "verify_gate": verify_gate.verify_gate_stats()})
 
 
 @mcp.tool()
@@ -277,6 +280,67 @@ def citation_edges(paper: dict, refs: list | None = None, cites: list | None = N
     (forward) into normalized {src, rel:'cites', dst} edges with provenance, ready
     to become KG edges in Stage 5. Pure transform."""
     return rank.citation_edges(paper, refs, cites)
+
+
+# ── Stage 5: KG provenance + decomposed verification gate ─────────────────────
+@mcp.tool()
+def kg_add_episode(namespace: str, summary: str, source_id: str,
+                   entities: list | None = None, edges: list | None = None) -> dict:
+    """Land a finished research finding into the KG: an episode entity + its
+    entities + fact edges, all carrying source_id + ingested_at (provenance) and
+    optional valid_from/valid_until (temporal validity). Degrades if the KG is down."""
+    return kg_provenance.add_episode(namespace, summary, source_id, entities, edges)
+
+
+@mcp.tool()
+def kg_add_fact_edge(a: str, rel: str, b: str, source_id: str,
+                     valid_from: str | None = None, valid_until: str | None = None) -> dict:
+    """Record a fact edge (a)-[rel]->(b) with its source_id + temporal validity. rel
+    must be one of cites/supersedes/implements/audits/contradicts/authored_by — an
+    invented relation is rejected, not stored."""
+    return kg_provenance.add_fact_edge(a, rel, b, source_id, valid_from, valid_until)
+
+
+@mcp.tool()
+def kg_ingest_citation_edges(edges: list, source_id: str) -> dict:
+    """Bulk-record citation_edges() output as `cites` fact edges carrying source_id
+    (the Stage-4 citation graph -> KG)."""
+    return kg_provenance.ingest_citation_edges(edges, source_id)
+
+
+@mcp.tool()
+def kg_mark_superseded(old: str, new: str, source_id: str, as_of: str | None = None) -> dict:
+    """Mark `old` superseded by `new` (fast-moving fields): records new-[supersedes]
+    ->old and stamps old.valid_until so the graph says which is current — instead of
+    silently keeping both."""
+    return kg_provenance.mark_superseded(old, new, source_id, as_of)
+
+
+@mcp.tool()
+def verify_findings(findings: list, min_sources: int = 2) -> dict:
+    """Decomposed verification gate (grounding, not generation): each claim's
+    sources are RESOLVED to stored chunks and the claim is ENTAILMENT-checked against
+    them; ≥2 independent supporting domains => well-supported; contradictions =>
+    'conflicting', surfaced with BOTH citations (never averaged). findings =
+    [{"claim", "sources":[{source_id|url|snippet, source_type?}]}]."""
+    return verify_gate.verify_findings(findings, min_sources)
+
+
+@mcp.tool()
+def verify_claim(claim: str, sources: list, min_sources: int = 2) -> dict:
+    """Verify ONE claim by decomposed retrieval — resolve each source to its stored
+    chunk, entail, count independent support. Returns status + resolvable source IDs
+    + per-source verdicts. Flags unsupported/unresolvable rather than asserting."""
+    return verify_gate.verify_claim(claim, sources, min_sources)
+
+
+@mcp.tool()
+def decompose_question(question: str, hyde: bool = False) -> dict:
+    """Echo-chamber fix: break a question into complementary sub-questions, each with
+    diverse search paraphrases + per-source query syntax (arXiv fields != GitHub
+    qualifiers != web), optional HyDE. The searches then fuse via RRF. Degrades to
+    deterministic variants with no model."""
+    return verify_gate.decompose_question(question, hyde)
 
 
 if __name__ == "__main__":

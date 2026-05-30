@@ -137,6 +137,41 @@ Asserted in `smoke_extract.py`: ladder fall-through (incl. a raising rung) +
 PDF reorder + all-fail, primary-over-blog ranking, embedding + n-gram dedup, edge
 directions.
 
+## KG provenance + decomposed verification gate (research_engine Stage 5)
+
+The grounding layer. Research findings land in the knowledge graph **with
+provenance**, and every synthesized claim is verified by **retrieval, not
+generation**.
+
+- **KG provenance + temporal validity** — `kg_add_episode` / `kg_add_fact_edge` /
+  `kg_ingest_citation_edges` / `kg_mark_superseded`. Entities are papers/repos/
+  protocols/EIPs/people/techniques; edges use a fixed vocabulary (`cites` /
+  `supersedes` / `implements` / `audits` / `contradicts` / `authored_by` — an
+  invented relation is rejected). **Every fact edge carries its `source_id`** plus
+  `valid_from`/`valid_until`, so a 2024 claim superseded in 2026 is *marked*, not
+  silently kept alongside the new one.
+- **Decomposed verification gate** — `verify_claim` / `verify_findings` resolve each
+  claim's `source_id` to its **stored chunk** (`corpus.resolve_source`), then run a
+  cheap **entailment** pass (local Qwen; DeepSeek via conductor for dense sources).
+  ≥2 independent supporting domains ⇒ *well-supported*; no resolvable/entailing
+  backing ⇒ flagged (*unsupported* / *single-sourced*), **never asserted**.
+  **Contradictions are surfaced with BOTH citations** (`surface_contradictions`) —
+  never averaged, which matters when research drives an architecture decision.
+- **Query-diversity decomposition** — `decompose_question` breaks a question into
+  complementary sub-questions, each with diverse paraphrase angles + per-source
+  query syntax (arXiv field prefixes ≠ GitHub qualifiers ≠ web) + optional HyDE; the
+  searches fuse via RRF (Stage 1). Degrades to deterministic variants with no model.
+
+> The spec says Graphiti/Neo4j; the actual KG (`mcp-knowledge-graph`) is a
+> single-file SQLite store (its own header: *"Deliberately NOT built: Neo4j +
+> Graphiti + Cognee"*). Same contract — entities, directed relations, and a `props`
+> bag for source IDs + temporal validity — used, not modified.
+
+Asserted in `smoke_verify.py`: resolvable-source well-supported, entailment flags
+an unsupported claim, contradiction surfaced with both citations, KG edges carry
+source_id + temporal validity, invented relation rejected, supersede stamps
+`valid_until`, decomposition + per-source syntax + deterministic degrade.
+
 ## Backends (all local; each degrades gracefully)
 
 | Env var | Default | Down ⇒ |
@@ -166,6 +201,7 @@ MCP_RESEARCH_PORT=9110 .venv/bin/python server.py
 .venv/bin/python smoke_sources.py  # Stage 1+2: adapter parsing, gating, RRF, routing, degrade
 .venv/bin/python smoke_corpus.py   # Stage 3: on-disk corpus, provenance, lazy distill, resolve
 .venv/bin/python smoke_extract.py  # Stage 4: extraction ladder, dedup, authority, citation edges
+.venv/bin/python smoke_verify.py   # Stage 5: KG provenance + decomposed verification gate
 bash ../scripts/eval-research.sh    # honest quality number on a small fixed set
 ```
 
