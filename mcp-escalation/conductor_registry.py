@@ -139,6 +139,14 @@ PROVIDERS: dict[str, dict[str, Any]] = {
     },
 }
 
+# ── spend-TIER tags (for CONDUCTOR_MODE) — free-tier vs paid providers ────────
+# CONDUCTOR_MODE is a HARD cap layered ON TOP of presence-gating (resolver.py):
+#   local -> NO cloud at all; free -> only these free providers; full -> all.
+# Independent of which keys are present (a present DeepInfra key is IGNORED in
+# `free` mode). Derived once in load_config() so adding a provider needs only its
+# id here if it's free; everything else defaults to "paid".
+FREE_TIER_PROVIDERS: set[str] = {"cerebras", "groq", "gemini"}
+
 # ── DEFAULT ROLE CHAINS (ordered; first PRESENT rung wins, fall through) ──────
 #   synth: US-first, then opt-in non-US, then Opus at the top of the ladder.
 #   steer: cheap-reliable-first — paid V4-Flash (hundredths of a cent, 1M ctx,
@@ -251,8 +259,11 @@ def load_config() -> dict[str, Any]:
     role_chains = {k: list(v) for k, v in DEFAULT_ROLE_CHAINS.items()}
     draft_pool = [dict(p) for p in DEFAULT_DRAFT_POOL]
     caps = dict(DEFAULT_CAPS)
-    # deep-copy providers so a model override doesn't mutate module state
-    providers = {pid: {**p, "models": dict(p["models"])} for pid, p in PROVIDERS.items()}
+    # deep-copy providers so a model override doesn't mutate module state, and
+    # tag each with its spend tier (free/paid) for the CONDUCTOR_MODE cap.
+    providers = {pid: {**p, "models": dict(p["models"]),
+                       "tier": "free" if pid in FREE_TIER_PROVIDERS else "paid"}
+                 for pid, p in PROVIDERS.items()}
 
     overrode = False
     try:

@@ -83,6 +83,25 @@ def part_a() -> None:
     assert rv.resolve_chain(chain, providers, {"DEEPINFRA_API_KEY": "  "}) == []
     _ok("blank/whitespace key counts as absent")
 
+    # 1b. CONDUCTOR_MODE — a HARD spend-tier cap on top of presence-gating.
+    tier_providers = reg.load_config()["providers"]  # tier-tagged copy
+    allk = {p + "_API_KEY": "x" for p in
+            ["DEEPINFRA", "CEREBRAS", "GROQ", "GEMINI", "ANTHROPIC"]}
+    steer = reg.DEFAULT_ROLE_CHAINS["steer"]
+    loc = rv.resolve_chain(steer, tier_providers, {"CONDUCTOR_MODE": "local", **allk})
+    fre = rv.resolve_chain(steer, tier_providers, {"CONDUCTOR_MODE": "free", **allk})
+    ful = rv.resolve_chain(steer, tier_providers, {"CONDUCTOR_MODE": "full", **allk})
+    dft = rv.resolve_chain(steer, tier_providers, allk)  # no mode -> full
+    assert loc == [], f"local mode must use NO cloud: {loc}"
+    assert fre == ["cerebras", "groq", "gemini"], f"free mode = free providers only: {fre}"
+    assert "deepinfra" in ful and "cerebras" in ful, f"full mode = all: {ful}"
+    assert dft == ful, f"unset mode must equal full (backward-compat): {dft} != {ful}"
+    # free mode IGNORES a present paid key (the hard-cap property)
+    synth_free = rv.resolve_chain(reg.DEFAULT_ROLE_CHAINS["synth"], tier_providers,
+                                  {"CONDUCTOR_MODE": "free", **allk})
+    assert synth_free == [], f"free mode must drop paid synth even with key present: {synth_free}"
+    _ok(f"CONDUCTOR_MODE cap: local->{loc}, free->{fre}, full->all; paid key ignored in free")
+
     # 2. ONLY DEEPINFRA -> steer+synth resolve to deepinfra and work
     cc._post_chat = _fake_post_factory()
     os.environ["DEEPINFRA_API_KEY"] = "test"

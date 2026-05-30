@@ -1,7 +1,11 @@
 # hermes-max — Lane 1 Sovereign Coder
 
-A stock **Hermes Agent** (v0.15.1, on local **Qwen3.6-35B-A3B** via vLLM) powered
-up into a maximally-capable, long-horizon autonomous engineering harness — built
+A stock **Hermes Agent** (v0.15.1) running on **a local model you choose** —
+served behind one OpenAI-compatible endpoint (`$VLLM_BASE_URL`) by vLLM (CUDA),
+llama.cpp (any/GGUF), or MLX (Apple) — powered up into a maximally-capable,
+long-horizon autonomous engineering harness. Map your hardware to a driver tier
+in the [hardware template table](#hardware--local-driver-template-pick-your-tier)
+below; the orchestration above the endpoint is identical on every platform. Built
 to beat Claude Code + Opus on the axes a free, always-on, compounding local agent
 structurally can:
 
@@ -296,6 +300,46 @@ capability is one `profiles:` line and lean is unaffected — lean is a graceful
 every server reaches models over HTTP. The only torch/CUDA touchpoints are the
 optional, gpu_local-only `serve-embed.sh` / `serve-rerank.sh`. `bootstrap.sh`
 asserts this (greps requirements), so a lean box never needs a GPU stack.
+
+## Hardware → local-driver template (pick your tier)
+
+You supply the inference server; hermes-max only talks to it over `$VLLM_BASE_URL`.
+The rows below are **examples, not prescriptions** — map your machine to a VRAM/
+compute tier and pick any model in that class. Smaller local driver → lean harder
+on the conductor's cloud tiers (the presence-gated design makes this automatic).
+The **Qwen3.6 series** is a sensible default family (GQA-friendly KV, edge-sized
+weights); **Nemotron** and **Gemma-4** are good alternatives.
+
+| Hardware tier (examples) | Approx VRAM | Suggested local driver tier (examples) |
+|---|---|---|
+| DGX Spark / Jetson Thor / RTX 6000 Pro | 96–128GB+ unified/VRAM | Large MoE driver (Qwen3.6 ~122B-A10B class, or Nemotron-Super) |
+| RTX 5090 / 4090 | 24–32GB | Mid driver (Qwen3.6 ~35B-A3B, Nemotron, Gemma-4 ~27–31B) |
+| RTX 3090 / 4080 | 16–24GB | Qwen3.6 ~35B-A3B quantized, or ~14–32B dense |
+| M4 Max/Ultra Studio (MLX/GGUF) | 36–128GB unified | Qwen3.6 35B-A3B / larger MoE via MLX or llama.cpp |
+| RTX 4060 Ti / 3060 / gaming laptop | 8–16GB | Smaller GGUF (~14B class) + lean on free/full cloud tiers |
+| Jetson Orin / small edge | 8–32GB | Small driver + heavier cloud uplift |
+| No GPU / VPS | — | Cloud-only driver (cheap model via conductor); `local` mode unavailable |
+
+Inference server per platform — all expose an OpenAI-compatible endpoint, so the
+orchestration is identical above it: **vLLM** (CUDA), **llama.cpp** (any/GGUF),
+**MLX** (Apple). Point `$VLLM_BASE_URL` at whichever you run.
+
+## Cloud-spend modes — `local` / `free` / `full`
+
+`CONDUCTOR_MODE` (in `.env`) is a **hard spend-tier cap**, orthogonal to
+`DEPLOY_PROFILE` (which picks the *hardware* lane). It bounds *which cloud tiers
+may fire at all*, independent of which keys are present:
+
+| Mode | Cloud tiers used | Cost | Use |
+|---|---|---|---|
+| `local` | **none** — local vLLM only | $0, offline, fully sovereign | The guaranteed-correct base case. Any present paid/free keys are ignored. |
+| `free` | local + **free** tiers (Cerebras steer/draft, Groq cascade + slop-draft, Gemini-Flash last-resort) | $0 | Real cloud uplift with no bill; the live budget tracker keeps it inside free rate limits. |
+| `full` | adds **paid** synth/steer (DeepInfra) + rare Opus escalate | metered, capped | The ideal/recommended mode. |
+
+Each mode falls back **through** the ones below it as keys/endpoints disappear:
+`full → free → local`. So `full` on a box with only free keys behaves exactly like
+`free`, and with no keys like `local`. Mode is a documented preference, not a hard
+requirement — set it once in `.env` (default `full`).
 
 ## Tier-2 workflow skills (`skills/`)
 

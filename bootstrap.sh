@@ -199,15 +199,37 @@ export DEPLOY_PROFILE="${PROFILE}"
 HMX_PROFILE="${PROFILE}"
 
 # ── 2c. torch/CUDA isolation assertion (the lean guarantee) ───────────────────
-# NO MCP server may pull torch/CUDA — they all reach models over HTTP. The only
-# CUDA touchpoints are the OPTIONAL gpu_local serve-embed.sh/serve-rerank.sh.
-hdr "2c. torch/CUDA isolation"
+# NO orchestration/MCP code may pull torch/CUDA — everything reaches models over
+# HTTP above the $VLLM_BASE_URL boundary, so the client runs on Apple/AMD/CPU.
+# The ONLY platform-specific code is the inference server BELOW the endpoint,
+# which is external + swappable (serve-embed.sh / serve-rerank.sh launch it).
+hdr "2c. torch/CUDA isolation (no CUDA above the inference endpoint)"
+# (i) declared deps: no requirements.txt may pull a CUDA/accelerator stack.
 _torch_hits="$(grep -rniE '^[[:space:]]*(torch|nvidia-|tensorflow|cupy)' "${REPO_ROOT}"/*/requirements.txt 2>/dev/null || true)"
 if [ -z "${_torch_hits}" ]; then
   c_ok "no MCP server requirements pull torch/CUDA — lean_cloud needs no GPU stack"
 else
   c_bad "a server requirements.txt pulls torch/CUDA — breaks the lean guarantee:"
   printf '%s\n' "${_torch_hits}" | sed 's/^/      /'
+  MISSING=$((MISSING + 1))
+fi
+# (ii) source imports: no .py in the orchestration may `import torch`/cuda/etc.
+# Excluded — these ARE the platform-specific layer the design sanctions, all BELOW
+# the endpoint / off the hot path, never imported by an MCP server at request time:
+#   serving/       — the swappable local inference server itself (the thing the
+#                    $VLLM_BASE_URL / embed / rerank endpoints point AT)
+#   *_gpu.py       — optional gpu_local-only offline validation tools (peers of
+#                    serve-embed.sh / serve-rerank.sh)
+#   .venv / __pycache__ / sample_repo — third-party / fixtures, not our code
+_imp_hits="$(grep -rnEl --include='*.py' \
+    -e '^[[:space:]]*(import|from)[[:space:]]+(torch|tensorflow|cupy|pycuda|triton)([[:space:].]|$)' \
+    "${REPO_ROOT}" 2>/dev/null \
+    | grep -vE '/\.venv/|/__pycache__/|/sample_repo/|/serving/|_gpu\.py$' || true)"
+if [ -z "${_imp_hits}" ]; then
+  c_ok "no orchestration/MCP .py imports torch/cuda — pure HTTP above \$VLLM_BASE_URL"
+else
+  c_bad "a .py above the inference endpoint imports a CUDA stack — refactor behind HTTP:"
+  printf '%s\n' "${_imp_hits}" | sed 's/^/      /'
   MISSING=$((MISSING + 1))
 fi
 

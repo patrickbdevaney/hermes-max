@@ -21,3 +21,5 @@ node_modules/
 # conductor config backups (Stage edits)
 .conductor-backup/
 conductor.yaml
+
+.env.bak.*

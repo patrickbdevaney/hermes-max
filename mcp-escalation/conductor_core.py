@@ -481,6 +481,7 @@ def status() -> dict[str, Any]:
     pool_present = resolver.resolve_pool(cfg["draft_pool"], providers, env)
     lg = _load_ledger()
     return {
+        "mode": resolver.current_mode(env),
         "roles_active": roles,
         "resolved_chains": {r: resolver.resolve_chain(c, providers, env)
                             for r, c in cfg["role_chains"].items()},
