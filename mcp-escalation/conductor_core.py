@@ -126,36 +126,43 @@ def _cap_blocked(caps: dict[str, float], lg: dict[str, Any]) -> str | None:
     return None
 
 
-# ── per-provider RPM/RPD budget (live, persisted sliding window) ──────────────
-def _budget_allows(provider: str, prov_cfg: dict[str, Any], *, commit: bool) -> bool:
-    """True if `provider` is within its documented RPM and RPD. When commit=True
-    and allowed, records a timestamp. Persisted so the window survives across the
-    short-lived tool calls. None limits = unlimited (paid headroom)."""
-    rpm = prov_cfg.get("rpm")
-    rpd = prov_cfg.get("rpd")
-    if not rpm and not rpd:
-        return True
-    now = time.time()
-    with _lock:
-        try:
-            with open(BUDGET_PATH) as f:
-                buckets = json.load(f)
-        except Exception:  # noqa: BLE001
-            buckets = {}
-        ts = [t for t in buckets.get(provider, []) if now - t < 86_400]  # prune >1d
-        if rpm and sum(1 for t in ts if now - t < 60) >= rpm:
-            buckets[provider] = ts
-            _save_budget(buckets)
-            return False
-        if rpd and len(ts) >= rpd:
-            buckets[provider] = ts
-            _save_budget(buckets)
-            return False
-        if commit:
-            ts.append(now)
-        buckets[provider] = ts
-        _save_budget(buckets)
-        return True
+# ── per-(provider,model) RPM/RPD/TPM budget (PRE-FLIGHT, header-fed) ──────────
+# Free-tier TPM (tokens-per-minute) is the BINDING limit and is per-MODEL on Groq
+# (gpt-oss-120b 8K, qwen3-32b 6K): a single 6K-token brief eats the whole minute.
+# So we estimate a call's token footprint and SKIP a rung BEFORE firing if it would
+# exceed the remaining TPM — never absorbing a 429. Budgets seed from the registry
+# and are corrected live from each response's x-ratelimit-remaining/-reset headers.
+import re  # noqa: E402
+
+CHARS_PER_TOKEN = 4  # conservative heuristic; no tokenizer dependency
+
+
+def _est_tokens(messages: list[dict]) -> int:
+    return sum(len(str(m.get("content", ""))) for m in messages) // CHARS_PER_TOKEN + 4
+
+
+def _limits_for(prov_cfg: dict[str, Any], model: str) -> dict[str, Any]:
+    tpm = (prov_cfg.get("model_tpm") or {}).get(model, prov_cfg.get("tpm"))
+    return {"rpm": prov_cfg.get("rpm"), "rpd": prov_cfg.get("rpd"), "tpm": tpm}
+
+
+def _parse_reset(val: Any) -> float | None:
+    """Groq/OpenAI reset headers look like '6.5s', '1m30s', '2m', or bare seconds.
+    Return seconds-from-now, or None if unparseable."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    try:
+        return float(s)  # bare seconds
+    except ValueError:
+        pass
+    total = 0.0
+    matched = False
+    for num, unit in re.findall(r"([\d.]+)\s*(ms|s|m|h)", s):
+        matched = True
+        n = float(num)
+        total += {"ms": n / 1000, "s": n, "m": n * 60, "h": n * 3600}[unit]
+    return total if matched else None
 
 
 def _save_budget(buckets: dict[str, Any]) -> None:
@@ -166,9 +173,115 @@ def _save_budget(buckets: dict[str, Any]) -> None:
     os.replace(tmp, BUDGET_PATH)
 
 
+def _budget_check(provider: str, model: str, prov_cfg: dict[str, Any],
+                  est_tokens: int, *, commit: bool) -> tuple[bool, str]:
+    """PRE-FLIGHT gate. Returns (ok, reason) where reason in {ok, rpm, rpd, tpm}.
+    Unlimited providers (no rpm/rpd/tpm) short-circuit to (True, 'ok') with no I/O.
+    A live header snapshot (remaining tokens + reset) overrides the local estimate
+    while it is fresh."""
+    lim = _limits_for(prov_cfg, model)
+    if not lim["rpm"] and not lim["rpd"] and not lim["tpm"]:
+        return True, "ok"
+    key = f"{provider}:{model}"
+    now = time.time()
+    with _lock:
+        try:
+            with open(BUDGET_PATH) as f:
+                buckets = json.load(f)
+        except Exception:  # noqa: BLE001
+            buckets = {}
+        b = buckets.get(key, {})
+        req = [t for t in b.get("req", []) if now - t < 86_400]
+        tok = [e for e in b.get("tok", []) if now - e[0] < 60]
+        if lim["rpm"] and sum(1 for t in req if now - t < 60) >= lim["rpm"]:
+            b["req"], b["tok"] = req, tok
+            buckets[key] = b
+            _save_budget(buckets)
+            return False, "rpm"
+        if lim["rpd"] and len(req) >= lim["rpd"]:
+            b["req"], b["tok"] = req, tok
+            buckets[key] = b
+            _save_budget(buckets)
+            return False, "rpd"
+        if lim["tpm"]:
+            if b.get("hdr_reset", 0) > now and b.get("hdr_remaining") is not None:
+                remaining = b["hdr_remaining"]  # trust the live header while fresh
+            else:
+                remaining = lim["tpm"] - sum(e[1] for e in tok)
+            if est_tokens > remaining:
+                b["req"], b["tok"] = req, tok
+                buckets[key] = b
+                _save_budget(buckets)
+                return False, "tpm"
+        if commit:
+            req.append(now)
+            tok.append([now, est_tokens])
+        b["req"], b["tok"] = req, tok
+        buckets[key] = b
+        _save_budget(buckets)
+        return True, "ok"
+
+
+def _update_budget_from_headers(provider: str, model: str, headers: dict[str, Any]) -> None:
+    """Correct the local budget from a real response's rate-limit headers."""
+    rem = headers.get("x-ratelimit-remaining-tokens")
+    reset = headers.get("x-ratelimit-reset-tokens")
+    if rem is None and reset is None:
+        return
+    key = f"{provider}:{model}"
+    now = time.time()
+    with _lock:
+        try:
+            with open(BUDGET_PATH) as f:
+                buckets = json.load(f)
+        except Exception:  # noqa: BLE001
+            buckets = {}
+        b = buckets.get(key, {})
+        try:
+            if rem is not None:
+                b["hdr_remaining"] = int(float(rem))
+        except (TypeError, ValueError):
+            pass
+        secs = _parse_reset(reset)
+        if secs is not None:
+            b["hdr_reset"] = now + secs
+        buckets[key] = b
+        _save_budget(buckets)
+
+
+def _prep_call(prov_cfg: dict[str, Any], model: str, messages: list[dict],
+               mt: int) -> tuple[list[dict], int, int]:
+    """Fit a call inside the provider/model TPM: cap draft INPUT to the provider's
+    draft_input_cap_tokens (Groq ~3.5K, leaving output headroom) and clamp output
+    max_tokens so input+output stays under TPM. Returns (messages, mt, est_total)."""
+    cap_in = prov_cfg.get("draft_input_cap_tokens")
+    msgs = _cap_messages(messages, cap_in) if cap_in else messages
+    tpm = (prov_cfg.get("model_tpm") or {}).get(model, prov_cfg.get("tpm"))
+    mt2 = mt
+    if tpm:
+        headroom = tpm - _est_tokens(msgs) - 256  # margin for tokenizer slack
+        mt2 = max(256, min(mt, headroom)) if headroom > 256 else 256
+    return msgs, mt2, _est_tokens(msgs) + mt2
+
+
+def _cap_messages(messages: list[dict], cap_tokens: int) -> list[dict]:
+    if _est_tokens(messages) <= cap_tokens:
+        return messages
+    out = [dict(m) for m in messages]
+    overflow_chars = (_est_tokens(messages) - cap_tokens) * CHARS_PER_TOKEN
+    for m in reversed(out):  # trim the tail of the last/largest user message
+        if m.get("role") == "user" and m.get("content"):
+            c = str(m["content"])
+            keep = max(0, len(c) - overflow_chars)
+            m["content"] = c[:keep] + "\n[...brief truncated to fit provider TPM...]"
+            break
+    return out
+
+
 # ── the single-call primitive (the seam the smoke test stubs) ─────────────────
 def _post_chat(base_url: str, api_key: str, model: str, messages: list[dict],
-               max_tokens: int) -> dict[str, Any]:
+               max_tokens: int) -> tuple[dict[str, Any], dict[str, str]]:
+    """Returns (json_body, response_headers). Headers feed the live TPM budget."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -177,7 +290,7 @@ def _post_chat(base_url: str, api_key: str, model: str, messages: list[dict],
         resp = client.post(f"{base_url.rstrip('/')}/chat/completions",
                            json=payload, headers=headers)
         resp.raise_for_status()
-        return resp.json()
+        return resp.json(), {k.lower(): v for k, v in resp.headers.items()}
 
 
 def _price(prov_cfg: dict[str, Any], role: str) -> dict[str, float]:
@@ -245,8 +358,16 @@ def run_role(role: str, messages: list[dict] | None = None, *, prompt: str | Non
                 continue
         model = _model_for(prov, pid, role)
         key = env.get(prov.get("env_key_name", ""), "")
+        # PRE-FLIGHT TPM/RPM/RPD: fit the brief, then skip (not 429) if over budget.
+        msgs, mt_eff, est = _prep_call(prov, model, messages, mt)
+        ok_b, why = _budget_check(pid, model, prov, est, commit=True)
+        if not ok_b:
+            attempts.append({"provider": pid, "skipped": f"{why}_exhausted"})
+            _trace("rung_fell", role=role, frm=pid, to="(next)", reason=f"{why} budget exhausted")
+            continue
         try:
-            data = _post_chat(prov["base_url"], key, model, messages, mt)
+            data, hdrs = _post_chat(prov["base_url"], key, model, msgs, mt_eff)
+            _update_budget_from_headers(pid, model, hdrs)
             content = data.get("choices", [{}])[0].get("message", {}).get("content")
             usage = data.get("usage", {}) or {}
             if content is None:  # reasoning models can return empty content if budget burned
@@ -276,7 +397,8 @@ def _draft_one(entry: dict[str, str], prov: dict[str, Any], messages: list[dict]
     pid, model = entry["provider"], entry["model"]
     key = env.get(prov.get("env_key_name", ""), "")
     try:
-        data = _post_chat(prov["base_url"], key, model, messages, mt)
+        data, hdrs = _post_chat(prov["base_url"], key, model, messages, mt)
+        _update_budget_from_headers(pid, model, hdrs)
         content = data.get("choices", [{}])[0].get("message", {}).get("content")
         usage = data.get("usage", {}) or {}
         if content is None:
@@ -306,8 +428,11 @@ def draft_fanout(messages: list[dict] | None = None, *, prompt: str | None = Non
     present = resolver.resolve_pool(cfg["draft_pool"], providers, env)
     cap_n = int(n or caps.get("draft_max_n", 5))
 
-    # budget + USD-cap gate (paid anchor obeys the cap; free members obey RPM/RPD)
-    runnable: list[dict[str, str]] = []
+    # PRE-FLIGHT gate per entry (paid anchor obeys the USD cap; free members obey
+    # per-MODEL TPM/RPM/RPD). Each entry's brief is fitted to the provider FIRST
+    # (Groq input capped ~3.5K), then we skip — rather than 429 — if still over TPM.
+    mt = max_tokens or MAX_TOKENS
+    runnable: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     ledger = _load_ledger()
     usd_blocked = _cap_blocked(caps, ledger)
@@ -315,13 +440,16 @@ def draft_fanout(messages: list[dict] | None = None, *, prompt: str | None = Non
         if len(runnable) >= cap_n:
             break
         prov = providers[entry["provider"]]
+        model = entry["model"]
         if not _is_free(prov, "draft") and usd_blocked:
             skipped.append({**entry, "skipped": "usd_cap"})
             continue
-        if not _budget_allows(entry["provider"], prov, commit=True):
-            skipped.append({**entry, "skipped": "rpm_rpd_exhausted"})
+        msgs, mt_eff, est = _prep_call(prov, model, messages, mt)
+        ok_b, why = _budget_check(entry["provider"], model, prov, est, commit=True)
+        if not ok_b:
+            skipped.append({**entry, "skipped": f"{why}_exhausted"})
             continue
-        runnable.append(entry)
+        runnable.append({"entry": entry, "prov": prov, "msgs": msgs, "mt": mt_eff})
 
     if not runnable:
         _trace("draft_fanout", n_present=len(present), n_runnable=0, degraded_local=True)
@@ -329,11 +457,10 @@ def draft_fanout(messages: list[dict] | None = None, *, prompt: str | None = Non
                 "n_present": len(present),
                 "reason": "no pool member within budget -> degrade to N=1-local"}
 
-    mt = max_tokens or MAX_TOKENS
     candidates: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(runnable)) as ex:
-        futs = {ex.submit(_draft_one, e, providers[e["provider"]], messages, mt, env): e
-                for e in runnable}
+        futs = [ex.submit(_draft_one, r["entry"], r["prov"], r["msgs"], r["mt"], env)
+                for r in runnable]
         for fut in concurrent.futures.as_completed(futs):
             candidates.append(fut.result())
 

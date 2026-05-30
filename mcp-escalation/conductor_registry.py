@@ -86,22 +86,33 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "price": {"synth": {"in": 0.60, "out": 2.50}},
     },
     # ── free, US — steer fallbacks + the parallel_draft pool ──────────────────
-    "cerebras": {  # free preview; rate-limited; can change.
+    "cerebras": {  # free preview; the PREFERRED free draft source (30K TPM, fast).
         "base_url": "https://api.cerebras.ai/v1",
         "env_key_name": "CEREBRAS_API_KEY",
         "openai_compatible": True,
         "models": {"steer": "zai-glm-4.7", "synth": "zai-glm-4.7", "draft": "zai-glm-4.7"},
         "max_ctx": 64_000, "rpm": 5, "rpd": 2_400, "tpd": 1_000_000,
+        # TPM is the binding free-tier limit. Cerebras' ~30K TPM comfortably fits a
+        # full compact draft brief, so no input cap is needed here.
+        "tpm": 30_000, "draft_input_cap_tokens": None,
         "billing_region": "US", "trains_on_data": False,
         "price": {"steer": {"in": 0.0, "out": 0.0}, "draft": {"in": 0.0, "out": 0.0}},
     },
-    "groq": {  # free; faster, looser limits than Cerebras.
+    "groq": {  # free; SECONDARY draft source — extremely tight per-MODEL TPM.
         "base_url": "https://api.groq.com/openai/v1",
         "env_key_name": "GROQ_API_KEY",
         "openai_compatible": True,
         "models": {"steer": "qwen/qwen3-32b", "synth": "openai/gpt-oss-120b",
                    "draft": "openai/gpt-oss-120b"},
         "max_ctx": 131_072, "rpm": 30, "rpd": 1_000, "tpd": None,
+        # Groq free-tier TPM is per-MODEL and tiny: a single 6K-token brief can eat
+        # the whole per-minute budget. Track per model; cap draft INPUT at ~3.5K so
+        # output fits inside the TPM window. Verified live: 429 after one full-brief
+        # call, 413 Payload-Too-Large on qwen3-32b.
+        "tpm": 8_000,
+        "model_tpm": {"openai/gpt-oss-120b": 8_000, "qwen/qwen3-32b": 6_000,
+                      "meta-llama/llama-4-scout-17b-16e-instruct": 8_000},
+        "draft_input_cap_tokens": 3_500,
         "billing_region": "US", "trains_on_data": False,
         "price": {"steer": {"in": 0.0, "out": 0.0}, "draft": {"in": 0.0, "out": 0.0}},
     },

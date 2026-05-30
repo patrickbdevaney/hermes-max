@@ -55,12 +55,12 @@ def _fail(m: str) -> None:
 
 
 def _fake_post_factory(fail_substr: str | None = None):
-    """Canned OpenAI-style response; optionally raise for a base_url substring."""
+    """Canned (json, headers) response; optionally raise for a base_url substring."""
     def fake(base_url, api_key, model, messages, max_tokens):
         if fail_substr and fail_substr in base_url:
             raise RuntimeError(f"stub failure for {base_url}")
-        return {"choices": [{"message": {"content": f"[stub:{model}] ok"}}],
-                "usage": {"prompt_tokens": 200, "completion_tokens": 100}}
+        return ({"choices": [{"message": {"content": f"[stub:{model}] ok"}}],
+                 "usage": {"prompt_tokens": 200, "completion_tokens": 100}}, {})
     return fake
 
 
@@ -148,26 +148,47 @@ def part_a() -> None:
     _ok("USD cap reached -> paid synth rung skipped -> proceed_local")
     cc._save_ledger(cc._blank_ledger())  # reset spend
 
-    # 7. parallel_draft fan-out across present free keys + RPM budget respected
+    # 7. parallel_draft fan-out across present free keys + per-MODEL TPM respected.
+    #    Pre-flight: exhaust Groq's per-model TPM (via a fresh live-header snapshot
+    #    of 0 remaining) so each Groq model is skipped BEFORE firing (not via 429).
     cc._post_chat = _fake_post_factory()
     os.environ.pop("DEEPINFRA_API_KEY", None)  # pool = free only
     os.environ["CEREBRAS_API_KEY"] = "test"
     os.environ["GROQ_API_KEY"] = "test"
-    # Pre-exhaust Groq's per-minute budget (rpm=30) so it is skipped cleanly.
     now = time.time()
-    cc._save_budget({"groq": [now] * 30})
+    groq_models = ["openai/gpt-oss-120b", "qwen/qwen3-32b",
+                   "meta-llama/llama-4-scout-17b-16e-instruct"]
+    cc._save_budget({f"groq:{m}": {"req": [], "tok": [], "hdr_remaining": 0,
+                                   "hdr_reset": now + 60} for m in groq_models})
     res = cc.draft_fanout(prompt="implement fn so tests pass", n=5)
     provs_passed = {c["provider"] for c in res["candidates"] if c["ok"]}
-    skipped_provs = {s["provider"] for s in res["skipped"]}
+    groq_skips = [s for s in res["skipped"] if s["provider"] == "groq"]
     if not res["ok"] or "cerebras" not in provs_passed:
         _fail(f"fan-out should return cerebras candidates: {res}")
-    if "groq" not in skipped_provs or not all(
-            s["skipped"] == "rpm_rpd_exhausted" for s in res["skipped"] if s["provider"] == "groq"):
-        _fail(f"exhausted Groq should be skipped as rpm_rpd_exhausted: {res['skipped']}")
+    if not groq_skips or not all(s["skipped"] == "tpm_exhausted" for s in groq_skips):
+        _fail(f"TPM-exhausted Groq models should be skipped as tpm_exhausted: {res['skipped']}")
     if "groq" in provs_passed:
-        _fail("an exhausted provider must not be drafted from")
+        _fail("a TPM-exhausted provider must not be drafted from")
     _ok(f"draft fan-out: {res['n_passed']} candidates from {provs_passed}; "
-        f"Groq skipped (rpm budget). n_present={res['n_present']}")
+        f"Groq skipped (per-model TPM, pre-flight). n_present={res['n_present']}")
+
+    # 7a. brief-size cap: a ~5K-token brief to Groq is capped to ~3.5K input.
+    big = "x " * 10000  # 20000 chars / 4 = ~5000 tokens -> over Groq's 3.5K cap
+    msgs = [{"role": "user", "content": big}]
+    prov_groq = reg.PROVIDERS["groq"]
+    capped, mt_eff, est = cc._prep_call(prov_groq, "qwen/qwen3-32b", msgs, 2048)
+    if cc._est_tokens(capped) > prov_groq["draft_input_cap_tokens"] + 50:
+        _fail(f"Groq brief not capped: {cc._est_tokens(capped)} tokens")
+    if est > prov_groq["model_tpm"]["qwen/qwen3-32b"]:
+        _fail(f"capped call still exceeds qwen3-32b TPM: est={est}")
+    _ok(f"Groq brief capped: input {cc._est_tokens(capped)}t, output<= {mt_eff}t, est total {est}t "
+        f"(under {prov_groq['model_tpm']['qwen/qwen3-32b']} TPM)")
+
+    # 7b. reset header parsing tolerates Groq's duration formats.
+    assert abs((cc._parse_reset("1m30s") or 0) - 90.0) < 0.01
+    assert abs((cc._parse_reset("6.5s") or 0) - 6.5) < 0.01
+    assert abs((cc._parse_reset("12") or 0) - 12.0) < 0.01
+    _ok("reset-header parser handles '1m30s' / '6.5s' / bare seconds")
 
     # 7b. zero keys -> draft degrades to N=1-local signal
     os.environ.pop("CEREBRAS_API_KEY", None)
