@@ -30,6 +30,7 @@ import extract
 import rank
 import kg_provenance
 import verify_gate
+import banyan
 
 PORT = int(os.environ.get("MCP_RESEARCH_PORT", "9110"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
@@ -60,7 +61,7 @@ async def health(_: Request) -> JSONResponse:
                          **research_core.stats(), "sources": sources.source_stats(),
                          "corpus": corpus.corpus_stats(), "extract": extract.extract_stats(),
                          "rank": rank.rank_stats(), "kg_provenance": kg_provenance.kg_provenance_stats(),
-                         "verify_gate": verify_gate.verify_gate_stats()})
+                         "verify_gate": verify_gate.verify_gate_stats(), "banyan": banyan.banyan_stats()})
 
 
 @mcp.tool()
@@ -341,6 +342,62 @@ def decompose_question(question: str, hyde: bool = False) -> dict:
     qualifiers != web), optional HyDE. The searches then fuse via RRF. Degrades to
     deterministic variants with no model."""
     return verify_gate.decompose_question(question, hyde)
+
+
+# ── Stage 6: Banyan content-evolution (CONTENT only — never machinery) ────────
+@mcp.tool()
+def banyan_select(c: float = 1.414) -> dict:
+    """Pick the next research direction for an unattended cycle. A pending human
+    DIRECTIVE preempts (operator steer); else UCB1 explore-exploit over non-saturated
+    namespaces (unvisited get an infinite exploration bonus). Returns mode + chosen
+    namespace + UCB scores. Selection only — the agent runs the research."""
+    return banyan.banyan_select(c)
+
+
+@mcp.tool()
+def banyan_update(namespace: str, utility_sample: float, gain: float) -> dict:
+    """After a research/skill task: visit_count++, running utility (0.8 history /
+    0.2 new), append marginal gain (last 20). Drives the explore-exploit balance."""
+    return banyan.banyan_update(namespace, utility_sample, gain)
+
+
+@mcp.tool()
+def banyan_detect_saturation(namespace: str, new_texts: list | None = None) -> dict:
+    """Two-signal saturation: embedding-drift (new research too similar to the
+    corpus centroid => retreading) + marginal-gain decline. On saturation: flag,
+    STOP investing, and SURFACE TO THE OPERATOR (never silently churn)."""
+    return banyan.detect_saturation(namespace, new_texts)
+
+
+@mcp.tool()
+def banyan_generate_standing_tasks(namespace: str) -> dict:
+    """When a namespace queue empties, generate standing RESEARCH tasks (content)
+    so unattended cycles never idle (e.g. 'what's new in {ns} since {last_ingest}')."""
+    return banyan.generate_standing_tasks(namespace)
+
+
+@mcp.tool()
+def banyan_set_directive(text: str, namespace: str | None = None) -> dict:
+    """Operator drops a directive that preempts UCB1 on the next cycle (supervised
+    steer). Absent a directive, the loop self-directs via Banyan (unattended explore)."""
+    return banyan.set_directive(text, namespace)
+
+
+@mcp.tool()
+def banyan_next_action() -> dict:
+    """Top of an unattended cycle: directive interrupt OR Banyan self-direction,
+    with the chosen namespace's next standing task. Selection only — never runs
+    research and never touches machinery."""
+    return banyan.next_action()
+
+
+@mcp.tool()
+def banyan_write_skill(name: str, content: str, tasks_done: int = 0,
+                       days_active: int = 0, skills_count: int = 0) -> dict:
+    """Write/refine a markdown SKILL into the skill library (CONTENT). Gated by the
+    maturity check (SELF_IMPROVEMENT_ENABLED + 200 tasks / 30 days / 50 skills) AND
+    the machinery guard — a non-.md / machinery path is refused. Never edits tool code."""
+    return banyan.write_skill(name, content, tasks_done, days_active, skills_count)
 
 
 if __name__ == "__main__":

@@ -172,6 +172,41 @@ an unsupported claim, contradiction surfaced with both citations, KG edges carry
 source_id + temporal validity, invented relation rejected, supersede stamps
 `valid_until`, decomposition + per-source syntax + deterministic degrade.
 
+## Banyan content-evolution — long-horizon autonomy (research_engine Stage 6)
+
+> **THE HARD LINE (enforced in code):** the unattended loop may evolve **CONTENT** —
+> which research directions to explore, the RAG corpus, the KG, and the skill
+> library — but **NEVER MACHINERY** (no `mcp-*` server code, Hermes core, router, or
+> tool `.py`/config). `banyan.is_machinery_path` + `_guard_content_write` refuse any
+> write outside the content whitelist, and `smoke_banyan.py` asserts a full cycle
+> leaves every `.py` byte-identical. Machinery changes require a human Claude Code
+> session — never the loop.
+
+- **`banyan_select`** — UCB1 explore-exploit over research namespaces
+  (`utility*priority + c*sqrt(ln(N)/n_i)`); unvisited namespaces get an infinite
+  exploration bonus (visited despite lower utility). A pending operator **directive
+  preempts** selection (`banyan_set_directive`) — supervised-steer OR unattended-
+  explore, same machinery.
+- **`banyan_update`** — `visit_count++`, running utility (0.8 history / 0.2 new),
+  marginal-gain history (last 20).
+- **`banyan_detect_saturation`** — two signals: embedding-drift (new research too
+  similar to the namespace corpus centroid ⇒ retreading) and marginal-gain decline.
+  On saturation: flag, **stop investing, and surface to the operator** (sovereign
+  `surfaced.jsonl` log; Telegram optional) — never silently churn.
+- **`banyan_generate_standing_tasks`** — empty queue ⇒ standing research tasks
+  ("what's new in {ns} since {last_ingest}") so cycles never idle.
+- **`banyan_write_skill`** — refine markdown SKILLS at runtime (content), gated by
+  the maturity check (`SELF_IMPROVEMENT_ENABLED` + 200 tasks / 30 days / 50 skills)
+  AND the machinery guard (a non-`.md` / machinery path is refused).
+- **`banyan_next_action`** — one unattended cycle: directive interrupt OR Banyan
+  self-direction + the chosen namespace's next standing task. Selection only — the
+  agent runs the research; this module never touches machinery.
+
+Asserted in `smoke_banyan.py`: UCB1 explores the underexplored then swings to
+exploitation, utility/gain math, both saturation signals + operator surfacing,
+directive preemption, standing-task generation, gated skill writes, and the
+**no-machinery-write** invariant (guard + full-cycle hash check).
+
 ## Backends (all local; each degrades gracefully)
 
 | Env var | Default | Down ⇒ |
@@ -202,6 +237,7 @@ MCP_RESEARCH_PORT=9110 .venv/bin/python server.py
 .venv/bin/python smoke_corpus.py   # Stage 3: on-disk corpus, provenance, lazy distill, resolve
 .venv/bin/python smoke_extract.py  # Stage 4: extraction ladder, dedup, authority, citation edges
 .venv/bin/python smoke_verify.py   # Stage 5: KG provenance + decomposed verification gate
+.venv/bin/python smoke_banyan.py   # Stage 6: UCB1, saturation, directive, skills, NO-machinery
 bash ../scripts/eval-research.sh    # honest quality number on a small fixed set
 ```
 
