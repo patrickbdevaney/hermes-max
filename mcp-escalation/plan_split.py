@@ -147,18 +147,34 @@ def _has_prose(body: str) -> bool:
     return False
 
 
-def _split_sections(text: str) -> list[tuple[str, str]]:
-    """Return [(title, body), ...] for every markdown header in `text`.
-    Mirrors brief_assemble._parse_plan's split (kept local — its return shape differs)."""
+def _split_sections(text: str) -> list[tuple[int, str, str]]:
+    """Return [(level, title, body), ...] for every markdown header in `text`,
+    where level is the header depth (## -> 2). Mirrors brief_assemble._parse_plan's
+    split (kept local — its return shape differs)."""
     blocks = _HEADER_SPLIT.split(text)
-    out: list[tuple[str, str]] = []
+    out: list[tuple[int, str, str]] = []
     i = 1
     while i + 1 < len(blocks):
+        level = len(blocks[i] or "")
         title = (blocks[i + 1] or "").strip()
         body = (blocks[i + 2] if i + 2 < len(blocks) else "").strip()
-        out.append((title, body))
+        out.append((level, title, body))
         i += 3
     return out
+
+
+def _block_with_descendants(sections: list[tuple[int, str, str]], idx: int) -> str:
+    """The full text owned by section `idx`: its own body PLUS every following
+    DEEPER-level section's body, up to the next sibling-or-higher header. This makes
+    a `## FILE SPEC:` block include its `### Class:` / `### Method` sub-sections — a
+    strong planner naturally nests, and the signatures/prose live in those children."""
+    level, _, body = sections[idx]
+    parts = [body]
+    for sub_level, _, sub_body in sections[idx + 1:]:
+        if sub_level <= level:
+            break
+        parts.append(sub_body)
+    return "\n".join(p for p in parts if p)
 
 
 def plan_lint(plan_path: str = "", plan_text: str = "", repo: str | None = None,
@@ -198,11 +214,11 @@ def plan_lint(plan_path: str = "", plan_text: str = "", repo: str | None = None,
             return res
 
     sections = _split_sections(text)
-    titles = [t for t, _ in sections]
+    titles = [t for _, t, _ in sections]
     missing: list[str] = []
 
     # WORKING_DIRECTORY present AND absolute
-    wd_body = next((b for t, b in sections if "working_directory" in t.lower()), None)
+    wd_body = next((b for _, t, b in sections if "working_directory" in t.lower()), None)
     if wd_body is None:
         missing.append("WORKING_DIRECTORY section missing")
     else:
@@ -213,7 +229,7 @@ def plan_lint(plan_path: str = "", plan_text: str = "", repo: str | None = None,
             missing.append(f"WORKING_DIRECTORY is not an absolute path: '{wd}'")
 
     # FILES section + a FILE SPEC for every file it lists
-    files_body = next((b for t, b in sections if t.strip().lower() == "files"
+    files_body = next((b for _, t, b in sections if t.strip().lower() == "files"
                        or t.strip().lower().startswith("files")), None)
     if files_body is None:
         missing.append("FILES section missing")
@@ -227,23 +243,26 @@ def plan_lint(plan_path: str = "", plan_text: str = "", repo: str | None = None,
         if not listed_files:
             missing.append("FILES section lists no files")
 
-    spec_titles = [t for t in titles if "file spec" in t.lower()]
+    spec_titles = [t for _, t, _ in sections if "file spec" in t.lower()]
     spec_blob = " ".join(spec_titles).lower()
     for f in listed_files:
         if f.lower() not in spec_blob:
             missing.append(f"no FILE SPEC for listed file '{f}'")
 
-    # every FILE SPEC has a signature-shaped line AND prose
-    for t, b in sections:
+    # every FILE SPEC has a signature-shaped line AND prose — checked over the FILE
+    # SPEC block INCLUDING its nested sub-sections (### Class:, ### Method, …), since
+    # a strong planner naturally nests the signatures/prose under sub-headers.
+    for idx, (_, t, _b) in enumerate(sections):
         if "file spec" not in t.lower():
             continue
-        if not _SIG_LINE.search(b):
+        blob = _block_with_descendants(sections, idx)
+        if not _SIG_LINE.search(blob):
             missing.append(f"FILE SPEC '{t}' has no function/class signature")
-        if not _has_prose(b):
+        if not _has_prose(blob):
             missing.append(f"FILE SPEC '{t}' has no prose describing the approach")
 
     # concrete DONE_CONDITION
-    done_body = next((b for t, b in sections if "done_condition" in t.lower()
+    done_body = next((b for _, t, b in sections if "done_condition" in t.lower()
                       or "definition of done" in t.lower()), None)
     if done_body is None:
         missing.append("DONE_CONDITION section missing")

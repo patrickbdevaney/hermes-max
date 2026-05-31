@@ -200,3 +200,11 @@ if __name__ == "__main__":
     part_a()
     part_b()
     print("mcp-escalation smoke test PASSED")
+
+    # plan/execute split (CLAUDE_plan_execute.md) — covered here so `hm smoke` (which
+    # runs each server's smoke_test.py) exercises the plan/execute tools too. Imported
+    # last so its import-time env scrubbing can't perturb part_a/part_b above.
+    import smoke_planexec
+
+    smoke_planexec.run_all()
+    print("plan/execute smoke test PASSED")
