@@ -76,6 +76,43 @@ def part_a() -> None:
             _fail(f"layer {name} errored instead of skipping cleanly: {deep_names}")
     _ok(f"deep_verify(hard) layers {deep_names}; warnings={len(hard['warnings'])} (advisory, gate green)")
 
+    # quality_check (plan/execute Stage 4): advisory texture pass, never a gate
+    import quality_core
+    import tempfile
+
+    gap = Path(tempfile.mkdtemp(prefix="qual-")) / "gap.py"
+    gap.write_text(
+        "import os\n\n\n"
+        "def bad_fn(x):\n"
+        "    # TODO: handle negatives\n"
+        "    try:\n"
+        "        return 1 / x\n"
+        "    except:\n"
+        "        return 0\n\n\n"
+        "class Thing:\n"
+        "    def public_method(self, y):\n"
+        "        return y\n"
+    )
+    q = quality_core.quality_check(str(gap))
+    if q.get("status") != "advisory":
+        _fail(f"quality_check must be advisory: {q}")
+    if not (q["annotations_missing"] and q["docstrings_missing"]
+            and q["placeholders"] and q["bare_excepts"]):
+        _fail(f"quality_check should flag all four buckets on the gap file: {q}")
+    if q["clean"]:
+        _fail(f"gap file should not be clean: {q}")
+    _ok(f"quality_check flags all four buckets (advisory): {q['summary']}")
+
+    clean = Path(gap.parent) / "clean.py"
+    clean.write_text('"""A clean module."""\n\n\n'
+                     "def add(a: int, b: int) -> int:\n"
+                     '    """Return the sum of a and b."""\n'
+                     "    return a + b\n")
+    qc = quality_core.quality_check(str(clean))
+    if not qc["clean"] or qc["status"] != "advisory":
+        _fail(f"clean file should be quality-clean + advisory: {qc}")
+    _ok("quality_check: a clean file reports clean=True (advisory, gate untouched)")
+
 
 def _wait_health(port: int, timeout: float = 30.0) -> None:
     url = f"http://127.0.0.1:{port}/health"
@@ -104,8 +141,8 @@ async def _mcp_check(port: int) -> None:
             await session.initialize()
             tools = await session.list_tools()
             names = {t.name for t in tools.tools}
-            if not {"verify", "quick_check", "deep_verify"}.issubset(names):
-                _fail(f"verify/quick_check/deep_verify tools not advertised; got {names}")
+            if not {"verify", "quick_check", "deep_verify", "quality_check"}.issubset(names):
+                _fail(f"verify/quick_check/deep_verify/quality_check tools not advertised; got {names}")
             _ok(f"tools advertised: {sorted(names)}")
 
             res = await session.call_tool("verify", {"path": str(GOOD), "language": "python"})

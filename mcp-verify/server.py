@@ -25,6 +25,11 @@ try:
 except Exception:  # noqa: BLE001
     enhanced_verify = None  # type: ignore
 
+try:
+    import quality_core  # plan/execute Stage 4: advisory senior-review texture checks
+except Exception:  # noqa: BLE001
+    quality_core = None  # type: ignore
+
 # Opt-in: property generation adds wall time and the 35B can hallucinate properties,
 # so the primary verify() gate runs it only when explicitly enabled.
 ENABLE_PROPERTY_TEST = os.environ.get("ENABLE_PROPERTY_TEST", "false").strip().lower() in ("1", "true", "yes")
@@ -177,6 +182,25 @@ def deep_verify(path: str, language: str = "auto", difficulty: str = "medium",
     mutation testing on trivial changes.
     """
     return verify_core.deep_verify(path, language, difficulty, layers)
+
+
+@mcp.tool()
+@_threaded
+def quality_check(path: str) -> dict:
+    """ADVISORY senior-review texture pass over a Python file — NOT a hard gate.
+
+    Flags what the deterministic verify() gate does not: public functions/methods
+    missing type annotations or docstrings, leftover TODO/FIXME/placeholder/stub
+    markers, and bare `except:` clauses. Returns {ok, status:"advisory",
+    annotations_missing, docstrings_missing, placeholders, bare_excepts, clean,
+    summary}. It NEVER fails a build — keep verify()/deep_verify() as the hard
+    pass/fail; quality_check raises output toward senior-review standard. Use on a
+    file you just implemented (and the planner should specify these in the plan
+    contract). Never raises; emits a quality_check span. Pairs with the
+    workflow-quality-bar skill."""
+    if quality_core is None:
+        return {"ok": False, "reason": "quality_core unavailable"}
+    return quality_core.quality_check(path)
 
 
 if __name__ == "__main__":
