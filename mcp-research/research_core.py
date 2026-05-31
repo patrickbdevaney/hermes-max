@@ -780,6 +780,69 @@ def classify_research_need(question: str) -> dict[str, Any]:
     return {"class": "synthesis", "signals": [], "block": False}
 
 
+# ── M-Stage 5: CitationAgent pass ─────────────────────────────────────────────
+# Anthropic's multi-agent research system runs a final CitationAgent after the
+# research loop: it checks each claim in the report against the source documents and
+# flags claims not directly supported. Run it ONCE after synthesis. Route to the
+# conductor's steer tier (cheap cloud, better attribution) when available; fall back
+# to the local model. Conservative: mark a claim unsupported if the source is ambiguous.
+ESCALATION_MCP_URL = os.environ.get(
+    "ESCALATION_MCP_URL", f"http://127.0.0.1:{os.environ.get('MCP_ESCALATION_PORT', '9105')}/mcp")
+CITATION_VERIFY = os.environ.get("RESEARCH_CITATION_VERIFY", "1") not in ("0", "false", "False")
+
+_CITE_SYS = (
+    "You are a citation auditor. Given a synthesized research REPORT and the SOURCE "
+    "passages it was built from, check EACH factual claim in the report against the "
+    "sources. Be CONSERVATIVE: mark a claim unsupported if no source directly and "
+    "unambiguously supports it. Return STRICT JSON only: {\"supported_claims\": <int>, "
+    "\"unsupported_claims\": [\"<claim text>\", ...], \"source_attribution\": "
+    "{\"<claim text>\": \"<source url or id>\"}}. No prose outside the JSON."
+)
+
+
+def _citation_verify(report_md: str, sources: list[dict]) -> dict[str, Any]:
+    """Audit the report's claims against the sources. Tries the conductor steer tier
+    first (better attribution), falls back to the local model. Returns
+    {supported_claims, unsupported_claims, source_attribution, sources_checked,
+    backend}. Best-effort: on any failure returns an empty/neutral result so the
+    research run never fails on the citation pass."""
+    if not report_md or not sources:
+        return {"supported_claims": 0, "unsupported_claims": [], "source_attribution": {},
+                "sources_checked": 0, "backend": "skipped"}
+    catalog = "\n\n".join(
+        f"[{i + 1}] {s.get('url','')} :: {(s.get('markdown') or s.get('title') or s.get('snippet',''))[:1500]}"
+        for i, s in enumerate(sources))[:18000]
+    user = f"REPORT:\n{report_md[:12000]}\n\nSOURCES:\n{catalog}"
+    backend = "local"
+    raw = None
+    # 1) conductor steer (cheap cloud) — better attribution than the local 35B
+    try:
+        r = _mcp_call(ESCALATION_MCP_URL, "conductor_steer",
+                      {"prompt": f"{_CITE_SYS}\n\n{user}", "max_tokens": 1500})
+        res = (r.get("result") or {}) if isinstance(r, dict) else {}
+        if r.get("ok") and isinstance(res, dict) and not res.get("proceed_local") and res.get("content"):
+            raw, backend = res["content"], "conductor_steer"
+    except Exception:  # noqa: BLE001
+        raw = None
+    # 2) local fallback
+    if not raw:
+        raw = _llm([{"role": "system", "content": _CITE_SYS},
+                    {"role": "user", "content": user}], temperature=0)
+        backend = "local"
+    parsed = _json_from_llm(raw)
+    if not isinstance(parsed, dict):
+        return {"supported_claims": 0, "unsupported_claims": [], "source_attribution": {},
+                "sources_checked": len(sources), "backend": backend, "parse_failed": True}
+    unsupported = [str(c) for c in (parsed.get("unsupported_claims") or []) if str(c).strip()]
+    attribution = parsed.get("source_attribution") if isinstance(parsed.get("source_attribution"), dict) else {}
+    try:
+        supported = int(parsed.get("supported_claims") or 0)
+    except Exception:  # noqa: BLE001
+        supported = 0
+    return {"supported_claims": supported, "unsupported_claims": unsupported,
+            "source_attribution": attribution, "sources_checked": len(sources), "backend": backend}
+
+
 # ── ORCHESTRATOR: deep_research ───────────────────────────────────────────────
 def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
                   max_total_sources: int = MAX_TOTAL_SOURCES,
@@ -943,6 +1006,22 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
     verified = verify_claims(claims)["verified"]
     synth = synthesize(question, verified, plan)
 
+    # ── CitationAgent pass (M-Stage 5): audit the report's claims vs the sources ─
+    citation = {"supported_claims": 0, "unsupported_claims": [], "source_attribution": {},
+                "sources_checked": 0, "backend": "off"}
+    if CITATION_VERIFY:
+        citation = _citation_verify(synth.get("report_md", ""), all_sources)
+        unc = citation.get("unsupported_claims") or []
+        otel_emit.record("citation_verified", {
+            "tool": "deep_research", "supported_claims": citation.get("supported_claims"),
+            "unsupported_count": len(unc), "sources_checked": citation.get("sources_checked"),
+            "backend": citation.get("backend")})
+        if unc:
+            warn = (f"Warning: {len(unc)} claim(s) in this synthesis are not directly "
+                    f"attributed to a source — treat with caution: "
+                    + "; ".join(c[:80] for c in unc[:5]))
+            synth["gap_note"] = ((synth.get("gap_note", "") + " ") if synth.get("gap_note") else "") + warn
+
     compounded = {"rag_stored": False, "kg_entities": 0}
     if compound and synth.get("report_md"):
         topic = f"research/{plan['slug']}"
@@ -962,6 +1041,8 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
         "claims": len(verified), "actionable": synth.get("actionable"),
         "claims_corroborated": synth.get("claims_corroborated"),
         "unsupported_rate": synth.get("unsupported_rate"),
+        "unsupported_claims": len(citation.get("unsupported_claims") or []),
+        "citation_backend": citation.get("backend"),
         "elapsed_s": elapsed, "stop_reason": stop_reason})
     return {
         "ok": True,
@@ -980,6 +1061,10 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
         # re-runs deep_research on the quality score. Real quality gate = verify on code.
         "actionable": synth.get("actionable", True),
         "gap_note": synth.get("gap_note"),
+        # CitationAgent pass (M-Stage 5): claims audited against the sources
+        "unsupported_claims": citation.get("unsupported_claims", []),
+        "source_attribution": citation.get("source_attribution", {}),
+        "citation_backend": citation.get("backend"),
         "citation_count": synth.get("citation_count"),
         "claims_total": synth.get("claims_total"),
         "claims_corroborated": synth.get("claims_corroborated"),
