@@ -43,3 +43,5 @@ run/
 
 # local scratch / one-off artifacts (machine-specific)
 restore_products.txt
+vendor/
+.serena/

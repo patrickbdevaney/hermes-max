@@ -134,3 +134,12 @@ servers:
     profiles: [gpu_local, lean_cloud]
     requires: []
     degrades_to: pure static analysis (Aider RepoMap, tree-sitter + NetworkX PageRank); no model
+  - name: lsp
+    dir: mcp-lsp
+    port: 9112
+    port_env: MCP_LSP_PORT
+    health: /health
+    register_as: hermes-max-lsp
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: thin wrapper over Serena (oraios/serena); agent falls back to search_code/grep if the language server is down
