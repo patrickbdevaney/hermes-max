@@ -11,14 +11,15 @@ description: >-
 # workflow-deep-research
 
 > **NEVER call `deep_research` more than once per session, under any circumstances.**
-> If the result has `confidence: low` (or `adequate`) that is **NORMAL** — by design
-> claims are effectively single-sourced after the echo-chamber guard dedups
-> overlapping sources, so the score is not a measure of whether you have enough.
-> **Proceed immediately to implementation with whatever synthesis was returned**;
-> the verify gate on your code is the real quality check. **A second `deep_research`
-> call is always wrong** — it just burns wall-clock without changing the result. For
-> any follow-up, use `search_code` / `mcp-docs` (`search_docs` / `research_topic`),
-> never another `deep_research`.
+> The result reports **`actionable: true`** plus a **`gap_note`** (not a confidence
+> score) — `actionable` is true unless the research came back genuinely empty (0
+> sources). Single-sourced/low-corroboration claims are **NORMAL** (the echo-chamber
+> guard dedups overlapping sources). **Proceed immediately to implementation with
+> whatever synthesis was returned and note the `gap_note` items as risks**; the
+> verify gate on your code is the real quality check. **A second `deep_research` call
+> is always wrong** — for any follow-up use `search_code` / `mcp-docs`
+> (`search_docs` / `research_topic`). The server also enforces this: it refuses a
+> reflexive re-fire (corpus-first, exhaustion, budget + cooldown gates).
 
 Use this when the answer is **not reliably in pretraining or the local RAG/KG**:
 a new framework, a recent release, "the current best/most-recommended X", or a

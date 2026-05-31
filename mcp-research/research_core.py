@@ -630,33 +630,55 @@ def synthesize(question: str, verified_findings: list[dict], plan: dict | None =
         synthesized = False
     else:
         synthesized = True
-    # Confidence is an INTERNAL quality metric, never a gate or a signal to the
-    # caller to retry. By design most syntheses score "low": claims are effectively
-    # single-sourced after the echo-chamber guard dedups overlapping sources (the
-    # same fact corroborated once, not N times). The agent was reading caller-facing
-    # confidence="low" as "research insufficient → call deep_research again", which
-    # is always wrong. So the OBSERVABILITY span keeps the honest internal level,
-    # but the CALLER-FACING field is relabelled away from the alarming "low":
-    #   low -> "adequate"  (medium/high pass through unchanged)
-    # The real quality gate is the verify gate on the IMPLEMENTATION, not this score.
-    caller_confidence = "adequate" if confidence == "low" else confidence
-    if confidence == "low" and report and "single-sourced by design" not in report:
-        report += ("\n\n> _Research sufficiency: **adequate**. A low internal "
-                   "confidence is NORMAL and expected — claims are single-sourced by "
-                   "design once the echo-chamber guard dedups overlapping sources. "
-                   "This synthesis is complete and sufficient to act on; validate the "
-                   "work it informs via the implementation's verify gate. Do NOT "
-                   "re-run deep_research._")
-    otel_emit.record("report_synthesized", {"question": question, "citations": len(citations),
-                                            "confidence": confidence, "llm": synthesized})
+    # ── R-Stage 4: GAP ANALYSIS, not confidence ──────────────────────────────
+    # The old confidence=low/high was misread by the agent as "retry". Replace it
+    # with gbrain-style quality metrics + an `actionable` flag + a `gap_note` that
+    # says what's covered and what isn't. A low-corroboration synthesis is STILL
+    # actionable (claims are single-sourced by design after echo-chamber dedup) —
+    # the agent proceeds and notes the gaps, exactly like gbrain's "heads up: the
+    # brain doesn't know X yet". The ONLY non-actionable case is a genuinely
+    # empty/broken result (no sources AND no claims). The agent NEVER retries
+    # deep_research on the quality score; it proceeds, or uses a lighter tool for a
+    # specific follow-up. The real quality gate is the verify gate on the code.
+    claims_total = len(verified_findings)
+    claims_corroborated = sum(1 for f in verified_findings if f.get("status") == "well-supported")
+    claims_single_sourced = sum(1 for f in verified_findings if f.get("status") == "single-sourced")
+    claims_conflicting = sum(1 for f in verified_findings if f.get("status") == "conflicting")
+    citation_count = len(citations)
+    unsupported_rate = (round((claims_single_sourced + claims_conflicting) / claims_total, 3)
+                        if claims_total else 0.0)
+    actionable = bool(report) and (citation_count > 0 or claims_total > 0)
+
+    if not actionable:
+        gap_note = ("NOT actionable — research returned no usable sources or claims "
+                    "(0 citations, 0 claims). Use a lighter targeted tool or proceed "
+                    "from parametric knowledge; do not re-run deep_research.")
+    else:
+        bits = [f"covers {claims_total} claim(s); {claims_corroborated} corroborated "
+                f"(>=2 independent sources), {claims_single_sourced} single-sourced, "
+                f"{claims_conflicting} conflicting; {citation_count} citation(s)"]
+        if gaps:
+            bits.append("not fully corroborated: " + "; ".join(gaps[:5]))
+        bits.append("proceed with implementation and note these as risks; do NOT "
+                    "re-run deep_research — use a lighter tool for any specific follow-up")
+        gap_note = ". ".join(bits)
+
+    if actionable and report and "Research sufficiency" not in report:
+        report += (f"\n\n> _Research sufficiency: **{'actionable' if actionable else 'not actionable'}**. "
+                   f"{gap_note}_")
+    otel_emit.record("report_synthesized", {
+        "question": question, "citations": citation_count, "claims_total": claims_total,
+        "claims_corroborated": claims_corroborated, "unsupported_rate": unsupported_rate,
+        "actionable": actionable, "llm": synthesized})
     return {"ok": True, "question": question, "report_md": report, "synthesized": synthesized,
             "citations": citations,
-            # caller-facing confidence is relabelled (low->adequate); the honest
-            # internal level stays in confidence_internal + the otel span.
-            "confidence": caller_confidence, "confidence_internal": confidence,
-            "gaps": gaps,
-            # always usable regardless of confidence; confidence is metadata only.
-            "actionable": True, "confidence_is_advisory": True}
+            # gap-analysis quality metrics (NOT a retry-triggering confidence)
+            "actionable": actionable, "gap_note": gap_note,
+            "citation_count": citation_count, "claims_total": claims_total,
+            "claims_corroborated": claims_corroborated,
+            "claims_single_sourced": claims_single_sourced,
+            "claims_conflicting": claims_conflicting, "unsupported_rate": unsupported_rate,
+            "gaps": gaps}
 
 
 # ── claim extraction (sources -> candidate claims grouped by support) ─────────
@@ -937,10 +959,9 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
     session_state.record_research(elapsed)
     otel_emit.record("deep_research_done", {
         "question": question, "loops": loops, "sources": len(all_sources),
-        "claims": len(verified),
-        # observability keeps the honest internal level; the caller sees the
-        # relabelled, non-alarming value in the returned dict.
-        "confidence": synth.get("confidence_internal", synth.get("confidence")),
+        "claims": len(verified), "actionable": synth.get("actionable"),
+        "claims_corroborated": synth.get("claims_corroborated"),
+        "unsupported_rate": synth.get("unsupported_rate"),
         "elapsed_s": elapsed, "stop_reason": stop_reason})
     return {
         "ok": True,
@@ -954,12 +975,16 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
         "verified_findings": verified,
         "report_md": synth["report_md"],
         "synthesized": synth["synthesized"],
-        "confidence": synth["confidence"],
-        # confidence is advisory metadata — this result is always usable; a low
-        # score is not a reason to re-run. The verify gate on the implementation is
-        # the real quality check. (See synthesize() for the full rationale.)
+        # GAP ANALYSIS, not confidence (R-Stage 4): this result is actionable unless
+        # genuinely empty/broken; the agent proceeds and notes the gaps, and NEVER
+        # re-runs deep_research on the quality score. Real quality gate = verify on code.
         "actionable": synth.get("actionable", True),
-        "confidence_is_advisory": True,
+        "gap_note": synth.get("gap_note"),
+        "citation_count": synth.get("citation_count"),
+        "claims_total": synth.get("claims_total"),
+        "claims_corroborated": synth.get("claims_corroborated"),
+        "claims_single_sourced": synth.get("claims_single_sourced"),
+        "unsupported_rate": synth.get("unsupported_rate"),
         "gaps": synth["gaps"],
         "citations": synth["citations"],
         "echo_chamber_blocked": echo_blocked_total,
