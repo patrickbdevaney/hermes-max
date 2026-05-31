@@ -20,6 +20,8 @@
 #   hm dev [--MODE]       the tmux cockpit (hermes + watch + status)   (this script)
 #   hm attach             reattach to the running tmux cockpit         tmux attach
 #   hm health             pass/fail healthcheck (for scripting)        scripts/healthcheck.sh
+#   hm preflight          validate the whole stack before a task       scripts/preflight.sh
+#                         (PASS/FAIL/WARN; auto-fixes; exit 1 on BLOCKING)
 #   hm summary            per-task tool-call summary + bottleneck split scripts/run-summary.sh
 #   hm bottleneck         full-vs-bare timing eval                     scripts/bottleneck-eval.sh
 #   hm cost               conductor spend + Opus sparing proof         scripts/conductor-report.sh
@@ -156,7 +158,7 @@ _mode_from_args() {
 }
 
 usage() {
-  sed -n '3,28p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
+  sed -n '3,30p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
 }
 
 _install() {
@@ -200,6 +202,19 @@ EOF
   fi
   # conductor mode (default --full) before bringing the stack up
   _apply_mode "$(_mode_from_args "$@")"
+  # pre-flight validation FIRST — auto-fixes the killers (timeouts, skills,
+  # embed/rerank) and brings the stack up; BLOCKING failure aborts the cockpit so
+  # we never launch the agent into a misconfigured stack. Override with HM_FORCE=1.
+  if [ -f "${SCRIPTS}/preflight.sh" ]; then
+    if ! "${SCRIPTS}/preflight.sh" --fix; then
+      if [ -n "${HM_FORCE:-}" ]; then
+        echo "  ⚠ preflight reported BLOCKING failures — continuing anyway (HM_FORCE=1)"
+      else
+        echo "  ✗ preflight found BLOCKING failures — fix them, or re-run with HM_FORCE=1 to override."
+        exit 1
+      fi
+    fi
+  fi
   # bring servers up if not already healthy (backgrounded inside start-all)
   "${SCRIPTS}/healthcheck.sh" >/dev/null 2>&1 || "${SCRIPTS}/start-all.sh" || true
   if [ "${HMX_MODE_CHANGED}" = "1" ] && timeout 1 bash -c ">/dev/tcp/127.0.0.1/${MCP_ESCALATION_PORT:-9105}" 2>/dev/null; then
@@ -256,6 +271,7 @@ case "${cmd}" in
   status)      _dispatch "${SCRIPTS}/status.sh" "$@" ;;
   watch)       _dispatch "${SCRIPTS}/watch.sh" "$@" ;;
   health)      _dispatch "${SCRIPTS}/healthcheck.sh" "$@" ;;
+  preflight)   _dispatch "${SCRIPTS}/preflight.sh" "$@" ;;
   summary)     _dispatch "${SCRIPTS}/run-summary.sh" "$@" ;;
   bottleneck)  _dispatch "${SCRIPTS}/bottleneck-eval.sh" "$@" ;;
   cost)        _dispatch "${SCRIPTS}/conductor-report.sh" "$@" ;;
