@@ -40,6 +40,15 @@ except Exception:  # noqa: BLE001
             return {"ok": False}
     otel_emit = _NoOtel()  # type: ignore
 
+try:
+    import heartbeat  # watchdog liveness stamp around long inference (no wd import)
+except Exception:  # noqa: BLE001
+    class _NoHB:
+        @staticmethod
+        def beat(*_a, **_k):
+            return None
+    heartbeat = _NoHB()  # type: ignore
+
 # ── config (all local defaults; the chat endpoint is the only "model" dep) ────
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "").rstrip("/")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", os.environ.get("DISTILL_MODEL", "/model"))
@@ -217,13 +226,26 @@ def _fetch(url: str) -> dict[str, Any]:
     return res if isinstance(res, dict) else {"ok": False, "url": url}
 
 
+# Current logical phase, set by the public pipeline functions, used only to LABEL
+# the heartbeat in the live log (plan / verify / synthesis / distill / ...). The
+# heartbeat fires around EVERY _llm call regardless of the label.
+_HB_PHASE = "inference"
+
+
 def _llm(messages: list[dict], max_tokens: int = LLM_MAX_TOKENS, temperature: float = 0.2) -> str | None:
     """Chat completion via $VLLM_BASE_URL. None if unset/unreachable/empty (the
-    reasoning model can spend its whole budget thinking -> content=None)."""
+    reasoning model can spend its whole budget thinking -> content=None).
+
+    A single synthesis/verify/distill inference here can legitimately run minutes
+    with no other signal — the finish-line killer. So every blocking call stamps a
+    watchdog heartbeat immediately BEFORE it starts and (via finally) immediately
+    AFTER it returns or raises. check_stall(task_id=...) then sees a fresh heartbeat
+    and never kills a slow-but-alive inference. See heartbeat.py / watchdog_core."""
     if not VLLM_BASE_URL:
         return None
     body = {"model": VLLM_MODEL, "messages": messages,
             "temperature": temperature, "max_tokens": max_tokens}
+    heartbeat.beat("deep_research", progress=f"{_HB_PHASE}: inference start")
     try:
         with httpx.Client(timeout=LLM_TIMEOUT) as c:
             r = c.post(f"{VLLM_BASE_URL}/chat/completions", json=body)
@@ -232,6 +254,9 @@ def _llm(messages: list[dict], max_tokens: int = LLM_MAX_TOKENS, temperature: fl
         return content.strip() if content else None
     except Exception:  # noqa: BLE001
         return None
+    finally:
+        # AFTER the inference returns/raises — proves we reached the finish line.
+        heartbeat.beat("deep_research", progress=f"{_HB_PHASE}: inference done")
 
 
 def _rerank(query: str, documents: list[str]) -> list[int] | None:
@@ -289,6 +314,8 @@ def plan_research(question: str) -> dict[str, Any]:
     """Decompose a question into checkable sub-goals + roadmap, written to external
     PLAN state (so the plan itself is inspectable — planning hallucination is most
     damaging here). Degrades to a single-subgoal plan with no LLM."""
+    global _HB_PHASE
+    _HB_PHASE = "plan"
     question = (question or "").strip()
     if not question:
         return {"ok": False, "error": "empty question"}
@@ -480,6 +507,8 @@ def verify_claims(claims: list[dict], min_sources: int = MIN_INDEPENDENT_SOURCES
     caught HERE, before synthesis (planning-hallucination guard). When the chat
     model is available it also entails each (claim, source) pair; otherwise it
     counts independent-domain support deterministically."""
+    global _HB_PHASE
+    _HB_PHASE = "verify"
     claims = claims or []
     out: list[dict[str, Any]] = []
     for c in claims:
@@ -549,6 +578,8 @@ def synthesize(question: str, verified_findings: list[dict], plan: dict | None =
     """Compile a structured, citation-backed report distinguishing well-supported /
     single-sourced / conflicting findings. Degrades (no LLM) to a deterministic
     cited bullet list — still honest, still every-claim-to-a-URL."""
+    global _HB_PHASE
+    _HB_PHASE = "synthesis"
     verified_findings = verified_findings or []
     citations: list[str] = []
     seen_c: set[str] = set()

@@ -29,6 +29,15 @@ except Exception:  # noqa: BLE001
             return {"ok": False}
     otel_emit = _NoOtel()  # type: ignore
 
+try:
+    import heartbeat  # watchdog liveness stamp around the distil inference
+except Exception:  # noqa: BLE001
+    class _NoHB:
+        @staticmethod
+        def beat(*_a, **_k):
+            return None
+    heartbeat = _NoHB()  # type: ignore
+
 # Shared in-server lazy-install guard (trafilatura fallback).
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 try:
@@ -152,6 +161,11 @@ def distill(markdown: str, topic: str) -> dict[str, Any]:
         "temperature": 0,
         "max_tokens": DISTILL_MAX_TOKENS,
     }
+    # The distil inference is a single blocking local-model call that drives the
+    # wall-clock of ingest_doc / research_topic (which loops it per source). Stamp a
+    # watchdog heartbeat immediately BEFORE and (via finally) AFTER so a slow
+    # distillation is never mistaken for a hang and killed at the finish line.
+    heartbeat.beat("research_topic", progress=f"distill: {topic[:60]} start")
     try:
         with httpx.Client(timeout=DISTILL_TIMEOUT) as c:
             r = c.post(f"{VLLM_BASE_URL}/chat/completions", json=body)
@@ -165,6 +179,8 @@ def distill(markdown: str, topic: str) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         return {"ok": True, "distilled": False, "note": raw,
                 "warning": f"distil failed ({type(e).__name__}) — stored raw"}
+    finally:
+        heartbeat.beat("research_topic", progress=f"distill: {topic[:60]} done")
 
 
 # ── MCP client helper (call RAG / KG over streamable-http) ────────────────────

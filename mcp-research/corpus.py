@@ -222,9 +222,16 @@ def distill_for_query(query: str, chunks: list[str], source_type: str = "web",
     method = None
     out: str | None = None
 
+    # Label heartbeats for the local rc._llm path (it is wrapped at the source);
+    # the cloud path below is wrapped explicitly since it bypasses rc._llm.
+    rc._HB_PHASE = "distill"
     dense = source_type in DENSE_SOURCE_TYPES
     if CLOUD_DISTILL and dense:
-        out = _conductor_distill(f"{_DISTILL_SYS}\n\n{prompt}", max_tokens=max_tokens)
+        rc.heartbeat.beat("deep_research", progress="distill: cloud inference start")
+        try:
+            out = _conductor_distill(f"{_DISTILL_SYS}\n\n{prompt}", max_tokens=max_tokens)
+        finally:
+            rc.heartbeat.beat("deep_research", progress="distill: cloud inference done")
         if out:
             method = "cloud"
     if out is None:  # local default (and fallback when cloud is off/unavailable)

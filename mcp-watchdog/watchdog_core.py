@@ -194,7 +194,19 @@ def record_heartbeat(task_id: str, tool_name: str, progress: str | None = None,
     """Stamp a liveness heartbeat for an in-flight long-running tool. A tool that
     heartbeats (per file-batch, per research source) is proven WORKING; check_stall
     reads the freshness of this stamp to decide hung-vs-waiting. Emits a
-    tool_heartbeat span carrying current progress (item N/total) for the live log."""
+    tool_heartbeat span carrying current progress (item N/total) for the live log.
+
+    HEARTBEAT DISCIPLINE (the finish-line-kill fix) — the general rule for the whole
+    stack: EVERY MCP tool step that makes a blocking local-model inference call MUST
+    emit a heartbeat immediately BEFORE the call and immediately AFTER it returns.
+    A single long synthesis / distillation / verification inference produces no other
+    signal, so without this the watchdog sees silence past heartbeat_timeout_s and
+    kills the tool right at the finish line, after all the upstream work succeeded.
+    The long-running servers (mcp-research, mcp-docs) do NOT import this module (they
+    are independent processes with their own venvs); they reproduce the two effects
+    here — the shared state-file write + the tool_heartbeat span — via their own
+    self-contained heartbeat.py helper, which writes the SAME $WATCHDOG_STATE_DIR/
+    <task_id>.json this function does, so check_stall(task_id=...) reads it identically."""
     now = time.time()
     with _lock:
         st = _load(task_id)
