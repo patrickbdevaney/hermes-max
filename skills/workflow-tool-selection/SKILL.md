@@ -58,6 +58,13 @@ If any of these returns relevant, current-enough material, **use it and STOP** �
 This is the whole point of the compounding corpus: each run makes the next one cheaper, so a topic is
 researched from scratch **once**. See [[workflow-deep-research]] for running it well once you commit.
 
+**Fire `deep_research` ONCE, at task start** — and only if the task requires current/external
+knowledge the corpus pre-check above couldn't satisfy. It is a 5–10 minute operation that already
+loops plan→explore→verify→synthesize internally, so **never fire it mid-task or per-subtask**. After
+it returns, follow-up lookups go to `search_code` / `search_docs`, not a second research run. If the
+one call times out or returns **< 3 sources**, fall back to `mcp-docs.research_topic` — never another
+`deep_research` ([[workflow-deep-research]]).
+
 ## Discipline
 
 - **One rung at a time.** Fire the cheapest plausible rung, look at the result, and only descend if it

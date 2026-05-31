@@ -10,6 +10,17 @@ description: >-
 
 # workflow-deep-research
 
+> **Call `deep_research` ONCE per task.** Fire a single comprehensive multi-topic
+> query. Do **NOT** call it again in the same session unless the first call
+> returned **zero** sources. `deep_research` is a **5–10 minute** operation — it
+> already loops `plan → develop → explore → verify → synthesize` internally, so
+> repeat calls only compound wall time. After it returns, use `search_code` or
+> `mcp-docs` (`search_docs` / `research_topic`) for any follow-up lookups.
+>
+> **Fallback (never a second deep_research):** if the one call times out or
+> returns **fewer than 3 sources**, drop to `mcp-docs.research_topic` as a lighter
+> path — never launch another `deep_research`.
+
 Use this when the answer is **not reliably in pretraining or the local RAG/KG**:
 a new framework, a recent release, "the current best/most-recommended X", or a
 question that needs several independent sources reconciled. For a fact you already
