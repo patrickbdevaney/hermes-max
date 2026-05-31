@@ -999,6 +999,58 @@ def _fmt(row: sqlite3.Row, snippet_chars: int = 1200) -> dict[str, Any]:
     }
 
 
+# ── Phase 5.1: per-query graph signals (gbrain mechanism) ─────────────────────
+GRAPH_SIGNALS = os.environ.get("RAG_GRAPH_SIGNALS", "1") not in ("0", "false", "False")
+GSIG_ADJ_W = float(os.environ.get("RAG_GSIG_ADJ_WEIGHT", "0.6"))
+GSIG_SRC_W = float(os.environ.get("RAG_GSIG_SOURCE_WEIGHT", "0.15"))
+GSIG_DEMOTE = float(os.environ.get("RAG_GSIG_DEMOTE", "0.4"))
+GSIG_DEMOTE_PREFIX = os.environ.get("RAG_SESSION_DEMOTE_PREFIX", "")
+
+
+def _graph_signal_rerank(con: sqlite3.Connection, ids: list[int], rows: dict) -> list[int]:
+    """Reorder the fused candidate pool by PER-QUERY graph signals (additive, never
+    drops): adjacency boost (a result that is a HUB among THIS query's result symbols
+    — connected to many other results in the call/ref graph — outranks a merely
+    semantically-similar one), cross-source corroboration (a result corroborated
+    across MULTIPLE distinct namespaces/repos), and session-demote (down-weight a
+    namespace flagged as polluting retrieval). Behaviour is a small blend on top of
+    the existing order, so it only sharpens."""
+    import collections
+    cand = [i for i in ids if i in rows]
+    syms = {rows[i]["symbol"] for i in cand if rows[i]["symbol"]}
+    if len(cand) < 2:
+        return ids
+    deg: dict = collections.defaultdict(int)
+    if syms:
+        qs = ",".join("?" * len(syms))
+        try:
+            for r in con.execute(
+                f"SELECT src, dst FROM graph_edges WHERE src IN ({qs}) AND dst IN ({qs})",
+                    (*syms, *syms)):
+                deg[r["src"]] += 1
+                deg[r["dst"]] += 1
+        except Exception:  # noqa: BLE001
+            deg = {}
+    maxd = max(deg.values()) if deg else 0
+    repos = [(rows[i]["repo"] or "") for i in cand]
+    repo_count = collections.Counter(repos)
+    n_distinct_repos = len(repo_count)
+
+    def score(pos: int, i: int) -> float:
+        base = 1.0 / (pos + 1)                      # preserve the incoming order as the prior
+        sym = rows[i]["symbol"] or ""
+        adj = (deg.get(sym, 0) / maxd) if maxd else 0.0
+        repo = rows[i]["repo"] or ""
+        # corroboration: the answer is represented across multiple independent sources
+        src = GSIG_SRC_W if (n_distinct_repos > 1 and repo_count[repo] >= 1 and adj > 0) else 0.0
+        demote = GSIG_DEMOTE if (GSIG_DEMOTE_PREFIX and repo.startswith(GSIG_DEMOTE_PREFIX)) else 0.0
+        return base + GSIG_ADJ_W * adj + src - demote
+
+    order = sorted(range(len(ids)), key=lambda pos: score(pos, ids[pos]) if ids[pos] in rows else 0.0,
+                   reverse=True)
+    return [ids[p] for p in order]
+
+
 def search_code(query: str, k: int = 8) -> dict[str, Any]:
     con, vec_ok = _connect()
     try:
@@ -1055,12 +1107,15 @@ def search_code(query: str, k: int = 8) -> dict[str, Any]:
             docs = [f"{rows[i]['symbol']}\n{rows[i]['content']}" for i in id_for_doc]
             order = rerank(query, docs)
             if order:
-                ids = [id_for_doc[j] for j in order][:k]
+                ids = [id_for_doc[j] for j in order]   # keep full pool; trim after graph signals
                 mode += "+rerank"
-            else:
-                ids = ids[:k]
-        else:
-            ids = ids[:k]
+        # Per-query graph signals (Phase 5.1): reorder the fused pool by adjacency/
+        # corroboration/session-demote BEFORE trimming, so a call-graph hub for this
+        # query can be promoted INTO the top-k, then trim.
+        if GRAPH_SIGNALS and graph_on:
+            ids = _graph_signal_rerank(con, ids, rows)
+            mode += "+gsig"
+        ids = ids[:k]
 
         results = [_fmt(rows[i]) for i in ids if i in rows]
         return {"ok": True, "query": query, "mode": mode, "results": results}
