@@ -23,6 +23,7 @@ import conductor_policy
 import directive_verify as dv
 import escalation_core
 import frontier_core
+import plan_split
 
 PORT = int(os.environ.get("MCP_ESCALATION_PORT", "9105"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
@@ -314,6 +315,70 @@ def conductor_frequency_report() -> dict:
     + tier counts (KG), checked against the per-project targets (synth<=15,
     Opus<=3). A breach means brief quality is the bottleneck — fix the assembler."""
     return conductor_policy.frequency_report()
+
+
+# ── plan/execute split (CLAUDE_plan_execute.md) ──────────────────────────────
+# A substantive build is planned ONCE on the expensive planner (V4-Pro / synth)
+# so the cheap local executor implements literally without inventing. These tools
+# are ADVISORY (they return advice + emit spans); the local agent, guided by
+# workflow-plan-contract / workflow-execute-from-plan, drives the actual flow.
+@mcp.tool()
+@_threaded
+def classify_plan_need(task: str = "", signals: dict | None = None) -> dict:
+    """Decide whether a task needs an up-front PLAN phase (NO LLM call). NEEDS_PLAN
+    when an action verb (Implement/Build/Write/Create/Design/Refactor/Add) is present
+    AND the work is substantive (>1 file OR >single-function OR mentions tests);
+    NO_PLAN for single-file edits, lookups, one-line fixes, and questions. Pass the
+    task string and/or structured `signals` (file_count, mentions_tests,
+    multi_function, single_file). Conservative: a borderline action-verb task is
+    flagged NEEDS_PLAN. Emits a task_classification span. Returns {plan_required,
+    reason, matched_verb}."""
+    return escalation_core.classify_plan_need(task, signals)
+
+
+@mcp.tool()
+@_threaded
+def plan_route(task: str = "", signals: dict | None = None, phase: str = "auto") -> dict:
+    """ADVISE which model tier handles the current phase (does NOT fire a call).
+    PLAN phase -> the synth role (DeepSeek V4-Pro): generate PLAN.md via
+    brief_assemble(profile='full') + conductor_synthesize, then plan_lint it before
+    the local executor begins. EXECUTE phase -> the local model (on a design gap the
+    plan did not answer, call request_plan_revision rather than inventing). phase:
+    'auto' (classify), 'plan' (force plan-phase advice), 'execute' (force execute).
+    Emits a tier_routing {phase, tier, model_id} span. The model_id is resolved live
+    from the registry (conductor.yaml-aware)."""
+    return plan_split.plan_route(task, signals, phase)
+
+
+@mcp.tool()
+@_threaded
+def plan_lint(plan_path: str = "", plan_text: str = "", repo: str | None = None,
+              revision_round: int = 0) -> dict:
+    """Deterministic completeness gate over a PLAN.md DOCUMENT (NO model call) —
+    distinct from directive_verify, which gates a JSON directive. Validates the
+    workflow-plan-contract schema: an absolute WORKING_DIRECTORY; a FILES section; a
+    FILE SPEC for every listed file; each FILE SPEC has a signature-shaped line AND
+    prose; a concrete DONE_CONDITION. An incomplete plan should go BACK to the
+    planner (synth) with `missing`, not to the executor. Pass `revision_round` (the
+    skill increments it); once it hits PLAN_LINT_MAX_ROUNDS the result is `bounded`
+    and the caller proceeds with a flagged-incomplete plan. Emits a plan_lint span.
+    Returns {complete, missing, bounded, proceed_flagged}."""
+    return plan_split.plan_lint(plan_path, plan_text, repo, revision_round)
+
+
+@mcp.tool()
+@_threaded
+def request_plan_revision(question: str, repo: str | None = None, task_id: str = "",
+                          request_index: int = 0, max_tokens: int | None = None) -> dict:
+    """Route a specific plan-GAP question to the expensive planner (synth/V4-Pro) and
+    append the answer to PLAN.md — so the cheap executor ASKS instead of INVENTS when
+    the plan is silent on a design decision (a missing signature, an unspecified
+    algorithm, an ambiguous edge case). Pass `request_index` (the skill increments
+    it); at PLAN_REVISION_MAX no call fires (`bounded`). If synth is OFF/capped it
+    returns `proceed_local` — the executor must then surface (workflow-stuck), NEVER
+    invent. Optional `task_id` enriches the prompt via brief_assemble(full). Emits a
+    plan_revision_requested span. Returns {resolved, answer, appended, bounded}."""
+    return plan_split.request_plan_revision(question, repo, task_id, request_index, max_tokens)
 
 
 if __name__ == "__main__":

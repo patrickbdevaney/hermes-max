@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from datetime import date
 from pathlib import Path
@@ -262,6 +263,90 @@ def classify_difficulty(signals: dict | None = None) -> dict[str, Any]:
     difficulty = "hard" if score >= 4 else ("medium" if score >= 2 else "easy")
     return {"ok": True, "difficulty": difficulty, "score": score,
             "reasons": reasons or ["no complexity signals"]}
+
+
+# ── plan-need classifier (the plan/execute split, Stage 1) ───────────────────
+# A rule-based, NO-LLM gate that decides whether a task warrants an up-front PLAN
+# phase on the expensive planner (V4-Pro / the synth role) before the cheap local
+# executor implements. The principle: a substantive build (multi-file, multi-
+# function, or test-bearing) is where the local 35B drifts, so pay for an
+# incontrovertible plan once; a single-file edit / lookup / question stays local.
+# Mirrors classify_difficulty's stance: conservative when uncertain (an action-verb
+# task with ambiguous scope is better over-planned than under-planned).
+_PLAN_VERBS = ("implement", "build", "write", "create", "design", "refactor", "add")
+# words that signal the task is a question / lookup / inspection — NOT a build
+_NO_PLAN_HINTS = ("what", "why", "how does", "where", "explain", "describe", "look up",
+                  "lookup", "find", "show me", "list", "read", "summarize", "summarise")
+# crude signals that a string task touches more than one file / function
+_MULTI_FILE_HINTS = ("files", "modules", "across", "package", "directory", "and ",
+                     " plus ", "multiple", "several", "endpoints", "components")
+_TEST_HINTS = ("test", "tests", "pytest", "unit test", "coverage", "tdd")
+
+
+def classify_plan_need(task: str = "", signals: dict | None = None) -> dict[str, Any]:
+    """Decide whether a task needs an up-front PLAN phase (NO LLM call).
+
+    NEEDS_PLAN when an action verb (Implement/Build/Write/Create/Design/Refactor/
+    Add) is present AND the work looks substantive — more than one file OR more than
+    a single function OR it mentions tests. NO_PLAN for single-file edits, lookups,
+    one-line fixes, and pure questions.
+
+    Args:
+        task: the task description string (verb + scope are scanned from it).
+        signals: optional structured hints that override the string scan —
+            {file_count:int, mentions_tests:bool, multi_function:bool,
+             single_file:bool}.
+
+    Returns {ok, plan_required:bool, reason, matched_verb, signals_used:bool}.
+    Never raises. Conservative: an action-verb task with ambiguous scope is flagged
+    NEEDS_PLAN (better to over-plan a borderline task than let the executor drift).
+    """
+    s = signals or {}
+    low = (task or "").strip().lower()
+
+    def _result(plan_required: bool, reason: str, matched_verb: str | None) -> dict[str, Any]:
+        out = {"ok": True, "plan_required": plan_required, "matched_verb": matched_verb,
+               "signals_used": bool(s), "reason": reason}
+        _otel("task_classification", {"plan_required": plan_required, "reason": reason})
+        return out
+
+    # a pure question / lookup is never a plan task, even if it contains a verb
+    if low and any(low.startswith(h) or f" {h}" in low[:40] for h in _NO_PLAN_HINTS) \
+            and not any(low.startswith(v) for v in _PLAN_VERBS):
+        return _result(False, "question/lookup/inspection — no build, stay local (NO_PLAN)", None)
+
+    matched_verb = next((v for v in _PLAN_VERBS if re.search(rf"\b{v}\b", low)), None)
+
+    # structured signals take precedence over the string scan when provided
+    file_count = int(s.get("file_count", 0) or 0)
+    multi_file = (file_count > 1) or bool(s.get("multi_function")) \
+        or any(h in low for h in _MULTI_FILE_HINTS)
+    mentions_tests = bool(s.get("mentions_tests")) or any(
+        re.search(rf"\b{re.escape(h)}\b", low) for h in _TEST_HINTS)
+    single_file = bool(s.get("single_file")) or file_count == 1
+
+    if not matched_verb:
+        return _result(False, "no build/implement verb — not a multi-step build (NO_PLAN)", None)
+
+    # an explicit single-file edit with no tests / no multi-function is NO_PLAN
+    if single_file and not mentions_tests and not s.get("multi_function"):
+        return _result(
+            False,
+            f"'{matched_verb}' but a single-file change with no tests — stay local (NO_PLAN)",
+            matched_verb)
+
+    substantive = multi_file or mentions_tests
+    reasons: list[str] = []
+    if file_count > 1:
+        reasons.append(f"touches {file_count} files")
+    elif multi_file:
+        reasons.append("scope reads as multi-file/multi-function")
+    if mentions_tests:
+        reasons.append("mentions tests")
+    if not substantive:
+        # action verb but no scope signal at all -> conservative over-plan
+        reasons.append("action verb with ambiguous scope (conservative over-plan)")
+    return _result(True, f"'{matched_verb}' build — {'; '.join(reasons)} (NEEDS_PLAN)", matched_verb)
 
 
 def record_outcome(task: str, signals: dict | None = None, difficulty: str | None = None,
