@@ -21,6 +21,17 @@ from starlette.responses import JSONResponse
 
 import observability_core
 
+# scripts/ holds the self-contained, stdlib-only condenser (M-Stage 2) — import its
+# condense() directly so the tool and the CLI share one implementation.
+import sys as _sys
+_SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+if _SCRIPTS not in _sys.path:
+    _sys.path.insert(0, _SCRIPTS)
+try:
+    import condenser as _condenser
+except Exception:  # noqa: BLE001
+    _condenser = None
+
 PORT = int(os.environ.get("MCP_OBSERVABILITY_PORT", "9104"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
 
@@ -106,6 +117,28 @@ def record_task_metrics(
         task_id, tokens, duration_ms, verify_passed, retrieval_precision,
         skill_reused, escalation_usd, loop_stalled, attributes,
     )
+
+
+@mcp.tool()
+@_threaded
+def condense_context(history: list, threshold_ratio: float = 0.80, keep_first: int = 4,
+                     condense_oldest_ratio: float = 0.40, force: bool = False) -> dict:
+    """Condense a long conversation when it nears the context limit (M-Stage 2,
+    OpenHands LLMSummarizingCondenser). `history` is a list of {role,content}
+    messages. At >= threshold_ratio of the model's max_model_len it summarizes the
+    OLDEST condense_oldest_ratio of the middle (always preserving the first
+    keep_first and the most recent turns) via the local model, and returns
+    {fired, history, tokens_before, tokens_after, ratio, ...}; under threshold it
+    returns the history unchanged (fired=false). Emits a condenser_fired span.
+
+    CAVEAT: condensing rewrites the prompt PREFIX → lower prompt-cache hit rate.
+    Only condense when genuinely near the limit, NOT as a routine optimization."""
+    if _condenser is None:
+        return {"ok": False, "fired": False, "error": "condenser module unavailable", "history": history}
+    out = _condenser.condense(history, threshold_ratio=threshold_ratio, keep_first=keep_first,
+                              condense_oldest_ratio=condense_oldest_ratio, force=force)
+    out["ok"] = True
+    return out
 
 
 if __name__ == "__main__":
