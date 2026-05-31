@@ -21,6 +21,7 @@ from starlette.responses import JSONResponse
 
 import observability_core
 import trajectory_store
+import failure_localizer
 
 # scripts/ holds the self-contained, stdlib-only condenser (M-Stage 2) — import its
 # condense() directly so the tool and the CLI share one implementation.
@@ -156,6 +157,18 @@ def record_trajectory(task: str, success: bool, tool_calls: list | None = None,
                                     {"task": task[:120], "success": success,
                                      "verify_green": verify_green, "failure_mode": failure_mode or None})
     return {"ok": rec.get("ok", True), "recorded": True, **trajectory_store.stats()}
+
+
+@mcp.tool()
+@_threaded
+def localize_failure(trajectory: dict, reflect: bool = True) -> dict:
+    """Root-cause a FAILED trajectory (Phase 6.2): isolate the step where it went
+    wrong and classify the failure mode (timeout | hung | spiral | wrong_tool |
+    hallucinated_property | budget_exhausted | verify_red | no_progress | unknown).
+    Deterministic over the tool-call sequence, with an optional model-reflected
+    root-cause sentence. Feed `trajectory` from list_trajectories or your own record;
+    the result is the signal the GEPA optimizer learns from."""
+    return failure_localizer.localize(trajectory, reflect=reflect)
 
 
 @mcp.tool()
