@@ -236,6 +236,10 @@ case "${cmd}" in
   up)
     if [ -n "${HM_PRINT:-}" ]; then echo "${SCRIPTS}/start-all.sh"; exit 0; fi
     _apply_mode "$(_mode_from_args "$@")"
+    # Raise Hermes' own MCP call timeouts (the 120s long-run killer) before the
+    # stack comes up — idempotent, no-op once applied. Never fails `hm up`.
+    [ -f "${SCRIPTS}/fix-hermes-timeouts.sh" ] && \
+      "${SCRIPTS}/fix-hermes-timeouts.sh" || true
     "${SCRIPTS}/start-all.sh"
     # If the conductor was already running, restart it so it picks up the new mode
     # (mode is read from CONDUCTOR_MODE in .env at launch). No-op if mode unchanged.

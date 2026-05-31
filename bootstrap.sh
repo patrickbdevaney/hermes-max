@@ -373,6 +373,11 @@ else
     if [ -f "${REPO_ROOT}/scripts/apply-config-deadlines.sh" ]; then
       bash "${REPO_ROOT}/scripts/apply-config-deadlines.sh" || c_warn "apply-config-deadlines.sh returned non-zero"
     fi
+    # Raise the hermes-max-* MCP call timeouts (the 120s long-run killer that
+    # severed deep_research at two minutes). Idempotent; no-op once applied.
+    if [ -f "${REPO_ROOT}/scripts/fix-hermes-timeouts.sh" ]; then
+      bash "${REPO_ROOT}/scripts/fix-hermes-timeouts.sh" || c_warn "fix-hermes-timeouts.sh returned non-zero"
+    fi
   else
     c_warn "hermes/config not found — skipping registration (servers still runnable standalone)"
   fi
