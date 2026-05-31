@@ -99,13 +99,22 @@ def _call_backend(tool: str, args: dict) -> dict:
     async def _go():
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
-        async with streamablehttp_client(BACKEND_URL) as (r, w, _):
-            async with ClientSession(r, w) as s:
-                await s.initialize()
-                res = await s.call_tool(tool, args)
-                txt = getattr(res.content[0], "text", "") if res.content else ""
-                d = res.structuredContent or (json.loads(txt) if txt else txt)
-                return d.get("result", d) if isinstance(d, dict) else d
+        box: dict = {}
+        try:
+            async with streamablehttp_client(BACKEND_URL) as (r, w, _):
+                async with ClientSession(r, w) as s:
+                    await s.initialize()
+                    res = await s.call_tool(tool, args)
+                    txt = getattr(res.content[0], "text", "") if res.content else ""
+                    d = res.structuredContent or (json.loads(txt) if txt else txt)
+                    box["v"] = d.get("result", d) if isinstance(d, dict) else d
+        except BaseException:  # noqa: BLE001 - the streamable-http client raises a
+            # benign ExceptionGroup on context teardown AFTER a successful call; if we
+            # already captured the result, return it rather than discarding it.
+            if "v" in box:
+                return box["v"]
+            raise
+        return box["v"]
     try:
         out = asyncio.run(asyncio.wait_for(_go(), timeout=float(os.environ.get("LSP_CALL_TIMEOUT_S", "60"))))
         return {"ok": True, "tool": tool, "result": out}
@@ -139,7 +148,7 @@ def lsp_go_to_definition(name_path: str, relative_path: str = "") -> dict:
     """Locate a symbol's definition (and body) via the language server. name_path is
     the symbol; relative_path optionally scopes the search to one file/dir. Use to
     jump to the real signature instead of guessing or grepping."""
-    args = {"name_path": name_path, "include_body": True}
+    args = {"name_path_pattern": name_path, "include_body": True}
     if relative_path:
         args["relative_path"] = relative_path
     return _call_backend("find_symbol", args)
@@ -156,10 +165,32 @@ def lsp_diagnostics(relative_path: str) -> dict:
 
 @mcp.tool()
 @_threaded
+def lsp_hover(name_path: str, relative_path: str = "") -> dict:
+    """Hover info for a symbol — its signature + body/docstring from the language
+    server (the structured 'what is this' lookup). name_path is the symbol;
+    relative_path optionally scopes to one file."""
+    args = {"name_path_pattern": name_path, "include_body": True}
+    if relative_path:
+        args["relative_path"] = relative_path
+    return _call_backend("find_symbol", args)
+
+
+@mcp.tool()
+@_threaded
+def lsp_rename(name_path: str, relative_path: str, new_name: str) -> dict:
+    """Rename a symbol across the whole project via the language server (updates
+    every reference safely — the cross-file rename grep can't do). name_path: the
+    symbol; relative_path: the file defining it; new_name: the new identifier."""
+    return _call_backend("rename_symbol",
+                         {"name_path": name_path, "relative_path": relative_path, "new_name": new_name})
+
+
+@mcp.tool()
+@_threaded
 def lsp_find_symbol(name_path: str, relative_path: str = "") -> dict:
     """Find a symbol (function/class/method) by name across the project via the
     language server — the fast structured alternative to grepping for a definition."""
-    args = {"name_path": name_path}
+    args = {"name_path_pattern": name_path}
     if relative_path:
         args["relative_path"] = relative_path
     return _call_backend("find_symbol", args)
