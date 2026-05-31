@@ -3,6 +3,8 @@ name: workflow-edit-format
 description: Make small, well-formed, diff-style edits and verify each one incrementally — the Aider 20%→61% lever.
 trigger: every time you modify an existing file
 ---
+
+<!-- TRIGGERS WHEN: Make small, well-formed, diff-style edits and verify each one incrementally — the Aider 20%→61% lever. -->
 # Edit in small, well-formed diffs — and verify each edit before the next.
 
 The single biggest jump in measured edit success (Aider: 20%→61%) came from *edit format*:

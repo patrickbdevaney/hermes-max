@@ -3,6 +3,8 @@ name: workflow-subagent-isolation
 description: Fan OUT read-only research/localization to isolated sub-agents that return summaries; keep the EDIT thread single and linear.
 trigger: a task needs broad research/localization across many files before editing
 ---
+
+<!-- TRIGGERS WHEN: Fan OUT read-only research/localization to isolated sub-agents that return summaries; -->
 # Parallelize reading, never editing. Isolated reads in; one linear edit thread out.
 
 Cognition's lesson: fanning out the EDIT path corrupts shared state and produces incoherent diffs.

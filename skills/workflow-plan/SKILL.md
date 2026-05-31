@@ -12,6 +12,8 @@ metadata:
     related_skills: [workflow-task-start, workflow-task-finish]
 ---
 
+<!-- TRIGGERS WHEN: "For tasks over ~5 files, plan and decompose before coding using native plan + kanban." version: 1.0.0 author: Hermes Max license: MIT platforms: [linux, macos, -->
+
 # Plan — decompose before large changes
 
 Run this for any task spanning **more than ~5 files** or with non-trivial

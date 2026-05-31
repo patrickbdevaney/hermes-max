@@ -12,6 +12,8 @@ metadata:
     related_skills: [workflow-plan, workflow-task-finish]
 ---
 
+<!-- TRIGGERS WHEN: "Ground every coding task in the codebase + knowledge graph before acting." version: 1.0.0 author: Hermes Max license: MIT platforms: [linux, macos, windows] me -->
+
 # Task Start — ground yourself before writing code
 
 Run this at the **start** of any coding/engineering task. It is the compounding

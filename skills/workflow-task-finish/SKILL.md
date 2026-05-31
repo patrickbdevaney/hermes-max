@@ -12,6 +12,8 @@ metadata:
     related_skills: [workflow-task-start, workflow-stuck]
 ---
 
+<!-- TRIGGERS WHEN: "Never declare done on red: verify, then record what you learned to the knowledge graph." version: 1.0.0 author: Hermes Max license: MIT platforms: [linux, maco -->
+
 # Task Finish — the verification gate + knowledge capture
 
 Run this **before reporting any coding task complete**. You may not declare

@@ -32,6 +32,17 @@ try:
 except Exception:  # noqa: BLE001
     _condenser = None
 
+# lib/livelog writes the operator-facing live.jsonl span stream. The observability
+# server's own emitter targets Phoenix/OTLP, so for spans that must show in the live
+# log (skill_fired) we write through livelog directly too.
+_LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
+if _LIB not in _sys.path:
+    _sys.path.insert(0, _LIB)
+try:
+    import livelog as _livelog
+except Exception:  # noqa: BLE001
+    _livelog = None
+
 PORT = int(os.environ.get("MCP_OBSERVABILITY_PORT", "9104"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
 
@@ -117,6 +128,22 @@ def record_task_metrics(
         task_id, tokens, duration_ms, verify_passed, retrieval_precision,
         skill_reused, escalation_usd, loop_stalled, attributes,
     )
+
+
+@mcp.tool()
+@_threaded
+def record_skill_fired(skill_name: str, trigger: str | None = None) -> dict:
+    """Record that a workflow skill activated (M-Stage 7 skill-firing instrumentation).
+    Emits a skill_fired span {skill_name, trigger} to live.jsonl + Phoenix so
+    under-firing skills can be identified (Anthropic: 'measure trigger reliability
+    rather than assume it'). Skills self-report by calling this as their first action."""
+    if _livelog is not None:
+        try:
+            _livelog.forward("skill_fired", {"skill_name": skill_name, "trigger": trigger}, "ok")
+        except Exception:  # noqa: BLE001
+            pass
+    return observability_core.record_trace("skill_fired",
+                                            {"skill_name": skill_name, "trigger": trigger})
 
 
 @mcp.tool()

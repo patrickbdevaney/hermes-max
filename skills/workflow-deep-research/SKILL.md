@@ -8,6 +8,8 @@ description: >-
   shared difficulty/scope signal: a quick lookup is NOT a multi-source synthesis.
 ---
 
+<!-- TRIGGERS WHEN: Drive mcp-research's deep_research loop when a task needs CURRENT or EXTERNAL knowledge beyond pretraining + RAG — a novel/recent framework or release, "what is -->
+
 # workflow-deep-research
 
 > **NEVER call `deep_research` more than once per session, under any circumstances.**

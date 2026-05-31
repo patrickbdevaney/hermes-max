@@ -12,6 +12,8 @@ metadata:
     related_skills: [workflow-task-start, workflow-task-finish]
 ---
 
+<!-- TRIGGERS WHEN: "Deliberately curate the always-in-context core-memory block at task boundaries — keep high-signal, evict stale." version: 1.0.0 author: Hermes Max license: MIT -->
+
 # Curate core memory (own your working memory)
 
 Core memory is the small, **always-in-context** block of the highest-signal facts

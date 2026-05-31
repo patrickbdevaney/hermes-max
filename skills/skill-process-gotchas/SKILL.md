@@ -3,6 +3,8 @@ name: skill-process-gotchas
 description: Common-sense traps a fast small model misses. Consult when a command behaves oddly.
 trigger: any command that hangs, errors unexpectedly, or behaves contrary to expectation
 ---
+
+<!-- TRIGGERS WHEN: Common-sense traps a fast small model misses. -->
 # Things that are "obvious" but easy to get wrong. Check here before thrashing.
 
 - LONG-RUNNING PROCESS never exits → don't wait for it (see workflow-long-running-processes).

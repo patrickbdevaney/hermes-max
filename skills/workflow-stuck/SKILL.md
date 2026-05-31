@@ -12,6 +12,8 @@ metadata:
     related_skills: [workflow-task-finish, workflow-escalate]
 ---
 
+<!-- TRIGGERS WHEN: "Stop thrashing after N failed attempts: write a STUCK report and ping the operator." version: 1.0.0 author: Hermes Max license: MIT platforms: [linux, macos, w -->
+
 # Stuck — loop, then ping me
 
 The overnight failure mode is silent thrashing: trying the same fix over and

@@ -3,6 +3,8 @@ name: workflow-effort-routing
 description: Concentrate deep reasoning where it pays (planning, hard debugging) and stay terse on mechanical turns — caps spirals, saves tokens.
 trigger: at the start of every turn — decide how much to think before acting
 ---
+
+<!-- TRIGGERS WHEN: Concentrate deep reasoning where it pays (planning, hard debugging) and stay terse on mechanical turns — caps spirals, saves tokens. -->
 # Spend reasoning where it counts. High effort on EXECUTION turns is what caused the spiral.
 
 The global default reasoning effort is **MEDIUM** (lowered from high by `apply-config-deadlines.sh`).

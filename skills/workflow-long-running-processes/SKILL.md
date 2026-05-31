@@ -3,6 +3,8 @@ name: workflow-long-running-processes
 description: How to handle servers, daemons, watchers — anything that runs indefinitely.
 trigger: starting any server, daemon, watcher, or long-lived process
 ---
+
+<!-- TRIGGERS WHEN: How to handle servers, daemons, watchers — anything that runs indefinitely. -->
 # A running server is SUCCESS, not a hang. Never poll a process that never ends.
 
 The per-tool wall-clock timeout is short (native `terminal.timeout` ≈ 120s) precisely so a blocked

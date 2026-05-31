@@ -3,6 +3,8 @@ name: workflow-conductor
 description: Stingy, classifier-gated ladder for reaching OPTIONAL cloud help (steer/parallel_draft/synthesize/escalate). The local driver does all routine work at $0; reach up only on genuinely-hard subtasks, behind presence-gated stateless tools, and gate every directive before commit.
 trigger: a subtask the difficulty signal flags HARD/novel, watchdog genuine-stuck after local recovery failed, or a major architectural fork — never routine work
 ---
+
+<!-- TRIGGERS WHEN: Stingy, classifier-gated ladder for reaching OPTIONAL cloud help (steer/parallel_draft/synthesize/escalate). -->
 # The local Qwen driver does everything. Cloud help is rare, optional, and stateless.
 
 The conductor adds cloud help as TOOLS, never a backend swap — the Hermes model stays the orchestrator

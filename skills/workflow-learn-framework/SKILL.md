@@ -12,6 +12,8 @@ metadata:
     related_skills: [workflow-plan-first, workflow-critic]
 ---
 
+<!-- TRIGGERS WHEN: "Learn a novel/domain-specific framework from its real docs BEFORE coding, to prevent hallucinated APIs." version: 1.0.0 author: Hermes Max license: MIT platfor -->
+
 # Learn a framework before coding against it
 
 When the work involves a framework/library/API you cannot reason about reliably

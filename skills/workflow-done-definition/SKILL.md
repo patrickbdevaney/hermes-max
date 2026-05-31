@@ -3,6 +3,8 @@ name: workflow-done-definition
 description: What "done" means. Applied before reporting any task complete.
 trigger: about to report a task or subtask complete
 ---
+
+<!-- TRIGGERS WHEN: What "done" means. -->
 # "Done" is defined by verification, never by the model's opinion.
 
 Before reporting done:

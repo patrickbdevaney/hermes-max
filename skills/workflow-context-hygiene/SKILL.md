@@ -3,6 +3,8 @@ name: workflow-context-hygiene
 description: Keep the working set small and the plan always in focus.
 trigger: continuously, especially as context fills
 ---
+
+<!-- TRIGGERS WHEN: Keep the working set small and the plan always in focus. -->
 # The model attends poorly to long context. Keep the relevant set small and pinned.
 
 - PLAN.md is the source of truth, not memory. Re-read it at each subtask start. If your memory

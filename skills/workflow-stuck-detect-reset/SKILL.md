@@ -3,6 +3,8 @@ name: workflow-stuck-detect-reset
 description: Detect being stuck and recover with a clean-context reset instead of thrashing.
 trigger: same error 3x, no progress for several turns, or confusion about current state
 ---
+
+<!-- TRIGGERS WHEN: Detect being stuck and recover with a clean-context reset instead of thrashing. -->
 # When stuck, do NOT thrash in a polluted context. Summarize, reset, retry with fresh eyes.
 
 Small-model failures are usually CONTEXT-POLLUTION failures: the context has filled with failed

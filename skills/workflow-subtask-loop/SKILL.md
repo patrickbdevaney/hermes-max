@@ -3,6 +3,8 @@ name: workflow-subtask-loop
 description: How to execute ONE subtask. Apply to every subtask in the plan.
 trigger: executing a planned subtask
 ---
+
+<!-- TRIGGERS WHEN: How to execute ONE subtask. -->
 # One subtask at a time. Bounded, verified, committed.
 
 For the CURRENT subtask only (ignore the rest of the project for now):

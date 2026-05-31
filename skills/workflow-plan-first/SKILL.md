@@ -3,6 +3,8 @@ name: workflow-plan-first
 description: ALWAYS run first on any task touching more than one file or more than ~3 steps.
 trigger: any multi-step or multi-file task
 ---
+
+<!-- TRIGGERS WHEN: ALWAYS run first on any task touching more than one file or more than ~3 steps. -->
 # Plan first — never start coding a multi-step task without a written plan.
 
 1. Restate the goal in one sentence and the DEFINITION OF DONE as a concrete, testable

@@ -3,6 +3,8 @@ name: workflow-critic
 description: After a hard subtask goes green, run a bounded red-team review of the diff against the spec and tests to catch silent-wrong patches.
 trigger: a non-trivial/hard subtask just verified green, before moving on
 ---
+
+<!-- TRIGGERS WHEN: After a hard subtask goes green, run a bounded red-team review of the diff against the spec and tests to catch silent-wrong patches. -->
 # Green isn't always correct. ~20% of patches pass shallow tests but are semantically wrong.
 
 A passing test suite proves the tests pass — not that the code is right. For non-trivial subtasks,

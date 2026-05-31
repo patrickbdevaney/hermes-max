@@ -3,6 +3,8 @@ name: workflow-tool-selection
 description: A strict tiered ladder consulted BEFORE reaching for any expensive tool — answer from context first, climb only when each rung fails. Caps cost and latency by never firing deep_research/escalation when a cheaper rung would answer.
 trigger: before invoking ANY retrieval or model/research tool — pick the lowest rung that can answer
 ---
+
+<!-- TRIGGERS WHEN: A strict tiered ladder consulted BEFORE reaching for any expensive tool — answer from context first, climb only when each rung fails. -->
 # Climb the ladder from the cheapest rung. Never skip down to an expensive tool.
 
 Every tool below the context window costs tokens, latency, or money, and the costs grow fast as you

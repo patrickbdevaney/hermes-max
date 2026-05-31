@@ -12,6 +12,8 @@ metadata:
     related_skills: [workflow-stuck]
 ---
 
+<!-- TRIGGERS WHEN: "When (and when not) to escalate a hard, well-scoped subproblem to a cloud tier." version: 1.0.0 author: Hermes Max license: MIT platforms: [linux, macos, windo -->
+
 # Escalate — rare, scoped, cost-capped
 
 The default is **$0 local grinding**. Escalation to a cheap cloud frontier model

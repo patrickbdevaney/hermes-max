@@ -3,6 +3,8 @@ name: workflow-deadline-discipline
 description: Bound every turn and every long operation; self-check with the watchdog so you never spiral, hang, or run over budget.
 trigger: every execution turn, before/after any long-running operation, and every few subtasks
 ---
+
+<!-- TRIGGERS WHEN: Bound every turn and every long operation; -->
 # Never get stuck INSIDE a turn. The turn-based guardrails don't see spirals or hangs.
 
 Hermes' native `tool_loop_guardrails` only fire ACROSS turns. The two ways work dies are *inside
