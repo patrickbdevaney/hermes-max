@@ -74,6 +74,15 @@ MAX_TOTAL_SOURCES = int(os.environ.get("RESEARCH_MAX_TOTAL_SOURCES", "8"))
 WALL_BUDGET_S = float(os.environ.get("RESEARCH_WALL_BUDGET_S", "600"))
 MIN_INDEPENDENT_SOURCES = int(os.environ.get("RESEARCH_MIN_SOURCES", "2"))
 
+# ── Adaptive-retrieval CORPUS-FIRST gate (gbrain "brain-first lookup") ────────
+# Before the expensive cascade, deep_research asks the RAG store whether prior
+# research already covers the question. Gate on the EXTERNAL corpus signal (chunks
+# above a similarity threshold), never the model's own confidence.
+RESEARCH_CORPUS_HIT_THRESHOLD = float(os.environ.get("RESEARCH_CORPUS_HIT_THRESHOLD", "0.75"))
+RESEARCH_CORPUS_MIN_CHUNKS = int(os.environ.get("RESEARCH_CORPUS_MIN_CHUNKS", "2"))
+RESEARCH_CORPUS_NS_PREFIX = os.environ.get("RESEARCH_CORPUS_NS_PREFIX", "docs/research")
+RESEARCH_CORPUS_FIRST = os.environ.get("RESEARCH_CORPUS_FIRST", "1") not in ("0", "false", "False")
+
 # Similarity thresholds (Jaccard over word-shingles).
 QUERY_DUP_THRESHOLD = float(os.environ.get("RESEARCH_QUERY_DUP_THRESHOLD", "0.8"))
 CONTENT_DUP_THRESHOLD = float(os.environ.get("RESEARCH_CONTENT_DUP_THRESHOLD", "0.85"))
@@ -697,6 +706,43 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
         return {"ok": False, "error": "empty question"}
     t0 = time.monotonic()
     max_loops = max(1, min(int(max_loops), 8))
+
+    # ── CORPUS-FIRST gate (adaptive retrieval / gbrain brain-first lookup) ────
+    # Ask the RAG store whether prior research already covers this question. A hit
+    # (>= MIN_CHUNKS chunks above the similarity THRESHOLD in the research namespace)
+    # answers instantly from the corpus and SKIPS the expensive cascade entirely.
+    if RESEARCH_CORPUS_FIRST:
+        pc = _mcp_call(RAG_MCP_URL, "corpus_hit_check", {
+            "query": question, "namespace_prefix": RESEARCH_CORPUS_NS_PREFIX,
+            "threshold": RESEARCH_CORPUS_HIT_THRESHOLD,
+            "min_chunks": RESEARCH_CORPUS_MIN_CHUNKS})
+        res = (pc.get("result") or {}) if isinstance(pc, dict) else {}
+        hit = bool(res.get("hit"))
+        chunks = res.get("chunks") or []
+        otel_emit.record("corpus_precheck", {
+            "tool": "deep_research", "question": question,
+            "hit": hit, "chunks_found": res.get("chunks_found", 0),
+            "threshold": res.get("threshold"), "scoring": res.get("scoring"),
+            "launched_cascade": not hit})
+        if hit and chunks:
+            n = res.get("chunks_found", len(chunks))
+            report = (f"# Prior research: {question}\n\n"
+                      f"> _Answered from the existing corpus — {n} prior research "
+                      f"chunk(s) above similarity {res.get('threshold')} covered this. "
+                      f"No external research cascade was launched (corpus-first gate)._\n\n"
+                      + "\n\n".join(
+                          f"## Source: {c.get('source','?')} "
+                          f"(namespace {c.get('namespace','?')}, score {c.get('score')})\n\n"
+                          f"{c.get('snippet','')}" for c in chunks))
+            return {
+                "ok": True, "question": question,
+                "answered_from_corpus": True, "launched_cascade": False,
+                "corpus_chunks": chunks, "report_md": report,
+                "actionable": True, "confidence_is_advisory": True,
+                "sources_explored": len(chunks),
+                "stop_reason": "corpus-first hit",
+                "note": f"answered from existing corpus — {n} prior research chunk(s) covered this",
+                "elapsed_s": round(time.monotonic() - t0, 2), "sovereign": True}
 
     plan = plan_research(question)
     subgoals = plan["subgoals"]

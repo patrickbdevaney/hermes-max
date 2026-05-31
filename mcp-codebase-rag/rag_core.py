@@ -436,6 +436,38 @@ def rerank(query: str, documents: list[str]) -> list[int] | None:
         return None
 
 
+def rerank_scores(query: str, documents: list[str]) -> list[float] | None:
+    """Like rerank(), but return the cross-encoder relevance_score PER document (in
+    input order), not just the order. Used by corpus_hit_check to threshold on a
+    semantic-similarity score (the adaptive-retrieval corpus-first gate). None if
+    the endpoint is unset/unreachable/misshaped."""
+    base = rerank_base_url()
+    if not base or not documents:
+        return None
+    docs = [d[:RERANK_DOC_CHARS] for d in documents]
+    to = httpx.Timeout(min(QUERY_RERANK_TIMEOUT, RERANK_TIMEOUT), connect=_BACKEND_CONNECT_TIMEOUT)
+    try:
+        with httpx.Client(timeout=to) as client:
+            resp = client.post(
+                f"{base}/rerank",
+                json={"model": RERANK_MODEL, "query": query, "documents": docs},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        results = payload.get("results", payload) if isinstance(payload, dict) else payload
+        if not isinstance(results, list) or not results:
+            return None
+        scores = [0.0] * len(docs)
+        for r in results:
+            i = int(r.get("index", -1))
+            if 0 <= i < len(docs):
+                scores[i] = float(r.get("relevance_score", r.get("score", 0.0)))
+        return scores
+    except Exception:  # noqa: BLE001
+        _mark_unavailable("rerank")
+        return None
+
+
 # ── storage ─────────────────────────────────────────────────────────────────
 def _connect() -> tuple[sqlite3.Connection, bool]:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -1025,6 +1057,67 @@ def search_code(query: str, k: int = 8) -> dict[str, Any]:
 
         results = [_fmt(rows[i]) for i in ids if i in rows]
         return {"ok": True, "query": query, "mode": mode, "results": results}
+    finally:
+        con.close()
+
+
+def corpus_hit_check(query: str, namespace_prefix: str = "docs/", threshold: float = 0.75,
+                     min_chunks: int = 2, k: int = 8) -> dict[str, Any]:
+    """Adaptive-retrieval CORPUS-FIRST gate: is the question already answered by
+    prior ingested docs/research under `namespace_prefix`, so an expensive external
+    research cascade is unnecessary?
+
+    Gathers BM25+dense candidates, filters to chunks whose namespace (repo column)
+    starts with `namespace_prefix`, and scores each against the query with the
+    cross-encoder reranker (a calibrated semantic-relevance score in ~[0,1], the
+    right scale for `threshold`). A hit = at least `min_chunks` chunks score
+    >= `threshold`. Returns the matching chunk snippets so the caller can answer
+    from the corpus directly. Gates on an EXTERNAL signal (corpus relevance), never
+    the model's own confidence — per the adaptive-retrieval literature.
+
+    Degradation: no reranker -> fall back to namespace-restricted BM25/dense
+    presence (a hit = >= min_chunks candidates in the namespace), threshold reported
+    as null so the operator knows scoring was unavailable."""
+    con, vec_ok = _connect()
+    try:
+        prefix = (namespace_prefix or "docs/").strip()
+        like = prefix.replace("%", "") + "%"
+        total = con.execute("SELECT COUNT(*) AS n FROM chunks WHERE repo LIKE ?", (like,)).fetchone()["n"]
+        if total == 0:
+            return {"ok": True, "hit": False, "chunks_found": 0, "threshold": threshold,
+                    "namespace_prefix": prefix, "scoring": "none", "reason": "namespace empty",
+                    "chunks": []}
+        pool = max(k * 8, 60)
+        bm = _bm25(con, query, pool)
+        dn = _dense(con, query, pool, vec_ok)
+        cand_ids = list({cid for cid, _ in bm} | {cid for cid, _ in dn})
+        rows = _rows_for(con, cand_ids)
+        ns = [(cid, rows[cid]) for cid in cand_ids
+              if cid in rows and str(rows[cid]["repo"] or "").startswith(prefix)]
+        if not ns:
+            return {"ok": True, "hit": False, "chunks_found": 0, "threshold": threshold,
+                    "namespace_prefix": prefix, "scoring": "candidates", "candidates": 0,
+                    "chunks": []}
+        docs = [f"{r['symbol']}\n{r['content']}" for _, r in ns]
+        scores = rerank_scores(query, docs) if rerank_configured() else None
+        if scores is not None:
+            scored = sorted(
+                ({"score": round(scores[i], 4), "namespace": ns[i][1]["repo"],
+                  "source": ns[i][1]["path"], "snippet": ns[i][1]["content"][:800]}
+                 for i in range(len(ns))),
+                key=lambda d: d["score"], reverse=True)
+            above = [c for c in scored if c["score"] >= threshold]
+            hit = len(above) >= min_chunks
+            return {"ok": True, "hit": hit, "chunks_found": len(above), "threshold": threshold,
+                    "namespace_prefix": prefix, "scoring": "rerank", "candidates": len(ns),
+                    "chunks": (above[:k] if hit else scored[:3])}
+        # no reranker: fall back to namespace-restricted candidate presence
+        hit = len(ns) >= min_chunks
+        chunks = [{"score": None, "namespace": r["repo"], "source": r["path"],
+                   "snippet": r["content"][:800]} for _, r in ns[:k]]
+        return {"ok": True, "hit": hit, "chunks_found": (len(ns) if hit else 0),
+                "threshold": None, "namespace_prefix": prefix, "scoring": "bm25-fallback",
+                "candidates": len(ns), "chunks": chunks}
     finally:
         con.close()
 

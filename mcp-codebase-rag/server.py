@@ -111,6 +111,21 @@ def search_code(query: str, k: int = 8) -> dict:
 
 @mcp.tool()
 @_threaded
+def corpus_hit_check(query: str, namespace_prefix: str = "docs/", threshold: float = 0.75,
+                     min_chunks: int = 2, k: int = 8) -> dict:
+    """CORPUS-FIRST gate (adaptive retrieval): is `query` already answered by prior
+    ingested docs/research under `namespace_prefix`? Scores namespace-restricted
+    candidates against the query with the cross-encoder reranker; a hit = at least
+    `min_chunks` chunks score >= `threshold`. Returns {hit, chunks_found, threshold,
+    scoring, chunks:[{score,namespace,source,snippet}]}. deep_research calls this
+    BEFORE launching its expensive cascade so a repeat/related question is answered
+    instantly from the corpus. Gates on corpus relevance (an external signal), not
+    the model's self-confidence."""
+    return rag_core.corpus_hit_check(query, namespace_prefix, threshold, min_chunks, k)
+
+
+@mcp.tool()
+@_threaded
 def index_document(text: str, namespace: str, source: str = "", title: str = "") -> dict:
     """Ingest a distilled document (markdown) into the hybrid store under a
     `namespace` (e.g. 'docs/fastapi'), co-retrievable with code via search_code.
