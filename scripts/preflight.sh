@@ -260,6 +260,26 @@ if [ "${#missing[@]}" -eq 0 ]; then
 else
   fail soft "missing skills (${missing[*]}) — run register-mcp.sh or preflight --fix"
 fi
+# Critical single-call skills must be installed AND carry the single-call constraint
+# (a stale copy without it is the multi-deep_research-call trap).
+for s in workflow-deep-research workflow-tool-selection; do
+  f="${SKILL_DEST}/${s}/SKILL.md"
+  if [ ! -f "${f}" ]; then
+    fail soft "critical skill ${s} NOT installed in ${SKILL_DEST} — run register-mcp.sh"
+  elif [ "${s}" = "workflow-deep-research" ] && ! grep -qiE "more than once|ONCE per (task|session)" "${f}"; then
+    fail soft "${s} installed but missing the single-call constraint (stale copy) — reinstall"
+  else
+    pass "critical skill ${s} installed in Hermes skills dir"
+  fi
+done
+# Also confirm Hermes actually has it enabled (best-effort; informational).
+if command -v hermes >/dev/null 2>&1; then
+  if hermes skills list 2>/dev/null | grep -qE "workflow-deep-research\b.*enabled"; then
+    pass "Hermes reports workflow-deep-research enabled"
+  else
+    warn "could not confirm workflow-deep-research enabled via 'hermes skills list'"
+  fi
+fi
 
 # ════════════════════════════════════════════════════════════════════════════
 echo

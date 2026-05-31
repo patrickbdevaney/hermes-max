@@ -10,16 +10,15 @@ description: >-
 
 # workflow-deep-research
 
-> **Call `deep_research` ONCE per task.** Fire a single comprehensive multi-topic
-> query. Do **NOT** call it again in the same session unless the first call
-> returned **zero** sources. `deep_research` is a **5–10 minute** operation — it
-> already loops `plan → develop → explore → verify → synthesize` internally, so
-> repeat calls only compound wall time. After it returns, use `search_code` or
-> `mcp-docs` (`search_docs` / `research_topic`) for any follow-up lookups.
->
-> **Fallback (never a second deep_research):** if the one call times out or
-> returns **fewer than 3 sources**, drop to `mcp-docs.research_topic` as a lighter
-> path — never launch another `deep_research`.
+> **NEVER call `deep_research` more than once per session, under any circumstances.**
+> If the result has `confidence: low` (or `adequate`) that is **NORMAL** — by design
+> claims are effectively single-sourced after the echo-chamber guard dedups
+> overlapping sources, so the score is not a measure of whether you have enough.
+> **Proceed immediately to implementation with whatever synthesis was returned**;
+> the verify gate on your code is the real quality check. **A second `deep_research`
+> call is always wrong** — it just burns wall-clock without changing the result. For
+> any follow-up, use `search_code` / `mcp-docs` (`search_docs` / `research_topic`),
+> never another `deep_research`.
 
 Use this when the answer is **not reliably in pretraining or the local RAG/KG**:
 a new framework, a recent release, "the current best/most-recommended X", or a
@@ -62,6 +61,14 @@ exist to prevent the overspawning failure mode.
   over SEO content farms (the ranker already does this — don't fight it).
 - **Stop at the cap honestly.** When loops/budget are exhausted, end with a
   **confidence + gaps** note rather than padding with low-confidence filler.
+- **Confidence is advisory — act on the synthesis regardless of its level.** A
+  `confidence: low` result is the *expected* outcome when the echo-chamber guard
+  deduped overlapping sources (the same fact corroborated once, not N times) — it
+  does **not** mean the findings are wrong or the report is incomplete. The result
+  is `actionable: true` either way. **Proceed to implementation with it; the verify
+  gate on your code is the real quality check.** Do **NOT** re-run `deep_research`
+  to chase a higher confidence score — that is the multi-call trap and it just
+  burns wall-clock without changing the deduped-corroboration math.
 - **It compounds.** `deep_research` writes the brief + entities into RAG/KG, so a
   later related run starts ahead — prefer it over re-researching from scratch.
 

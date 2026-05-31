@@ -91,7 +91,14 @@ _TOOL_BUDGET_DEFAULTS: dict[str, dict[str, Any]] = {
     "kg_query":       {"expected": "milliseconds",       "ceiling_s": 15,   "lookahead": None},
     "kg_record":      {"expected": "milliseconds",       "ceiling_s": 15,   "lookahead": None},
     "fetch_clean":    {"expected": "seconds-per-page",   "ceiling_s": 90,   "lookahead": "page count"},
-    "deep_research":  {"expected": "minutes",            "budget_s": 600, "ceiling_s": 900, "heartbeat_timeout_s": 120, "lookahead": "query count x per-source"},
+    # deep_research wall-time is dominated by local-model inference (plan + per-source
+    # verify + synthesis). On slow local hardware (e.g. an 8GB laptop GPU) a single
+    # legitimate run measured ~600-1000s, so the OLD 900s hard ceiling killed a
+    # working first call → the agent retried → wasted ~15 min and tripled the call
+    # count. Ceiling raised to 1500 (≥ any measured legitimate run) so a heartbeating
+    # call is NEVER killed for being slow; soft budget 900 (over budget but alive is
+    # fine); heartbeat window 180. All three are env-overridable for faster hosts.
+    "deep_research":  {"expected": "minutes",            "budget_s": 900, "ceiling_s": 1500, "heartbeat_timeout_s": 180, "lookahead": "query count x per-source"},
     "parallel_draft": {"expected": "seconds (concurrent)", "ceiling_s": 120, "lookahead": "pool size"},
     "synth":          {"expected": "seconds",            "ceiling_s": 120,  "lookahead": None},
     "steer":          {"expected": "seconds",            "ceiling_s": 120,  "lookahead": None},

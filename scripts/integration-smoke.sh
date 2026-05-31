@@ -28,10 +28,12 @@ command -v hermes >/dev/null 2>&1 || { echo "✗ 'hermes' not on PATH — instal
 LIVE="${HMX_LOG_DIR:-${HOME}/.hermes-max/logs}/live.jsonl"
 CORPUS_DIR="$(hmx_corpus_dir)"
 KG_DB="$(hmx_kg_path)"
-# Generous per-turn cap: deep_research alone is 5-10 min; the whole task (research
-# + implement + verify + checkpoint) must still land under 20 min. Override with
-# SMOKE_TIMEOUT. The < 20-min assertion uses the actual elapsed wall time.
-SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-1100}"
+# Per-turn kill cap: a single deep_research is ~600-1000s on a slow laptop GPU, then
+# implement + verify + checkpoint. Give the turn room to FINISH (so we can measure a
+# real wall time) — the separate < 20-min (WALL_CAP_S) assertion judges speed. With
+# the multi-call retry trap fixed (single call, confidence not a retry signal, raised
+# ceiling), a clean run lands well under the cap. Both env-overridable.
+SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-1500}"
 WALL_CAP_S="${SMOKE_WALL_CAP_S:-1200}"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/hmx-smoke.XXXXXX")"
@@ -63,10 +65,33 @@ elif ! "${SCRIPT_DIR}/healthcheck.sh" >/dev/null 2>&1; then
   echo "${R}✗ stack not healthy (run: hm up).${Z}"; exit 1
 fi
 
-# ── snapshot baselines for the corpus / KG (so we measure THIS run's effect) ──
-md_count() { find "${CORPUS_DIR}" -type f -name '*.md' 2>/dev/null | wc -l | tr -d ' '; }
+# ── skills must be LOADED by Hermes (a missing single-call skill is the multi-call
+#    trap) — assert before spending 15 minutes on the agent turn. ───────────────
+echo "• confirming the long-horizon skills are loaded by Hermes …"
+SKILLS_LIST="$(hermes skills list 2>/dev/null || true)"
+skills_ok=1
+for s in workflow-deep-research workflow-tool-selection; do
+  if printf '%s\n' "${SKILLS_LIST}" | grep -qE "${s}\b.*enabled" \
+     || [ -f "${HOME}/.hermes/skills/hermes-max/${s}/SKILL.md" ]; then
+    echo "  ${G}✓${Z} ${s} loaded"
+  else
+    echo "  ${R}✗${Z} ${s} NOT loaded — run scripts/register-mcp.sh"; skills_ok=0
+  fi
+done
+if [ "${skills_ok}" != "1" ]; then
+  echo "${R}✗ required skills not loaded — fix before the smoke (the single-call constraint won't apply).${Z}"
+  exit 1
+fi
+
+# ── baselines (so we measure THIS run's effect) ──────────────────────────────
+# Corpus writes land in the GLOBAL corpus tree (~/.hermes-max/corpus/<namespace>/
+# <type>/<slug>.md — e.g. a research-* namespace), NOT the project temp dir. So we
+# count *.md files NEWER than a marker stamped at run start, across the whole corpus.
 kg_entities() { sqlite3 "${KG_DB}" 'select count(*) from entities' 2>/dev/null || echo 0; }
-CORPUS_BEFORE="$(md_count)"
+new_corpus_md() { find "${CORPUS_DIR}" -type f -name '*.md' -newer "${START_MARKER}" 2>/dev/null | wc -l | tr -d ' '; }
+START_MARKER="${WORK}/.start_marker"
+mkdir -p "${CORPUS_DIR}" 2>/dev/null || true
+: > "${START_MARKER}"          # mtime = run start; corpus files newer than this are THIS run's
 KG_BEFORE="$(kg_entities)"
 LIVE_MARK="$(wc -l < "${LIVE}" 2>/dev/null || echo 0)"
 
@@ -100,20 +125,23 @@ echo "${B}── assertions ──${Z}"
 #    Evidence: a deep_research synthesis/done span fired AND the turn produced
 #    output (didn't time out) AND no hung/kill marker appeared during the run.
 empty=0; [ -z "${AGENT_OUT}" ] && empty=1
-dr_span=0; span_fired "deep_research|report_synthesized|sources_explored|research_planned|tool_heartbeat" && dr_span=1
+# the actual completion span (research server emits it only when the full
+# plan->verify->synthesize finished) — the rigorous "no finish-line kill" signal.
+dr_done=0; span_fired "deep_research_done|report_synthesized" && dr_done=1
 killed=0;  span_fired "hung|killed|stall_kill|over.?ceiling|gateway_timeout" && killed=1
-if [ "${dr_span}" = "1" ] && [ "${empty}" = "0" ] && [ "${killed}" = "0" ]; then
-  ok "deep_research completed without timeout/kill (synthesis span fired, no kill marker)"
+if [ "${dr_done}" = "1" ] && [ "${empty}" = "0" ] && [ "${killed}" = "0" ]; then
+  ok "deep_research completed without timeout/kill (deep_research_done fired, no kill marker)"
 else
-  no "deep_research did not cleanly complete (span=${dr_span} empty_out=${empty} kill_marker=${killed})"
+  no "deep_research did not cleanly complete (done=${dr_done} empty_out=${empty} kill_marker=${killed})"
 fi
 
-# 2. >= 2 markdown files in the corpus.
-CORPUS_AFTER="$(md_count)"
-if [ "${CORPUS_AFTER:-0}" -ge 2 ] 2>/dev/null; then
-  ok "corpus has ${CORPUS_AFTER} markdown file(s) (>=2; was ${CORPUS_BEFORE})"
+# 2. >= 2 markdown files written to the corpus DURING this run (newer than the
+#    start marker), counted across the whole global corpus tree.
+CORPUS_NEW="$(new_corpus_md)"
+if [ "${CORPUS_NEW:-0}" -ge 2 ] 2>/dev/null; then
+  ok "corpus gained ${CORPUS_NEW} new markdown file(s) this run (>=2, under ${CORPUS_DIR})"
 else
-  no "corpus has only ${CORPUS_AFTER} markdown file(s) (<2; was ${CORPUS_BEFORE})"
+  no "corpus gained only ${CORPUS_NEW} new markdown file(s) this run (<2, under ${CORPUS_DIR})"
 fi
 
 # 3. >= 1 KG entity recorded.

@@ -10,7 +10,11 @@
 #
 # This script raises ONLY the hermes-max-* MCP call timeouts to match each server's
 # real worst-case wall-clock:
-#   • hermes-max-research      -> 900  (deep_research: multi-loop source synthesis)
+#   • hermes-max-research      -> 1800 (deep_research: multi-loop source synthesis;
+#                                       must EXCEED the watchdog deep_research hard
+#                                       ceiling — measured ~600-1000s on a slow
+#                                       laptop GPU — so a single legitimate call is
+#                                       never severed before completing)
 #   • hermes-max-docs          -> 300  (research_topic: ingest + distill inference)
 #   • hermes-max-codebase-rag  -> 300  (index_repo on a large tree)
 #   • all other hermes-max-*   -> 180  (headroom over the 120s default)
@@ -40,7 +44,7 @@ fi
 # if a host needs more headroom; the script clamps UP only (never lowers a value
 # that is already at least the target).
 export HMX_CONFIG="${CONFIG}"
-export HMX_T_RESEARCH="${HERMES_MCP_TIMEOUT_RESEARCH:-900}"
+export HMX_T_RESEARCH="${HERMES_MCP_TIMEOUT_RESEARCH:-1800}"
 export HMX_T_DOCS="${HERMES_MCP_TIMEOUT_DOCS:-300}"
 export HMX_T_RAG="${HERMES_MCP_TIMEOUT_RAG:-300}"
 export HMX_T_OTHER="${HERMES_MCP_TIMEOUT_OTHER:-180}"
