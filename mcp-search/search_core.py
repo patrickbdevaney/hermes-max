@@ -50,6 +50,32 @@ VERIFY_CALL_TIMEOUT = float(os.environ.get("SEARCH_VERIFY_TIMEOUT", "600"))
 ESCALATION_PORT = int(os.environ.get("MCP_ESCALATION_PORT", "9105"))
 POOL_CALL_TIMEOUT = float(os.environ.get("SEARCH_POOL_TIMEOUT", "120"))
 
+# M-Stage 6: optional reranker scoring for quality_threshold early-exit when no
+# test oracle is available (auto-detect the local rerank serve on :8003).
+RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "http://127.0.0.1:8003").rstrip("/")
+RERANK_MODEL = os.environ.get("RERANK_MODEL", "/model")
+
+
+def _rerank_score(query: str, doc: str) -> float | None:
+    """Cross-encoder relevance of `doc` to `query` (~[0,1]); None if unreachable.
+    Used only for the quality_threshold path (execution-based selection is default)."""
+    base = RERANK_BASE_URL
+    if not base or not doc:
+        return None
+    for path in ("/rerank", "/v1/rerank"):
+        try:
+            with httpx.Client(timeout=8) as c:
+                r = c.post(f"{base}{path}", json={"model": RERANK_MODEL, "query": query[:2000],
+                                                  "documents": [doc[:2000]]})
+                r.raise_for_status()
+                payload = r.json()
+            results = payload.get("results", payload) if isinstance(payload, dict) else payload
+            if isinstance(results, list) and results:
+                return float(results[0].get("relevance_score", results[0].get("score", 0.0)))
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
 
 # ── verify boundary (graceful-degrade if mcp-verify is unreachable) ──────────
 async def _call_verify(path: str, language: str) -> dict[str, Any]:
@@ -94,7 +120,8 @@ def _tests_passed(verify_result: dict[str, Any] | None) -> int:
 
 # ── deterministic selector (the lossless core — no model calls) ──────────────
 def select_from_candidates(candidates: list[dict], tests: dict | None = None,
-                           language: str = "python", base_files: dict | None = None) -> dict[str, Any]:
+                           language: str = "python", base_files: dict | None = None,
+                           early_exit: bool = False) -> dict[str, Any]:
     """Run each candidate through mcp-verify in isolation; select the green one.
 
     candidates: [{"id": str, "files": {relpath: content}}, ...]
@@ -102,6 +129,11 @@ def select_from_candidates(candidates: list[dict], tests: dict | None = None,
     base_files: {relpath: content} common scaffolding (e.g. pyproject) for all.
     Returns the selected candidate id + per-candidate verdicts. Never returns a
     red selection: if none is green, selected is None and reason says so.
+
+    early_exit (M-Stage 6): return as soon as a candidate verifies GREEN, WITHOUT
+    verifying the rest — execution-based early-exit (RASC: large sample savings at
+    comparable accuracy; naive best-of-N gets less reliable as N grows). Trades
+    'best among green' for 'first green', the right call for code where green==done.
     """
     if not candidates:
         return {"ok": False, "error": "no candidates supplied"}
@@ -128,6 +160,19 @@ def select_from_candidates(candidates: list[dict], tests: dict | None = None,
             })
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+        # EARLY EXIT: first green wins — skip verifying the remaining candidates.
+        if early_exit and verdicts[-1]["reachable"] and verdicts[-1]["green"]:
+            otel_emit.record("best_of_n_result", {
+                "candidates_generated": len(candidates), "candidates_verified": len(verdicts),
+                "early_exit_fired": True, "selected": cid,
+                "tests_passed": verdicts[-1]["tests_passed"]}, status="ok")
+            return {"ok": True, "selected": cid, "early_exit": True,
+                    "selected_files": files, "green_count": 1,
+                    "candidates_verified": len(verdicts), "n": len(candidates),
+                    "verdicts": verdicts,
+                    "reason": f"early-exit: '{cid}' verified green after "
+                              f"{len(verdicts)}/{len(candidates)} candidates "
+                              f"({verdicts[-1]['tests_passed']} tests passed)"}
 
     if any(not vd["reachable"] for vd in verdicts):
         return {"ok": False, "verify_unreachable": True, "verdicts": verdicts,
@@ -145,6 +190,9 @@ def select_from_candidates(candidates: list[dict], tests: dict | None = None,
     otel_emit.record("search_selected", {"selected": best["id"], "n": len(verdicts),
                                         "green": len(green), "tests_passed": best["tests_passed"],
                                         "size": best["size"]}, status="ok")
+    otel_emit.record("best_of_n_result", {
+        "candidates_generated": len(candidates), "candidates_verified": len(verdicts),
+        "early_exit_fired": False, "selected": best["id"], "green_count": len(green)}, status="ok")
     return {
         "ok": True,
         "selected": best["id"],
@@ -189,10 +237,19 @@ def _generate_one(task_spec: str, language: str, temperature: float) -> str | No
 def generate_and_select(task_spec: str, n: int = 0, language: str = "python",
                         target_path: str = "solution.py", tests: dict | None = None,
                         base_files: dict | None = None,
-                        candidates: list[dict] | None = None) -> dict[str, Any]:
+                        candidates: list[dict] | None = None,
+                        early_exit: bool = True, quality_threshold: float = 0.0) -> dict[str, Any]:
     """Bounded verifier-guided search. If `candidates` are supplied, skip
     generation and select among them (the cheap, always-available path). Else
     generate N candidates from $VLLM_BASE_URL (HARD subtasks only) and select.
+
+    early_exit (M-Stage 6, default True for code): generate-and-verify ONE AT A TIME
+    and return the moment a candidate verifies green — saving the cost of generating
+    (and verifying) the remaining candidates. The largest saving is in generation
+    (RASC reports up to ~85% fewer samples at comparable accuracy). With supplied
+    candidates it short-circuits verification instead.
+    quality_threshold (0-1, 0=off): when no test oracle is available, score each
+    candidate against the task with the reranker and return the first above threshold.
     """
     n = DEFAULT_N if not n else n
     n = max(1, min(int(n), MAX_N))
@@ -202,21 +259,42 @@ def generate_and_select(task_spec: str, n: int = 0, language: str = "python",
             return {"ok": False, "disabled": True,
                     "reason": "generation path needs $VLLM_BASE_URL; supply `candidates` to use the "
                               "selector directly, or write the patch yourself"}
-        if not tests:
+        if not tests and quality_threshold <= 0:
             return {"ok": False, "error": "generation requires `tests` to select against (lossless "
-                    "selection is execution-based)"}
+                    "selection is execution-based), or quality_threshold>0 for reranker selection"}
         gen: list[dict] = []
         for i in range(n):
             # vary temperature across samples for diversity (no RNG needed)
             temp = round(0.2 + 0.6 * (i / max(1, n - 1)), 3) if n > 1 else 0.2
             code = _generate_one(task_spec, language, temp)
-            if code:
-                gen.append({"id": f"gen{i}", "files": {target_path: code}})
+            if not code:
+                continue
+            cand = {"id": f"gen{i}", "files": {target_path: code}}
+            gen.append(cand)
+            # INTERLEAVED early-exit: verify (or score) THIS candidate now; stop
+            # generating the rest the moment one is good enough.
+            if early_exit and tests:
+                sel1 = select_from_candidates([cand], tests, language, base_files, early_exit=True)
+                if sel1.get("ok") and sel1.get("selected"):
+                    sel1["candidates_generated"] = len(gen)
+                    return sel1
+            elif quality_threshold > 0:
+                score = _rerank_score(task_spec, code)
+                if score is not None and score >= quality_threshold:
+                    otel_emit.record("best_of_n_result", {
+                        "candidates_generated": len(gen), "candidates_verified": 0,
+                        "early_exit_fired": True, "best_score": round(score, 4),
+                        "threshold": quality_threshold, "selected": cand["id"]}, status="ok")
+                    return {"ok": True, "selected": cand["id"], "selected_files": cand["files"],
+                            "early_exit": True, "best_score": round(score, 4),
+                            "candidates_generated": len(gen),
+                            "reason": f"early-exit: candidate scored {score:.3f} >= {quality_threshold} "
+                                      "(reranker; no test oracle)"}
         if not gen:
             return {"ok": False, "error": "no candidates generated (model unreachable?) — fall back"}
         candidates = gen
 
-    return select_from_candidates(candidates, tests, language, base_files)
+    return select_from_candidates(candidates, tests, language, base_files, early_exit=early_exit)
 
 
 # ── Stage 4: verifier-selected parallel_draft across the conductor pool ───────
@@ -302,7 +380,9 @@ def parallel_draft(task_spec: str, language: str = "python",
 
     otel_emit.record("draft_fanout", {"n_sources": len(candidates),
                                      "families": ",".join(sources)}, status="ok")
-    sel = select_from_candidates(candidates, tests, language, base_files)
+    # early_exit=True (M-Stage 6): the first pool draft that verifies green wins —
+    # no need to verify the rest (execution-based, code where green==done).
+    sel = select_from_candidates(candidates, tests, language, base_files, early_exit=True)
     sel["draft_source"] = "pool"
     sel["candidates_from"] = sources
     # none-pass fallback: the subtask was harder than 'verifiable-slop' assumed

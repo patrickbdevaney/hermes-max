@@ -70,7 +70,8 @@ async def health(_: Request) -> JSONResponse:
 def generate_and_select(task_spec: str, n: int = 0, language: str = "python",
                         target_path: str = "solution.py", tests: dict | None = None,
                         base_files: dict | None = None,
-                        candidates: list | None = None) -> dict:
+                        candidates: list | None = None,
+                        early_exit: bool = True, quality_threshold: float = 0.0) -> dict:
     """Bounded verifier-guided search. Two modes:
 
     * SELECTOR (supply `candidates=[{"id","files":{path:content}}, ...]` + `tests`):
@@ -80,11 +81,14 @@ def generate_and_select(task_spec: str, n: int = 0, language: str = "python",
       `task_spec` (writing `target_path`), then selects against `tests`. HARD
       subtasks only — N is capped because samples compete for the one GPU.
 
-    Never returns a red selection: if nothing verifies green, selected is None.
-    Degrades to a clear error (never crashes) when the model is unreachable.
+    early_exit (default True): generate-and-verify one at a time and return the
+    moment a candidate goes GREEN — saving the cost of the remaining samples
+    (RASC: large savings at comparable accuracy). quality_threshold (0-1, 0=off):
+    when no test oracle exists, score candidates with the reranker and return the
+    first above threshold. Never returns a red selection; degrades to a clear error.
     """
     return search_core.generate_and_select(task_spec, n, language, target_path, tests,
-                                            base_files, candidates)
+                                            base_files, candidates, early_exit, quality_threshold)
 
 
 @mcp.tool()
