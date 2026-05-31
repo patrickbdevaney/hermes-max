@@ -20,6 +20,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 import observability_core
+import trajectory_store
 
 # scripts/ holds the self-contained, stdlib-only condenser (M-Stage 2) — import its
 # condense() directly so the tool and the CLI share one implementation.
@@ -128,6 +129,42 @@ def record_task_metrics(
         task_id, tokens, duration_ms, verify_passed, retrieval_precision,
         skill_reused, escalation_usd, loop_stalled, attributes,
     )
+
+
+@mcp.tool()
+@_threaded
+def record_trajectory(task: str, success: bool, tool_calls: list | None = None,
+                      plan: str = "", verify_green: bool | None = None,
+                      wall_time_s: float | None = None, skills_used: list | None = None,
+                      failure_mode: str = "", outcome: str = "") -> dict:
+    """Record a COMPLETED agent task's full trajectory (Phase 4.1) — the training
+    signal for the GEPA skill optimizer + Trace2Skill distillation + failure
+    localization. Call this at task end with the task, outcome, tool calls,
+    verify result, and (on failure) the failure_mode. Emits a trajectory_recorded
+    span and appends to the JSONL trajectory store."""
+    rec = trajectory_store.record(task, success, tool_calls, plan, verify_green,
+                                  wall_time_s, skills_used, failure_mode, outcome)
+    if _livelog is not None:
+        try:
+            _livelog.forward("trajectory_recorded",
+                             {"task": task[:120], "success": success, "verify_green": verify_green,
+                              "tool_calls": len(tool_calls or []), "wall_time_s": wall_time_s,
+                              "failure_mode": failure_mode or None}, "ok" if success else "error")
+        except Exception:  # noqa: BLE001
+            pass
+    observability_core.record_trace("trajectory_recorded",
+                                    {"task": task[:120], "success": success,
+                                     "verify_green": verify_green, "failure_mode": failure_mode or None})
+    return {"ok": rec.get("ok", True), "recorded": True, **trajectory_store.stats()}
+
+
+@mcp.tool()
+@_threaded
+def list_trajectories(limit: int = 20, success: bool | None = None) -> dict:
+    """List recent recorded trajectories (Phase 4.1), newest last; optional success
+    filter. Used by the optimizer/distillation jobs and for inspection."""
+    return {"ok": True, "trajectories": trajectory_store.load(limit=limit, success=success),
+            **trajectory_store.stats()}
 
 
 @mcp.tool()
