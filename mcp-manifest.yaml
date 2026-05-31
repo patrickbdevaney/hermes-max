@@ -143,3 +143,12 @@ servers:
     profiles: [gpu_local, lean_cloud]
     requires: []
     degrades_to: thin wrapper over Serena (oraios/serena); agent falls back to search_code/grep if the language server is down
+  - name: codegraph
+    dir: mcp-codegraph
+    port: 9114
+    port_env: MCP_CODEGRAPH_PORT
+    health: /health
+    register_as: hermes-max-codegraph
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: pure Python-ast graph (SQLite); structural search degrades without ast-grep
