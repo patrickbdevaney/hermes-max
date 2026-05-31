@@ -436,16 +436,23 @@ def rerank(query: str, documents: list[str]) -> list[int] | None:
         return None
 
 
-def rerank_scores(query: str, documents: list[str]) -> list[float] | None:
+def rerank_scores(query: str, documents: list[str], doc_chars: int | None = None,
+                  timeout_s: float | None = None) -> list[float] | None:
     """Like rerank(), but return the cross-encoder relevance_score PER document (in
     input order), not just the order. Used by corpus_hit_check to threshold on a
     semantic-similarity score (the adaptive-retrieval corpus-first gate). None if
-    the endpoint is unset/unreachable/misshaped."""
+    the endpoint is unset/unreachable/misshaped.
+
+    doc_chars/timeout_s override the per-doc truncation and the HTTP timeout — the
+    corpus gate passes SHORT snippets + a GENEROUS timeout, because reranking a pool
+    of full chunks blows the interactive 4s budget on a small local reranker (which
+    would error and mark rerank sticky-unavailable for the whole process)."""
     base = rerank_base_url()
     if not base or not documents:
         return None
-    docs = [d[:RERANK_DOC_CHARS] for d in documents]
-    to = httpx.Timeout(min(QUERY_RERANK_TIMEOUT, RERANK_TIMEOUT), connect=_BACKEND_CONNECT_TIMEOUT)
+    docs = [d[:(doc_chars or RERANK_DOC_CHARS)] for d in documents]
+    cap = timeout_s if timeout_s is not None else min(QUERY_RERANK_TIMEOUT, RERANK_TIMEOUT)
+    to = httpx.Timeout(cap, connect=_BACKEND_CONNECT_TIMEOUT)
     try:
         with httpx.Client(timeout=to) as client:
             resp = client.post(
@@ -1090,16 +1097,34 @@ def corpus_hit_check(query: str, namespace_prefix: str = "docs/", threshold: flo
         pool = max(k * 8, 60)
         bm = _bm25(con, query, pool)
         dn = _dense(con, query, pool, vec_ok)
-        cand_ids = list({cid for cid, _ in bm} | {cid for cid, _ in dn})
-        rows = _rows_for(con, cand_ids)
-        ns = [(cid, rows[cid]) for cid in cand_ids
-              if cid in rows and str(rows[cid]["repo"] or "").startswith(prefix)]
+        # Order candidates best-first (BM25 rank, then any dense-only ids) and CAP the
+        # rerank pool — reranking dozens of full chunks blows the 4s query timeout
+        # (→ the cross-encoder errors and we lose scoring). The top ~16 BM25 hits in
+        # the namespace are far more than enough to find min_chunks above threshold.
+        ordered, seen = [], set()
+        for cid, _ in bm:
+            if cid not in seen:
+                seen.add(cid); ordered.append(cid)
+        for cid, _ in dn:
+            if cid not in seen:
+                seen.add(cid); ordered.append(cid)
+        rows = _rows_for(con, ordered)
+        ns_all = [(cid, rows[cid]) for cid in ordered
+                  if cid in rows and str(rows[cid]["repo"] or "").startswith(prefix)]
+        cap = max(int(os.environ.get("CORPUS_HIT_RERANK_POOL", "16")), min_chunks)
+        ns = ns_all[:cap]
         if not ns:
             return {"ok": True, "hit": False, "chunks_found": 0, "threshold": threshold,
                     "namespace_prefix": prefix, "scoring": "candidates", "candidates": 0,
                     "chunks": []}
-        docs = [f"{r['symbol']}\n{r['content']}" for _, r in ns]
-        scores = rerank_scores(query, docs) if rerank_configured() else None
+        # Short snippets are enough to judge relevance; a generous timeout keeps a
+        # slow local reranker from timing out on the pool (which would lose scoring).
+        snip = int(os.environ.get("CORPUS_HIT_DOC_CHARS", "400"))
+        rr_to = float(os.environ.get("CORPUS_HIT_RERANK_TIMEOUT_S", "20"))
+        docs = [f"{r['symbol']}\n{(r['content'] or '')[:snip]}" for _, r in ns]
+        # Always ATTEMPT the reranker (don't trust a sticky-unavailable flag) — the
+        # calibrated relevance score is what discriminates a real hit from noise.
+        scores = rerank_scores(query, docs, doc_chars=snip, timeout_s=rr_to)
         if scores is not None:
             scored = sorted(
                 ({"score": round(scores[i], 4), "namespace": ns[i][1]["repo"],
@@ -1111,13 +1136,14 @@ def corpus_hit_check(query: str, namespace_prefix: str = "docs/", threshold: flo
             return {"ok": True, "hit": hit, "chunks_found": len(above), "threshold": threshold,
                     "namespace_prefix": prefix, "scoring": "rerank", "candidates": len(ns),
                     "chunks": (above[:k] if hit else scored[:3])}
-        # no reranker: fall back to namespace-restricted candidate presence
-        hit = len(ns) >= min_chunks
-        chunks = [{"score": None, "namespace": r["repo"], "source": r["path"],
-                   "snippet": r["content"][:800]} for _, r in ns[:k]]
-        return {"ok": True, "hit": hit, "chunks_found": (len(ns) if hit else 0),
-                "threshold": None, "namespace_prefix": prefix, "scoring": "bm25-fallback",
-                "candidates": len(ns), "chunks": chunks}
+        # No reranker available -> we CANNOT score relevance. Be CONSERVATIVE: do NOT
+        # claim a corpus hit on an unscored guess (a false hit would wrongly skip all
+        # research). Report hit=False so research proceeds; the gate only ever
+        # short-circuits on a calibrated, above-threshold relevance score.
+        return {"ok": True, "hit": False, "chunks_found": 0, "threshold": None,
+                "namespace_prefix": prefix, "scoring": "unscored", "candidates": len(ns),
+                "reason": "no reranker — not claiming a corpus hit without a relevance score",
+                "chunks": []}
     finally:
         con.close()
 
