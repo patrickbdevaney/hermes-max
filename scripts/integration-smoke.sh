@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
-# Stage 5 (long-horizon) — the end-to-end proof. Runs ONE real ~15-minute Hermes
-# agent task through the full loop in a fresh temp project, then asserts the five
-# real-world effects. Passing this means a legitimate long-horizon run (deep_research
-# + implement + verify + checkpoint) completes WITHOUT a timeout/stall kill — i.e.
-# the Groth16 prompt will work.
+# Stage 5 (long-horizon) — the end-to-end proof. Runs ONE real multi-minute Hermes
+# agent task through the full loop in a fresh temp project, then asserts the
+# real-world effects. Passing this means a legitimate long-horizon run completes
+# WITHOUT a timeout/stall kill AND the research-rationing ladder behaves correctly.
 #
-#   hermes "Research the Miller-Rabin primality test (use deep_research), implement a
-#   correct Python primality checker with tests using real test vectors from the
-#   research, verify green, checkpoint. Done when verify is green and at least 2
-#   sources are in the corpus."
+#   hermes "Research the BLAKE3 cryptographic hash function specification and test
+#   vectors (use deep_research if corpus misses), implement a correct Python BLAKE3
+#   verifier using the official test vectors from the spec, verify green, checkpoint.
+#   Done when verify is green and at least 2 sources are in the corpus."
 #
-# Asserts: (1) deep_research completed without a timeout/kill in the live log,
-# (2) >=2 markdown files in the corpus, (3) >=1 KG entity recorded, (4) the verify
-# gate returns GREEN on the project, (5) a git checkpoint commit exists — and the
-# whole thing finishes in < 20 minutes.
+# BLAKE3 (2020, with specific official test vectors) classifies as synthesis/targeted
+# under the rationing classifier — NOT parametric like a textbook algorithm — so the
+# exhaustion-first ladder applies: lighter tools first, then deep_research only if the
+# corpus misses. deep_research MAY or MAY NOT fire (a prior run may have compounded
+# BLAKE3 into the corpus); the requirement is that the ladder was exercised and the
+# implementation passes verify.
+#
+# Asserts: (1) the exhaustion-first ladder was exercised with no timeout/kill,
+# (2) >=2 sources in the corpus (compounded this run OR already present via a
+# corpus-first hit), (3) >=1 KG entity recorded, (4) the verify gate returns GREEN,
+# (5) a git checkpoint commit exists — and (6) wall time under the deployment cap.
 #
 # `hm smoke` runs this. Standalone-runnable too.
 set -uo pipefail
@@ -99,7 +105,11 @@ mkdir -p "${CORPUS_DIR}" 2>/dev/null || true
 KG_BEFORE="$(kg_entities)"
 LIVE_MARK="$(wc -l < "${LIVE}" 2>/dev/null || echo 0)"
 
-TASK="Research the Miller-Rabin primality test (use deep_research), implement a correct Python primality checker with tests using real test vectors from the research, verify green, checkpoint. Done when verify is green and at least 2 sources are in the corpus."
+# BLAKE3 (2020) has specific official test vectors the model is unlikely to have
+# memorised precisely — it classifies as synthesis/targeted (NOT parametric like a
+# textbook algorithm), so the rationing ladder applies: lighter tools first, then
+# deep_research only if the corpus misses. Still yields a verifiable Python impl.
+TASK="Research the BLAKE3 cryptographic hash function specification and test vectors (use deep_research if corpus misses), implement a correct Python BLAKE3 verifier using the official test vectors from the spec, verify green, checkpoint. Done when verify is green and at least 2 sources are in the corpus."
 
 echo "• running the real agent turn (timeout ${SMOKE_TIMEOUT}s) — this is a multi-minute task …"
 START="${SECONDS}"
@@ -125,18 +135,21 @@ no()   { printf '  %s✗ FAIL%s  %s\n' "${R}" "${Z}" "$1"; FAILN=$((FAILN+1)); }
 echo
 echo "${B}── assertions ──${Z}"
 
-# 1. deep_research completed without a timeout/kill in the live log.
-#    Evidence: a deep_research synthesis/done span fired AND the turn produced
-#    output (didn't time out) AND no hung/kill marker appeared during the run.
+# 1. The exhaustion-first ladder was exercised, with no timeout/kill. Under the
+#    rationing classifier BLAKE3 is synthesis/targeted, so the agent must try the
+#    LIGHTER tiers (search_code / search_docs / fetch_clean / research_topic) — and
+#    deep_research MAY or MAY NOT fire (the corpus may already cover it). The
+#    requirement is: a lighter tool ran, the turn produced output (didn't time out),
+#    and no hung/kill marker appeared. If deep_research did fire, note it completed.
 empty=0; [ -z "${AGENT_OUT}" ] && empty=1
-# the actual completion span (research server emits it only when the full
-# plan->verify->synthesize finished) — the rigorous "no finish-line kill" signal.
-dr_done=0; span_fired "deep_research_done|report_synthesized" && dr_done=1
+lighter=0; span_fired "search_code|search_docs|fetch_clean|research_topic|corpus_precheck" && lighter=1
+dr_done=0; span_fired "deep_research_done" && dr_done=1
 killed=0;  span_fired "hung|killed|stall_kill|over.?ceiling|gateway_timeout" && killed=1
-if [ "${dr_done}" = "1" ] && [ "${empty}" = "0" ] && [ "${killed}" = "0" ]; then
-  ok "deep_research completed without timeout/kill (deep_research_done fired, no kill marker)"
+dr_note="deep_research $( [ "${dr_done}" = 1 ] && echo 'fired & completed' || echo 'not needed (corpus/ladder sufficed)')"
+if [ "${lighter}" = "1" ] && [ "${empty}" = "0" ] && [ "${killed}" = "0" ]; then
+  ok "exhaustion-first ladder exercised, no timeout/kill (${dr_note})"
 else
-  no "deep_research did not cleanly complete (done=${dr_done} empty_out=${empty} kill_marker=${killed})"
+  no "ladder not exercised cleanly (lighter_tool=${lighter} empty_out=${empty} kill_marker=${killed}; ${dr_note})"
 fi
 
 # 2. >= 2 sources compounded into the research corpus this run. deep_research
@@ -145,9 +158,13 @@ fi
 #    doesn't use), and reports the count in deep_research_done.sources. So the real
 #    "sources are in the corpus" effect = deep_research_done reported >=2 sources
 #    AND the ingest fired (doc_ingested). New corpus .md files (if any) also count.
-read -r DR_SOURCES INGESTED < <(tail -n +$((LIVE_MARK+1)) "${LIVE}" 2>/dev/null | python3 -c '
+#    ≥2 sources "in the corpus" is satisfied by ANY of: deep_research compounded
+#    >=2 sources this run; >=2 new corpus .md files; OR the corpus-first gate HIT
+#    with >=2 chunks (the corpus already covered BLAKE3 from a prior run — the whole
+#    point of compounding, and why deep_research needn't re-fire).
+read -r DR_SOURCES INGESTED CORPUS_HIT CORPUS_HIT_CHUNKS < <(tail -n +$((LIVE_MARK+1)) "${LIVE}" 2>/dev/null | python3 -c '
 import json,sys
-src=0; ingested=0
+src=0; ingested=0; hit=0; hitn=0
 for ln in sys.stdin:
     try: e=json.loads(ln)
     except Exception: continue
@@ -156,13 +173,19 @@ for ln in sys.stdin:
         try: src=max(src,int(e.get("sources") or 0))
         except Exception: pass
     if n in ("doc_ingested","research_ingested") or e.get("tool")=="ingest_doc": ingested=1
-print(src, ingested)
-' 2>/dev/null || echo "0 0")
+    if n=="corpus_precheck" and e.get("hit"):
+        hit=1
+        try: hitn=max(hitn,int(e.get("chunks_found") or 0))
+        except Exception: pass
+print(src, ingested, hit, hitn)
+' 2>/dev/null || echo "0 0 0 0")
 CORPUS_NEW="$(new_corpus_md)"
-if { [ "${DR_SOURCES:-0}" -ge 2 ] 2>/dev/null && [ "${INGESTED:-0}" = "1" ]; } || [ "${CORPUS_NEW:-0}" -ge 2 ] 2>/dev/null; then
-  ok "≥2 sources compounded into the corpus (deep_research sources=${DR_SOURCES}, ingested=${INGESTED}, new .md=${CORPUS_NEW})"
+if { [ "${DR_SOURCES:-0}" -ge 2 ] 2>/dev/null && [ "${INGESTED:-0}" = "1" ]; } \
+   || [ "${CORPUS_NEW:-0}" -ge 2 ] 2>/dev/null \
+   || { [ "${CORPUS_HIT:-0}" = "1" ] && [ "${CORPUS_HIT_CHUNKS:-0}" -ge 2 ] 2>/dev/null; }; then
+  ok "≥2 sources in the corpus (deep_research sources=${DR_SOURCES}, ingested=${INGESTED}, new .md=${CORPUS_NEW}, corpus-hit=${CORPUS_HIT}/${CORPUS_HIT_CHUNKS})"
 else
-  no "fewer than 2 sources in the corpus (deep_research sources=${DR_SOURCES}, ingested=${INGESTED}, new .md=${CORPUS_NEW})"
+  no "fewer than 2 sources in the corpus (deep_research sources=${DR_SOURCES}, new .md=${CORPUS_NEW}, corpus-hit=${CORPUS_HIT}/${CORPUS_HIT_CHUNKS})"
 fi
 
 # 3. >= 1 KG entity recorded.
