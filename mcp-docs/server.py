@@ -22,6 +22,11 @@ from starlette.responses import JSONResponse
 
 import docs_core
 
+try:
+    import session_state  # record lighter-tool attempts for the research exhaustion gate
+except Exception:  # noqa: BLE001 - rationing is best-effort; never break the server
+    session_state = None  # type: ignore
+
 PORT = int(os.environ.get("MCP_DOCS_PORT", "9109"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
 
@@ -91,6 +96,9 @@ def fetch_clean(url: str) -> dict:
     """Fetch a URL and return clean, RAG-optimised markdown. Extraction ladder is
     fastest-first: trafilatura (local, in-process) then Crawl4AI (the JS-rendering
     fallback). The sovereign replacement for a Firecrawl/Tavily extract — no API key."""
+    if session_state is not None:
+        try: session_state.record_lighter_tool("fetch_clean", url)
+        except Exception: pass  # noqa: BLE001,E722
     return docs_core.fetch_clean(url)
 
 
@@ -109,6 +117,9 @@ def research_topic(topic: str, n: int = 3, category: str | None = None) -> dict:
     """Learn a novel framework on demand: search official docs → ingest the top N
     → return a distilled brief. After this, search_code('<topic> ...') returns the
     real signatures, closing the hallucinated-API trap at the knowledge layer."""
+    if session_state is not None:
+        try: session_state.record_lighter_tool("research_topic", topic)
+        except Exception: pass  # noqa: BLE001,E722
     return docs_core.research_topic(topic, n, category)
 
 

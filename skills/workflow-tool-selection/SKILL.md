@@ -44,6 +44,28 @@ from [[workflow-conductor]] / `classify_difficulty`) and enter at the right rung
   rung 6** — but **only after the corpus pre-check below**. If `deep_research` synthesis still can't
   close it and the problem is frontier-novel, rung 7.
 
+## The five-tier RESEARCH ladder (exhaust in order — mechanically enforced)
+
+Reaching for `deep_research` reflexively is the single most expensive habit. **The model
+doing reasoning on each research step burns wall time** — a single `deep_research` is
+~5–15 min. **Most coding questions resolve at Tier 0–2.** Reach for parametric knowledge
+and fast search before any synthesis tool. The server now **enforces** this ladder — it
+will refuse `deep_research` until the cheaper tiers are on record.
+
+| Tier | What | When | Cost |
+|---|---|---|---|
+| **0 — Parametric** | implement directly, no tool call | textbook algorithms (Miller-Rabin, quicksort, Dijkstra…), standard patterns, common library usage — *you already know these* | 0s |
+| **1 — RAG corpus** | `search_code` / corpus check over `docs/research-*` | "does prior work / this repo already cover X" | ms |
+| **2 — Targeted fetch** | `fetch_clean` on a known URL, or one SearXNG hit | "exact value of X", "what does this API return" — a precise fact | 10–30s |
+| **3 — Single-topic distill** | `mcp-docs.research_topic` | one specific sub-question, one source, local distill — no multi-source synthesis | 30–90s |
+| **4 — deep_research** | full multi-source synthesis | **LAST RESORT** — novel protocol specs, recent primary literature, triangulation across many sources, open-ended "current state of X" | 5–15 min |
+
+**Mechanical gates on `deep_research` (it returns an error, not a result, if you skip ahead):**
+- **Parametric block** — textbook/standard-pattern queries are refused outright (implement from parametric knowledge).
+- **Corpus-first** — it checks `docs/research-*` itself; a hit returns prior research instantly.
+- **Exhaustion** — it refuses until a *related* lighter-tool call (`search_code`/`fetch_clean`/`research_topic`) is on record, or you call `note_lighter_tools_attempted(question)` to assert you tried them.
+- **Budget + cooldown** — capped cumulative research time per session and a cooldown between calls; a blocked call tells you to use the lighter tiers.
+
 ## The deep_research corpus pre-check (MANDATORY before rung 6)
 
 `deep_research` is the most expensive rung short of Opus — minutes of wall-clock and external sources.

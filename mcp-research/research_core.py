@@ -84,6 +84,9 @@ RESEARCH_CORPUS_HIT_THRESHOLD = float(os.environ.get("RESEARCH_CORPUS_HIT_THRESH
 RESEARCH_CORPUS_MIN_CHUNKS = int(os.environ.get("RESEARCH_CORPUS_MIN_CHUNKS", "2"))
 RESEARCH_CORPUS_NS_PREFIX = os.environ.get("RESEARCH_CORPUS_NS_PREFIX", "docs/research")
 RESEARCH_CORPUS_FIRST = os.environ.get("RESEARCH_CORPUS_FIRST", "1") not in ("0", "false", "False")
+# R-Stage 3 — exhaustion-first ladder + parametric pre-screen (both env-gated).
+RESEARCH_BLOCK_PARAMETRIC = os.environ.get("RESEARCH_BLOCK_PARAMETRIC", "1") not in ("0", "false", "False")
+RESEARCH_EXHAUSTION_GATE = os.environ.get("RESEARCH_EXHAUSTION_GATE", "1") not in ("0", "false", "False")
 
 # Similarity thresholds (Jaccard over word-shingles).
 QUERY_DUP_THRESHOLD = float(os.environ.get("RESEARCH_QUERY_DUP_THRESHOLD", "0.8"))
@@ -694,6 +697,67 @@ def _extract_claims(question: str, sources: list[dict]) -> list[dict]:
     return claims
 
 
+# ── R-Stage 3: rule-based research-need classifier (NO LLM) ───────────────────
+# Pre-screens a question into parametric / targeted / synthesis on cheap lexical
+# signals (NOT the model's self-judgment). Parametric (textbook algorithms, "how
+# does X work", standard patterns) warrants NO research tool — implement from
+# parametric knowledge. Only synthesis (novel/recent/multi-source/exact-spec)
+# warrants Tier-4 deep_research.
+_SYNTHESIS_SIGNALS = (
+    "current state", "state of the art", "state-of-the-art", "latest", "recent",
+    "newest", "compare", " vs ", "versus", "trade-off", "tradeoff", "survey",
+    "landscape", "ecosystem", "which is better", "best approach", "best practice",
+    "emerging", "novel", "cutting edge", "2024", "2025", "2026", "benchmark",
+    "test vector", "test-vector", "specification", "whitepaper", "rfc ", "eip ",
+    "erc ", "protocol spec", "primary literature", "reconcile", "triangulate",
+)
+_PARAMETRIC_ALGOS = (
+    "miller-rabin", "miller rabin", "quicksort", "merge sort", "mergesort",
+    "binary search", "bubble sort", "insertion sort", "dijkstra", "bellman-ford",
+    "breadth-first", "depth-first", "bfs", "dfs", "a-star", "a*", "dynamic programming",
+    "memoization", "hash table", "hash map", "linked list", "binary tree", "heap sort",
+    "fibonacci", "sieve of eratosthenes", "euclidean algorithm", "gcd", "fizzbuzz",
+    "two pointer", "sliding window", "kmp", "rabin-karp", "union-find", "topological sort",
+    "newton's method", "gradient descent", "linear regression", "k-means",
+)
+_PARAMETRIC_FRAMES = (
+    "how does", "how do i implement", "how to implement", "implement a", "implement the",
+    "explain the", "explain how", "what is a", "what is the", "write a function",
+    "standard way to", "common pattern", "textbook",
+)
+_TARGETED_SIGNALS = (
+    "what version", "which version", "api", "parameter", "return value", "syntax",
+    "flag", "option", "default value", "exact value", "signature", "endpoint",
+    "config", "environment variable", "error code", "status code",
+)
+
+
+def classify_research_need(question: str) -> dict[str, Any]:
+    """Return {class: parametric|targeted|synthesis, signals, block} for `question`.
+    Precedence: a synthesis signal wins (open-ended/novel/recent → allow Tier 4);
+    else a textbook-algorithm or how-does-X-work frame → parametric (block research);
+    else a precise-fact frame → targeted (lighter tools, not Tier 4); else default
+    synthesis-eligible (the agent chose research; don't over-block)."""
+    q = (question or "").lower()
+    # Precedence: synthesis wins; then DEFINITE parametric (named textbook algorithm);
+    # then targeted (precise fact — a broad "what is the" frame must NOT mask a
+    # "return value"/"exact value" lookup); then generic parametric frames; else
+    # default synthesis-eligible (don't over-block a deliberate research call).
+    syn = [s.strip() for s in _SYNTHESIS_SIGNALS if s in q]
+    if syn:
+        return {"class": "synthesis", "signals": syn[:5], "block": False}
+    algo = [s for s in _PARAMETRIC_ALGOS if s in q]
+    if algo:
+        return {"class": "parametric", "signals": algo[:5], "block": True}
+    tgt = [s for s in _TARGETED_SIGNALS if s in q]
+    if tgt:
+        return {"class": "targeted", "signals": tgt[:5], "block": False}
+    frame = [s for s in _PARAMETRIC_FRAMES if s in q]
+    if frame:
+        return {"class": "parametric", "signals": frame[:5], "block": True}
+    return {"class": "synthesis", "signals": [], "block": False}
+
+
 # ── ORCHESTRATOR: deep_research ───────────────────────────────────────────────
 def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
                   max_total_sources: int = MAX_TOTAL_SOURCES,
@@ -708,6 +772,22 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
         return {"ok": False, "error": "empty question"}
     t0 = time.monotonic()
     max_loops = max(1, min(int(max_loops), 8))
+
+    # ── TIER-0 PARAMETRIC pre-screen (R-Stage 3; cheapest gate, no tool call) ─
+    # A textbook algorithm / "how does X work" / standard pattern warrants NO
+    # research tool — implement from parametric knowledge. Hard-block it from the
+    # cascade. Gates on a cheap lexical signal, not the model's self-judgment.
+    cls = classify_research_need(question)
+    otel_emit.record("query_classification", {
+        "tool": "deep_research", "class": cls["class"],
+        "signals": ", ".join(cls["signals"]) or None, "blocked": cls["block"] and RESEARCH_BLOCK_PARAMETRIC})
+    if cls["block"] and RESEARCH_BLOCK_PARAMETRIC:
+        return {"ok": False, "gated": True, "gate_reason": "parametric",
+                "classification": cls["class"], "signals": cls["signals"],
+                "error": ("This is a textbook/parametric topic (signals: "
+                          f"{', '.join(cls['signals'])}) — implement directly from "
+                          "parametric knowledge; no research tool is warranted."),
+                "use_instead": "implement from parametric knowledge (Tier 0 — no tool call)"}
 
     # ── CORPUS-FIRST gate (adaptive retrieval / gbrain brain-first lookup) ────
     # Ask the RAG store whether prior research already covers this question. A hit
@@ -774,6 +854,30 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
                                 "sub-question — never another deep_research now"),
                 **{k: gate[k] for k in ("cooldown_remaining_s", "cumulative_s",
                                         "budget_s", "calls")}}
+
+    # ── EXHAUSTION-FIRST gate (R-Stage 3): prove cheaper tools were tried ──────
+    # deep_research is Tier 4. The corpus check above is Tier 1; Tiers 2-3
+    # (fetch_clean / research_topic) must be attempted on a RELATED query first, or
+    # the agent must explicitly note it tried them (note_lighter_tools_attempted).
+    if RESEARCH_EXHAUSTION_GATE:
+        lt = session_state.lighter_tools_attempted(question)
+        otel_emit.record("tool_ladder_gate", {
+            "tool": "deep_research", "tier_attempted": 4,
+            "lighter_tools_flag": lt["attempted"], "best_sim": lt["best_sim"],
+            "best_tool": lt["best_tool"], "considered": lt["considered"],
+            "escalation_allowed": lt["attempted"]})
+        if not lt["attempted"]:
+            return {"ok": False, "gated": True, "gate_reason": "lighter_tools_not_attempted",
+                    "error": ("Lighter tools not yet attempted for this question. Run "
+                              "search_code against the corpus, then mcp-docs fetch_clean "
+                              "or research_topic on the specific sub-question. Call "
+                              "deep_research only after those return insufficient "
+                              "results. For textbook algorithms and standard patterns, "
+                              "implement from parametric knowledge without any research tool."),
+                    "use_instead": "search_code → fetch_clean / research_topic (Tiers 1-3)",
+                    "ladder": ["Tier0 parametric (no tool)", "Tier1 search_code/corpus",
+                               "Tier2 fetch_clean", "Tier3 research_topic", "Tier4 deep_research"],
+                    "best_related_sim": lt["best_sim"]}
 
     plan = plan_research(question)
     subgoals = plan["subgoals"]

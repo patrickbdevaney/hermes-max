@@ -168,6 +168,19 @@ def deep_research(question: str, max_loops: int = 3, max_total_sources: int = 8,
     return research_core.deep_research(question, max_loops, max_total_sources, category, compound)
 
 
+@mcp.tool()
+@_threaded
+def note_lighter_tools_attempted(question: str) -> dict:
+    """Tell the rationing layer you ALREADY tried the cheaper tools (search_code /
+    fetch_clean / research_topic) for `question` and found them insufficient — the
+    explicit precondition that lets deep_research escalate (R-Stage 3 exhaustion
+    gate). Use this only when you genuinely tried the lighter tiers; deep_research
+    will otherwise refuse until a related lighter-tool call is on record."""
+    import session_state
+    session_state.note_lighter_tools_attempted(question)
+    return {"ok": True, "noted": True, "question": question}
+
+
 # ── Stage 1: structured source fan-out (alongside the SearXNG web layer) ──────
 @mcp.tool()
 @_threaded

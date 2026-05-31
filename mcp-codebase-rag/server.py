@@ -27,6 +27,11 @@ from starlette.responses import JSONResponse
 import graph_core
 import rag_core
 
+try:
+    import session_state  # record lighter-tool attempts for the research exhaustion gate
+except Exception:  # noqa: BLE001 - rationing is best-effort; never break the server
+    session_state = None  # type: ignore
+
 PORT = int(os.environ.get("MCP_RAG_PORT", "9102"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
 
@@ -106,6 +111,9 @@ def search_code(query: str, k: int = 8) -> dict:
     (e.g. "hybrid+graph+rerank" or "bm25-only"); each lane degrades gracefully
     when its endpoint is absent, so retrieval never hard-fails.
     """
+    if session_state is not None:
+        try: session_state.record_lighter_tool("search_code", query)
+        except Exception: pass  # noqa: BLE001,E722
     return rag_core.search_code(query, k)
 
 
