@@ -3,3 +3,4 @@ ruff>=0.6
 mypy>=1.10
 pytest>=8.0
 hypothesis>=6.0
+mutmut>=3.0

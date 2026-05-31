@@ -20,6 +20,15 @@ from starlette.responses import JSONResponse
 
 import verify_core
 
+try:
+    import enhanced_verify  # M-Stage 3: model-generated property tests + mutation testing
+except Exception:  # noqa: BLE001
+    enhanced_verify = None  # type: ignore
+
+# Opt-in: property generation adds wall time and the 35B can hallucinate properties,
+# so the primary verify() gate runs it only when explicitly enabled.
+ENABLE_PROPERTY_TEST = os.environ.get("ENABLE_PROPERTY_TEST", "false").strip().lower() in ("1", "true", "yes")
+
 PORT = int(os.environ.get("MCP_VERIFY_PORT", "9101"))
 HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
 
@@ -69,8 +78,47 @@ def verify(path: str, language: str = "auto") -> dict:
     breakdown (lint/typecheck/tests, each passed|failed|skipped|error with
     diagnostics), and a human-readable `summary`. The gate is green only when at
     least one stage ran and none failed; missing tools are reported as skipped.
+
+    When ENABLE_PROPERTY_TEST=true and the base gate passes on a single .py file, an
+    advisory model-generated property_test pass runs and is attached under
+    `property_test` (it never flips the base gate, but surfaces edge-case counterexamples).
     """
-    return verify_core.verify(path, language)
+    result = verify_core.verify(path, language)
+    if (ENABLE_PROPERTY_TEST and enhanced_verify is not None
+            and isinstance(result, dict) and result.get("passed") and path.endswith(".py")):
+        try:
+            result["property_test"] = enhanced_verify.property_test(path)
+        except Exception as e:  # noqa: BLE001 - advisory; never break the gate
+            result["property_test"] = {"status": "error", "reason": str(e)[:200]}
+    return result
+
+
+@mcp.tool()
+@_threaded
+def property_test(path: str, max_examples: int = 100) -> dict:
+    """Generate Hypothesis @given property tests for the module at `path` with the
+    local model, run them, report failures + minimal counterexamples (M-Stage 3,
+    arXiv:2510.09907). Filters hallucinated properties (fail to import/collect).
+    Falsifiable invariants only — round-trips, bounds, ordering, agreement with a
+    reference — never a restatement of the body. Time-bounded
+    (PROPERTY_TEST_TIMEOUT_S=120); never raises. Use on core-logic functions after
+    unit tests pass to find edge cases."""
+    if enhanced_verify is None:
+        return {"status": "skipped", "reason": "enhanced_verify unavailable"}
+    return enhanced_verify.property_test(path, max_examples)
+
+
+@mcp.tool()
+@_threaded
+def mutation_test(path: str, test_path: str) -> dict:
+    """Mutate the module at `path` with mutmut, run `test_path` against each mutant,
+    report kill_rate + surviving_mutants (M-Stage 3; Meta ACH arXiv:2501.12862 —
+    mutation beats coverage). A SURVIVING mutant is a test gap: add a test that kills
+    it before declaring done. Scoped to changed files in a git repo; time-bounded
+    (MUTATION_TEST_TIMEOUT_S=300); skips gracefully if mutmut is absent; never raises."""
+    if enhanced_verify is None:
+        return {"status": "skipped", "reason": "enhanced_verify unavailable"}
+    return enhanced_verify.mutation_test(path, test_path)
 
 
 @mcp.tool()

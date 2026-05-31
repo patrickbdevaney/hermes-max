@@ -85,6 +85,8 @@ _TOOL_BUDGET_DEFAULTS: dict[str, dict[str, Any]] = {
     "lint":           {"expected": "seconds",            "ceiling_s": 60,   "lookahead": "file size"},
     "type":           {"expected": "seconds",            "ceiling_s": 60,   "lookahead": "file size"},
     "verify":         {"expected": "tens of seconds",    "ceiling_s": 300,  "lookahead": "test count"},
+    "property_test":  {"expected": "model-gen + run",     "budget_s": 120, "ceiling_s": 180, "lookahead": "function count"},
+    "mutation_test":  {"expected": "mutants x test-suite", "budget_s": 300, "ceiling_s": 400, "lookahead": "mutant count"},
     "index_repo":     {"expected": "scales with repo",   "ceiling_s": 1800, "lookahead": "file count x avg size"},
     "search_code":    {"expected": "sub-second",         "ceiling_s": 30,   "lookahead": None},
     "rag_query":      {"expected": "sub-second",         "ceiling_s": 30,   "lookahead": None},
