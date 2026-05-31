@@ -13,6 +13,7 @@
 #   hm restart [srv|all]  restart one server or all                    scripts/restart.sh
 #   hm status             UP/DOWN · port · PID · uptime · health       scripts/status.sh
 #   hm watch              live tool-call stream                        scripts/watch.sh
+#   hm observe            live waterfall: where wall time goes          scripts/observe.sh
 #   hm logs [server]      tail a server's log (or the live log)        ~/.hermes-max/logs/
 #   hm run "task"         launch hermes with a task                    hermes
 #   hm snapshot <name>    snapshot RAG+KG+corpus stores                scripts/snapshot-stores.sh
@@ -159,7 +160,7 @@ _mode_from_args() {
 }
 
 usage() {
-  sed -n '3,31p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
+  sed -n '3,32p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
 }
 
 _install() {
@@ -271,6 +272,7 @@ case "${cmd}" in
   restart)     _dispatch "${SCRIPTS}/restart.sh" "$@" ;;
   status)      _dispatch "${SCRIPTS}/status.sh" "$@" ;;
   watch)       _dispatch "${SCRIPTS}/watch.sh" "$@" ;;
+  observe)     _dispatch "${SCRIPTS}/observe.sh" "$@" ;;
   health)      _dispatch "${SCRIPTS}/healthcheck.sh" "$@" ;;
   preflight)   _dispatch "${SCRIPTS}/preflight.sh" "$@" ;;
   smoke)       _dispatch "${SCRIPTS}/integration-smoke.sh" "$@" ;;
