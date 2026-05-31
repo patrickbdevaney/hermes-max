@@ -77,6 +77,9 @@ def _env_ceiling(tool: str, default: float) -> float:
 
 # expected: human label · ceiling_s: hard ceiling (env-overridable) · lookahead:
 # the input the estimator uses (None = fixed-cost tool, no look-ahead needed).
+# Optional per-tool overrides: budget_s pins the soft budget for tools whose normal
+# runtime legitimately exceeds the global TOOL_BUDGET_S (else budget = min(global,
+# ceiling)); heartbeat_timeout_s widens the do-nothing-hang window for the same.
 _TOOL_BUDGET_DEFAULTS: dict[str, dict[str, Any]] = {
     "quick_check":    {"expected": "seconds",            "ceiling_s": 60,   "lookahead": "file size"},
     "lint":           {"expected": "seconds",            "ceiling_s": 60,   "lookahead": "file size"},
@@ -88,7 +91,7 @@ _TOOL_BUDGET_DEFAULTS: dict[str, dict[str, Any]] = {
     "kg_query":       {"expected": "milliseconds",       "ceiling_s": 15,   "lookahead": None},
     "kg_record":      {"expected": "milliseconds",       "ceiling_s": 15,   "lookahead": None},
     "fetch_clean":    {"expected": "seconds-per-page",   "ceiling_s": 90,   "lookahead": "page count"},
-    "deep_research":  {"expected": "minutes",            "ceiling_s": 900,  "lookahead": "query count x per-source"},
+    "deep_research":  {"expected": "minutes",            "budget_s": 600, "ceiling_s": 900, "heartbeat_timeout_s": 120, "lookahead": "query count x per-source"},
     "parallel_draft": {"expected": "seconds (concurrent)", "ceiling_s": 120, "lookahead": "pool size"},
     "synth":          {"expected": "seconds",            "ceiling_s": 120,  "lookahead": None},
     "steer":          {"expected": "seconds",            "ceiling_s": 120,  "lookahead": None},
@@ -118,11 +121,15 @@ def tool_budget(tool_name: str) -> dict[str, Any]:
                 "budget_s": TOOL_BUDGET_S, "ceiling_s": None,
                 "heartbeat_timeout_s": HEARTBEAT_TIMEOUT_S, "lookahead": None}
     ceiling = _env_ceiling(tool_name, reg["ceiling_s"])
-    # Soft budget = the global default, but never above the tool's hard ceiling.
-    budget = min(TOOL_BUDGET_S, ceiling)
+    # Soft budget = per-tool override if declared (for tools that legitimately run
+    # past the global default), else the global default — but never above the hard
+    # ceiling either way.
+    budget = min(float(reg.get("budget_s", TOOL_BUDGET_S)), ceiling)
+    # Heartbeat liveness window: per-tool override if declared, else the global one.
+    heartbeat = float(reg.get("heartbeat_timeout_s", HEARTBEAT_TIMEOUT_S))
     return {"tool": tool_name, "known": True, "expected": reg["expected"],
             "budget_s": budget, "ceiling_s": ceiling,
-            "heartbeat_timeout_s": HEARTBEAT_TIMEOUT_S, "lookahead": reg["lookahead"]}
+            "heartbeat_timeout_s": heartbeat, "lookahead": reg["lookahead"]}
 
 
 def estimate_duration(tool_name: str, **inputs: Any) -> dict[str, Any]:
@@ -348,7 +355,8 @@ def check_stall(tool_name: str, elapsed_s: float, expecting_heartbeat: bool = Fa
     budget = float(per_tool_budget_s if per_tool_budget_s is not None else reg["budget_s"])
     # ceiling is None for unknown tools (no hard cap — heartbeat governs entirely).
     ceiling = float(reg["ceiling_s"]) if reg["ceiling_s"] is not None else None
-    hb_timeout = HEARTBEAT_TIMEOUT_S
+    # Per-tool heartbeat window (registry override), falling back to the global one.
+    hb_timeout = float(reg.get("heartbeat_timeout_s", HEARTBEAT_TIMEOUT_S))
     elapsed = float(elapsed_s)
 
     # Resolve heartbeat age: explicit arg wins; else look it up from state by task_id.
