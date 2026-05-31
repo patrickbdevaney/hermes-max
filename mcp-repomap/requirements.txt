@@ -1,0 +1,2 @@
+aider-chat
+mcp>=1.2.0

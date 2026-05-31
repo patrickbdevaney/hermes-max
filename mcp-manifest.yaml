@@ -125,3 +125,12 @@ servers:
     profiles: [gpu_local, lean_cloud]
     requires: [docs]
     degrades_to: SearXNG+Crawl4AI/trafilatura+chat model; authority-only rank without reranker
+  - name: repomap
+    dir: mcp-repomap
+    port: 9111
+    port_env: MCP_REPOMAP_PORT
+    health: /health
+    register_as: hermes-max-repomap
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: pure static analysis (Aider RepoMap, tree-sitter + NetworkX PageRank); no model
