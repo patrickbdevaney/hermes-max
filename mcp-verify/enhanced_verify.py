@@ -161,6 +161,128 @@ def property_test(path: str, max_examples: int = 100) -> dict[str, Any]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _load_module(path: str):
+    import importlib.util
+    p = Path(path)
+    spec = importlib.util.spec_from_file_location(p.stem, str(p))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # may raise -> caller handles
+    return mod
+
+
+def _strategy(name: str):
+    import hypothesis.strategies as st
+    return {
+        "int": st.integers(min_value=-10000, max_value=10000),
+        "text": st.text(max_size=200),
+        "list_int": st.lists(st.integers(min_value=-1000, max_value=1000), max_size=50),
+        "list_text": st.lists(st.text(max_size=20), max_size=30),
+    }.get(name, st.lists(st.integers(min_value=-1000, max_value=1000), max_size=50))
+
+
+def _run_given(strategy, check) -> tuple[str, str | None]:
+    """Run `check(x)` over Hypothesis-generated `x`; return (held|violated, counterexample)."""
+    from hypothesis import given, settings
+    max_examples = int(os.environ.get("METAMORPHIC_MAX_EXAMPLES", "200"))
+    box: dict = {}
+
+    @settings(max_examples=max_examples, deadline=None)
+    @given(strategy)
+    def _t(x):
+        ok = check(x)
+        if not ok:
+            box["x"] = x
+        assert ok, f"relation violated at x={x!r}"
+    try:
+        _t()
+        return "held", None
+    except AssertionError as e:
+        m = re.search(r"Falsifying example:.*", str(e))
+        return "violated", (m.group(0) if m else str(e))[:300]
+    except Exception as e:  # noqa: BLE001
+        return "error", f"{type(e).__name__}: {e}"[:300]
+
+
+def metamorphic_test(path: str, function: str, relation: str, input_strategy: str = "auto",
+                     inverse_function: str = "", max_examples: int = 200) -> dict[str, Any]:
+    """Metamorphic testing for code WITHOUT a ground-truth oracle: assert an
+    INVARIANT the function must satisfy over generated inputs (Phase 3.2). relation:
+      idempotent           f(f(x)) == f(x)        (e.g. sort, normalize)
+      involution           f(f(x)) == x           (e.g. reverse, negate)
+      round_trip           inverse(f(x)) == x     (needs inverse_function; e.g. encode/decode)
+      permutation_invariant f(perm(x)) == f(x)    (x a list; e.g. sum, sorted, max)
+    Returns {status: pass|fail|error, relation, counterexample}. In-process, bounded;
+    never raises."""
+    try:
+        mod = _load_module(path)
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "reason": f"import failed: {type(e).__name__}: {e}"}
+    fn = getattr(mod, function, None)
+    if not callable(fn):
+        return {"status": "error", "reason": f"no callable '{function}' in {path}"}
+    os.environ["METAMORPHIC_MAX_EXAMPLES"] = str(max_examples)
+    strat = _strategy("list_int" if input_strategy == "auto" else input_strategy)
+
+    if relation == "idempotent":
+        check = lambda x: fn(fn(x)) == fn(x)  # noqa: E731
+    elif relation == "involution":
+        check = lambda x: fn(fn(x)) == x  # noqa: E731
+    elif relation == "permutation_invariant":
+        import random
+        def check(x):  # noqa: E306
+            y = list(x); random.Random(len(y)).shuffle(y)
+            return fn(list(x)) == fn(y)
+    elif relation == "round_trip":
+        inv = getattr(mod, inverse_function, None)
+        if not callable(inv):
+            return {"status": "error", "reason": f"round_trip needs inverse_function (got '{inverse_function}')"}
+        check = lambda x: inv(fn(x)) == x  # noqa: E731
+    else:
+        return {"status": "error", "reason": f"unknown relation '{relation}' "
+                "(idempotent|involution|round_trip|permutation_invariant)"}
+
+    verdict, cx = _run_given(strat, check)
+    status = {"held": "pass", "violated": "fail", "error": "error"}[verdict]
+    return {"status": status, "relation": relation, "function": function,
+            "counterexample": cx,
+            "note": ("invariant holds over %d examples" % max_examples if status == "pass"
+                     else "invariant VIOLATED — the implementation (or the chosen relation) is wrong"
+                     if status == "fail" else "could not evaluate")}
+
+
+def differential_test(path_a: str, function_a: str, path_b: str, function_b: str,
+                      input_strategy: str = "auto", max_examples: int = 200) -> dict[str, Any]:
+    """Differential testing: run two implementations on shared generated inputs and
+    surface the first input where they DISAGREE (a likely-bug signal — e.g. two
+    best-of-N candidates). Returns {status: agree|diverge|error, counterexample}.
+    In-process, bounded; never raises."""
+    try:
+        fa = getattr(_load_module(path_a), function_a, None)
+        fb = getattr(_load_module(path_b), function_b, None)
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "reason": f"import failed: {type(e).__name__}: {e}"}
+    if not callable(fa) or not callable(fb):
+        return {"status": "error", "reason": "one or both functions not found/callable"}
+    os.environ["METAMORPHIC_MAX_EXAMPLES"] = str(max_examples)
+    strat = _strategy("list_int" if input_strategy == "auto" else input_strategy)
+
+    def check(x):
+        try:
+            return fa(x) == fb(x)
+        except Exception:  # noqa: BLE001 - an exception in one but not the other IS a divergence
+            try:
+                fa(x); fb(x); return True
+            except Exception:
+                return False
+    verdict, cx = _run_given(strat, check)
+    status = {"held": "agree", "violated": "diverge", "error": "error"}[verdict]
+    return {"status": status, "function_a": function_a, "function_b": function_b,
+            "counterexample": cx,
+            "note": ("implementations agree over %d examples" % max_examples if status == "agree"
+                     else "implementations DIVERGE — at least one is likely buggy at the counterexample"
+                     if status == "diverge" else "could not evaluate")}
+
+
 def _changed_py_files(repo: str) -> list[str]:
     try:
         r = subprocess.run(["git", "-C", repo, "diff", "--name-only", "HEAD"],

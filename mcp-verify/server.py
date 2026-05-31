@@ -110,6 +110,36 @@ def property_test(path: str, max_examples: int = 100) -> dict:
 
 @mcp.tool()
 @_threaded
+def metamorphic_test(path: str, function: str, relation: str, input_strategy: str = "auto",
+                     inverse_function: str = "", max_examples: int = 200) -> dict:
+    """Metamorphic testing for code with NO ground-truth oracle (Phase 3.2): assert an
+    invariant the function must satisfy over generated inputs. relation ∈
+    idempotent | involution | round_trip (needs inverse_function) | permutation_invariant.
+    input_strategy ∈ auto | int | text | list_int | list_text. Returns
+    {status: pass|fail|error, counterexample}. Use when you can't write exact expected
+    outputs but you know a property the code must obey."""
+    if enhanced_verify is None:
+        return {"status": "skipped", "reason": "enhanced_verify unavailable"}
+    return enhanced_verify.metamorphic_test(path, function, relation, input_strategy,
+                                            inverse_function, max_examples)
+
+
+@mcp.tool()
+@_threaded
+def differential_test(path_a: str, function_a: str, path_b: str, function_b: str,
+                      input_strategy: str = "auto", max_examples: int = 200) -> dict:
+    """Differential testing (Phase 3.2): run two implementations on shared generated
+    inputs and surface the first input where they DISAGREE — a likely-bug signal when
+    you have two candidates (e.g. from best-of-N) but no oracle. Returns
+    {status: agree|diverge|error, counterexample}."""
+    if enhanced_verify is None:
+        return {"status": "skipped", "reason": "enhanced_verify unavailable"}
+    return enhanced_verify.differential_test(path_a, function_a, path_b, function_b,
+                                             input_strategy, max_examples)
+
+
+@mcp.tool()
+@_threaded
 def mutation_test(path: str, test_path: str) -> dict:
     """Mutate the module at `path` with mutmut, run `test_path` against each mutant,
     report kill_rate + surviving_mutants (M-Stage 3; Meta ACH arXiv:2501.12862 —
