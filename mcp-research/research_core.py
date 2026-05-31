@@ -49,6 +49,8 @@ except Exception:  # noqa: BLE001
             return None
     heartbeat = _NoHB()  # type: ignore
 
+import session_state  # per-session research budget/cooldown + exhaustion gate
+
 # ── config (all local defaults; the chat endpoint is the only "model" dep) ────
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "").rstrip("/")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", os.environ.get("DISTILL_MODEL", "/model"))
@@ -719,6 +721,7 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
         res = (pc.get("result") or {}) if isinstance(pc, dict) else {}
         hit = bool(res.get("hit"))
         chunks = res.get("chunks") or []
+        session_state.mark_corpus_checked()  # precondition satisfied for this session
         otel_emit.record("corpus_precheck", {
             "tool": "deep_research", "question": question,
             "hit": hit, "chunks_found": res.get("chunks_found", 0),
@@ -743,6 +746,34 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
                 "stop_reason": "corpus-first hit",
                 "note": f"answered from existing corpus — {n} prior research chunk(s) covered this",
                 "elapsed_s": round(time.monotonic() - t0, 2), "sovereign": True}
+
+    # ── RESEARCH BUDGET + COOLDOWN gate (R-Stage 2; SWE-agent per-task budget) ─
+    # The corpus didn't cover it — but research still can't consume the whole task
+    # budget or re-fire reflexively. Block (not the skill — the SERVER) if a
+    # deep_research fired < cooldown ago, or cumulative research time this session
+    # would exceed the budget. Demand-driven with a cooldown: a genuinely novel
+    # later need still fires after the cooldown; reflexive re-firing does not.
+    gate = session_state.research_gate(est_s=WALL_BUDGET_S)
+    otel_emit.record("research_budget_gate", {
+        "tool": "deep_research", "allowed": gate["allowed"], "reason": gate["reason"],
+        "cooldown_remaining_s": gate["cooldown_remaining_s"],
+        "cumulative_s": gate["cumulative_s"], "budget_s": gate["budget_s"],
+        "calls": gate["calls"]})
+    if not gate["allowed"]:
+        if gate["reason"] == "cooldown":
+            msg = (f"deep_research is on cooldown — a call fired recently and "
+                   f"{gate['cooldown_remaining_s']:.0f}s remain of the "
+                   f"{int(session_state.RESEARCH_COOLDOWN_S)}s window. Do NOT re-run it.")
+        else:
+            msg = (f"deep_research budget exhausted this session "
+                   f"({gate['cumulative_s']:.0f}s used of {int(gate['budget_s'])}s).")
+        return {"ok": False, "gated": True, "gate_reason": gate["reason"],
+                "error": msg,
+                "use_instead": ("search_code against the corpus, or mcp-docs "
+                                "research_topic / fetch_clean for the specific "
+                                "sub-question — never another deep_research now"),
+                **{k: gate[k] for k in ("cooldown_remaining_s", "cumulative_s",
+                                        "budget_s", "calls")}}
 
     plan = plan_research(question)
     subgoals = plan["subgoals"]
@@ -798,6 +829,8 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
                           "namespace": res.get("namespace")}
 
     elapsed = round(time.monotonic() - t0, 2)
+    # record against the per-session budget/cooldown (R-Stage 2)
+    session_state.record_research(elapsed)
     otel_emit.record("deep_research_done", {
         "question": question, "loops": loops, "sources": len(all_sources),
         "claims": len(verified),
