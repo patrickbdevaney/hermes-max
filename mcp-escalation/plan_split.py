@@ -170,9 +170,12 @@ def _block_with_descendants(sections: list[tuple[int, str, str]], idx: int) -> s
     strong planner naturally nests, and the signatures/prose live in those children."""
     level, _, body = sections[idx]
     parts = [body]
-    for sub_level, _, sub_body in sections[idx + 1:]:
+    for sub_level, sub_title, sub_body in sections[idx + 1:]:
         if sub_level <= level:
             break
+        # include the sub-header TITLE too: planners put the signature in the header
+        # (### Public Function: `add(self, item: str) -> None`), not only the body.
+        parts.append(sub_title)
         parts.append(sub_body)
     return "\n".join(p for p in parts if p)
 
