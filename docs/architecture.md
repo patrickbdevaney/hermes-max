@@ -260,7 +260,7 @@ router.py    run_role(): walk the chain, first present+under-ceiling+has-headroo
 
 `grep -rl "api.deepseek\|api.groq\|openrouter.ai\|api.cerebras\|api.anthropic" --include=*.py`
 finds provider URLs in exactly one place: `inference.yaml` (data) and the conductor
-registry being migrated out (see `MIGRATION.md`). A new provider of an existing
+registry being migrated out (see [migration.md](migration.md)). A new provider of an existing
 `kind` is a YAML edit (copy the commented `example_custom` block + one env var) — no
 Python changes. That's the open-bazaar intent.
 
@@ -365,7 +365,7 @@ local executes free, Groq/OpenRouter handle steer/repair/fanout. ~$1.50/mo.
 
 **(c) Maximalist constellation.** All keys present (DeepSeek, DeepInfra, OpenRouter,
 Groq, Cerebras, Anthropic). Pick any posture; `full-local` for daily driving,
-`frontier-local` for a hard session. The shipped `inference.example.yaml` IS this
+`frontier-local` for a hard session. The shipped `config/inference.example.yaml` IS this
 constellation — copy it, fill what you have, missing keys drop their rungs.
 
 The roles.yaml diff between configs is *nothing* — the chains are the same; which
@@ -390,7 +390,7 @@ buckets:
    (1M ctx, no chunking) → Cerebras/Groq gpt-oss-120b.
 6. **Compound** — verified claims + citations into RAG (sqlite-vec) + KG.
 
-Honest tradeoffs (see `RESEARCH.md`): **local-only research is slow & sequential &
+Honest tradeoffs (see [research-engine.md](research-engine.md)): **local-only research is slow & sequential &
 deep** — fine overnight, painful interactively. **API fan-out is parallel & faster
 but still bounded** by RPM and by the 2 synthesis-class calls — the win is
 parallelism across free buckets, not raw speed. Cerebras is fast but 5 RPM (synth

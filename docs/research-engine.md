@@ -1,4 +1,4 @@
-# RESEARCH.md — deep research: the honest tradeoffs
+# The deep-research engine — design and honest tradeoffs
 
 Deep research is a **parallel multi-bucket fan-out** with an honest cost ledger.
 The principle the design is built on: **retrieval is cheap; per-sub-question model

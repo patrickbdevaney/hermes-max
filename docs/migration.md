@@ -1,4 +1,4 @@
-# MIGRATION.md — provider-call inventory & the single-seam migration
+# Migration — provider-call inventory and the single-seam migration
 
 > **Architectural rule:** MCP servers request *roles*; the inference fabric
 > (`lib/inference/`) chooses providers. **Providers are config, not code.**
@@ -52,8 +52,8 @@ A new provider of an existing `kind` is a YAML edit; no Python changes.
 ## Migration status
 
 - [x] **Stage 0** — `lib/inference/` created; this inventory written; the
-      no-direct-SDK rule documented (here + ARCHITECTURE.md).
-- [x] **Stage 1** — `inference.example.yaml` schema + `config.py` loader;
+      no-direct-SDK rule documented (here + architecture.md).
+- [x] **Stage 1** — `config/inference.example.yaml` schema + `config.py` loader;
       missing-key blocks skip silently; zero-key → local-only (proven by
       `lib/inference/smoke_inference.py`).
 - [x] **Stage 2/4** — `roles.yaml` + `router.run_role()` + `ledger.py` +
