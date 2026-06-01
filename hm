@@ -7,8 +7,10 @@
 # install onto PATH (`hm install`, or via bootstrap.sh).
 #
 #   hm up [--MODE]        start all MCPs (+ embed/rerank hint)         scripts/start-all.sh
-#                         MODE = --local|--free|--full|--frontier (default --full);
-#                         the cloud-tier ceiling, presence-gated with fall-through
+#                         MODE = --free|--full-local|--full|--frontier-local|
+#                         --frontier|--local (posture; default = current/free)
+#   hm mode [name]        show / switch the cost-quality posture       modes.yaml
+#                         no arg = show; --list = table; <name> = switch live
 #   hm down               stop everything (PID + port fallback)        scripts/stop-all.sh
 #   hm restart [srv|all]  restart one server or all                    scripts/restart.sh
 #   hm status             UP/DOWN · port · PID · uptime · health       scripts/status.sh
@@ -159,8 +161,42 @@ _mode_from_args() {
   echo "${m}"
 }
 
+# ── inference MODE (modes.yaml posture toggle) ─────────────────────────────────
+# The user-facing posture: free | full-local | full | frontier-local | frontier |
+# local. ONE word reassigns the coding role chains (who plans, who executes). The
+# mode name persists to ~/.hermes-max/mode (read live by lib/inference); we also
+# sync CONDUCTOR_MODE to the mode's spend ceiling so the conductor agrees.
+_inf() { ( cd "${REPO_ROOT}" && python3 -m lib.inference.modes_cli "$@" ); }
+
+# Echo a recognized --<mode> flag's name, or '' if none present.
+_inf_mode_from_args() {
+  local a
+  for a in "$@"; do case "${a}" in
+    --free)           echo free; return ;;
+    --full-local)     echo full-local; return ;;
+    --full)           echo full; return ;;
+    --frontier-local) echo frontier-local; return ;;
+    --frontier)       echo frontier; return ;;
+    --local)          echo local; return ;;
+  esac; done
+}
+
+# Apply a posture mode: persist + print coverage, sync the conductor ceiling, and
+# warn (do NOT silently fall back) if it executes locally but no vLLM is up.
+_apply_inf_mode() {
+  local name="$1" meta ceiling gpu
+  _inf set "${name}" || return 1
+  meta="$(_inf meta "${name}" 2>/dev/null)"; ceiling="${meta%% *}"; gpu="${meta##* }"
+  [ -n "${ceiling}" ] && _apply_mode "${ceiling}" >/dev/null 2>&1
+  if [ "${gpu}" = "1" ] && ! _port_up "${VLLM_PORT:-8001}"; then
+    echo "  ⚠ '${name}' executes locally but no vLLM endpoint is up on :${VLLM_PORT:-8001}."
+    echo "    Stand vLLM up, or pick a no-GPU posture:  hm mode full   (V4-Flash executes, no GPU)"
+  fi
+  echo "  ▸ conductor ceiling synced to: ${ceiling}"
+}
+
 usage() {
-  sed -n '3,32p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
+  sed -n '3,34p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
 }
 
 _install() {
@@ -202,8 +238,10 @@ EOF
     echo "• '${TMUX_SESSION}' already running — attaching"
     exec tmux attach -t "${TMUX_SESSION}"
   fi
-  # conductor mode (default --full) before bringing the stack up
-  _apply_mode "$(_mode_from_args "$@")"
+  # posture mode (explicit --<mode> switches; else keep the persisted posture)
+  _m="$(_inf_mode_from_args "$@")"
+  if [ -n "${_m}" ]; then _apply_inf_mode "${_m}"
+  else _apply_inf_mode "$(_inf name 2>/dev/null || echo free)"; fi
   # pre-flight validation FIRST — auto-fixes the killers (timeouts, skills,
   # embed/rerank) and brings the stack up; BLOCKING failure aborts the cockpit so
   # we never launch the agent into a misconfigured stack. Override with HM_FORCE=1.
@@ -233,11 +271,13 @@ EOF
   tmux send-keys -t "${TMUX_SESSION}" "${SCRIPTS}/watch.sh" C-m
   # pane 3: auto-refreshing status (use watch if present, else a sleep loop)
   tmux split-window -v -t "${TMUX_SESSION}"
+  # status pane: active posture + today's spend on top, then the stack status
+  _statpane="(cd ${REPO_ROOT} && python3 -m lib.inference.modes_cli status-line); ${SCRIPTS}/status.sh"
   if command -v watch >/dev/null 2>&1; then
-    tmux send-keys -t "${TMUX_SESSION}" "watch -t -n 4 ${SCRIPTS}/status.sh" C-m
+    tmux send-keys -t "${TMUX_SESSION}" "watch -t -n 4 '${_statpane}'" C-m
   else
     tmux send-keys -t "${TMUX_SESSION}" \
-      "while true; do clear; ${SCRIPTS}/status.sh; sleep 4; done" C-m
+      "while true; do clear; ${_statpane}; sleep 4; done" C-m
   fi
   tmux select-pane -t "${TMUX_SESSION}.0"
   [ -n "${HM_NO_ATTACH:-}" ] && { echo "✓ cockpit '${TMUX_SESSION}' started (detached). hm attach to join."; return 0; }
@@ -252,7 +292,11 @@ cmd="${1:-}"; shift || true
 case "${cmd}" in
   up)
     if [ -n "${HM_PRINT:-}" ]; then echo "${SCRIPTS}/start-all.sh"; exit 0; fi
-    _apply_mode "$(_mode_from_args "$@")"
+    # Posture: an explicit --<mode> flag switches; no flag keeps the persisted
+    # posture (default 'free' on first run) and never silently escalates to paid.
+    _m="$(_inf_mode_from_args "$@")"
+    if [ -n "${_m}" ]; then _apply_inf_mode "${_m}"
+    else _apply_inf_mode "$(_inf name 2>/dev/null || echo free)"; fi
     # Raise Hermes' own MCP call timeouts (the 120s long-run killer) before the
     # stack comes up — idempotent, no-op once applied. Never fails `hm up`.
     [ -f "${SCRIPTS}/fix-hermes-timeouts.sh" ] && \
@@ -267,6 +311,23 @@ case "${cmd}" in
     # embed (:8002) + rerank (:8003) serves auto-start with the stack on gpu_local
     # (the dense lane + reranker); opt out with HM_WITH_EMBED=0 / HM_WITH_RERANK=0.
     _start_serves
+    ;;
+  mode)
+    sub="${1:-}"
+    case "${sub}" in
+      ""|show)      _inf show ;;
+      --list|list)  _inf list ;;
+      -h|--help)    echo "hm mode [show|--list|<name>]   names: $(_inf list 2>/dev/null | sed -n '2,7p' | awk '{print $1}' | tr '\n' ' ')" ;;
+      *)
+        if [ -n "${HM_PRINT:-}" ]; then echo "hm mode set ${sub}"; exit 0; fi
+        _apply_inf_mode "${sub}" || exit 2
+        # If the conductor is already running, restart it so the new ceiling applies.
+        if [ "${HMX_MODE_CHANGED}" = "1" ] && timeout 1 bash -c ">/dev/tcp/127.0.0.1/${MCP_ESCALATION_PORT:-9105}" 2>/dev/null; then
+          echo "  • restarting conductor (escalation) to apply the new ceiling"
+          "${SCRIPTS}/restart.sh" escalation >/dev/null 2>&1 || true
+        fi
+        ;;
+    esac
     ;;
   down)        _dispatch "${SCRIPTS}/stop-all.sh" "$@" ;;
   restart)     _dispatch "${SCRIPTS}/restart.sh" "$@" ;;

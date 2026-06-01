@@ -66,6 +66,20 @@ def cmd_list() -> int:
     return 0
 
 
+def cmd_ceiling(name: str) -> int:
+    """Print just the spend ceiling (local|free|full|frontier) for `hm` to sync
+    CONDUCTOR_MODE."""
+    print(roles.mode_meta(name or roles.active_mode_name())["inference_mode"])
+    return 0
+
+
+def cmd_meta(name: str) -> int:
+    """Print `ceiling requires_gpu` (e.g. 'full 1') for shell parsing."""
+    m = roles.mode_meta(name or roles.active_mode_name())
+    print(f"{m['inference_mode']} {1 if m['requires_gpu'] else 0}")
+    return 0
+
+
 def cmd_status_line() -> int:
     name = roles.active_mode_name()
     rep = ledger.report("today")
@@ -85,6 +99,13 @@ def main(argv: list[str]) -> int:
         return cmd_set(argv[1])
     if cmd == "list":
         return cmd_list()
+    if cmd == "name":
+        print(roles.active_mode_name())
+        return 0
+    if cmd == "ceiling":
+        return cmd_ceiling(argv[1] if len(argv) > 1 else "")
+    if cmd == "meta":
+        return cmd_meta(argv[1] if len(argv) > 1 else "")
     if cmd == "status-line":
         return cmd_status_line()
     print(f"unknown subcommand '{cmd}'")
