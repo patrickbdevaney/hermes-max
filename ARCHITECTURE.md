@@ -457,3 +457,54 @@ stays out of the Frankenstein swamp: one seam, three config files, an honest led
 After this fabric the repo is *smaller and cleaner* — provider knowledge consolidated,
 not scattered. Adding or removing a backend, or changing your whole cost posture, is
 a config edit (`inference.yaml` / `hm mode`), never a code change.
+
+---
+
+## 17. Keeping the model roster current
+
+The free/cheap LLM bazaar rotates monthly, so model ids drift. `lib/inference/roster.py`
+validates every configured id at `hm up` (warn-only) and `hm health` (full ROSTER
+section). For each `provider.slot`:
+
+1. Check `KNOWN_DEPRECATED` (a dict you populate as models retire).
+2. Probe the provider's `/models` where available (cached 1h, never slows a task):
+   openai-compatible → `GET {base}/models`; `local_vllm` → reuse the discovery
+   result; `anthropic`/`cerebras` have no `/models` → `unconfirmed` (rely on
+   `KNOWN_DEPRECATED` + a first-call 404).
+
+`hm health` prints one line per slot:
+
+```
+  ✓ openrouter.synth_free   moonshotai/kimi-k2.6:free   confirmed
+  ✗ groq.synth_oss          openai/gpt-oss-120b         missing
+      → NOT in provider /models — update id in inference.yaml
+```
+
+A deprecated/missing slot is a **warning, not an error** — the system starts anyway.
+Every model slot in `inference.yaml` carries a `# verified: YYYY-MM-DD` comment.
+When one is flagged: find the replacement, change the id in `inference.yaml` (one
+line), update the date, `hm health` re-confirms. **No code change. Ever.**
+
+## 18. Free uplift (optional plugin)
+
+`plugins/free_uplift/` is a proactive coherence checkpoint: after a file passes
+verify (before checkpoint), spend **one Kimi-K2.6:free** call to confirm the
+implementation matches its FILE SPEC and the already-completed interfaces. Catches
+drift at $0.
+
+**It is a plugin, not core.** `conductor_policy.py`, `mcp-escalation`, and
+`mcp-research` have zero knowledge of it. The conductor exposes exactly one generic
+extension point — `register_post_verify_hook(fn)` / `run_post_verify_hooks(...)` —
+and `plugins/load_plugins.py` (run at `hm up`) registers the plugin against it **only
+if** all hold: `INFERENCE_MODE_FREE_UPLIFT=true`, `OPENROUTER_API_KEY` present,
+Kimi-K2.6:free not deprecated, and daily free-RPD headroom > 200. Otherwise it logs
+`not registered` and the core loop runs unchanged.
+
+Guardrails: ≤2 calls/file, ≤10/task; skips silently when the rate bucket is tight;
+never blocks the loop on error (a failed call counts as CLEAN). Toggle with
+`hm up --free-uplift` / `--no-free-uplift`; `hm mode` shows `[free-uplift: ON/OFF]`;
+`hm cost` shows a dedicated `free_uplift` line. When Kimi-K2.6:free is deprecated the
+plugin stops registering automatically — update the id in `inference.yaml` and it
+returns on the next `hm up`. No other file changes. This is the isolation contract:
+an optional capability is one directory + one config flag, and its absence is
+invisible to the core.

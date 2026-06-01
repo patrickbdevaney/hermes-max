@@ -90,3 +90,8 @@ roles:
   # ── frontier (general) ─────────────────────────────────────────────────────
   frontier:                      # the sparing Opus rung, triple-gated by the conductor
     - anthropic.frontier
+
+  # ── free_uplift plugin (isolated; see plugins/free_uplift) ──────────────────
+  free_uplift:                   # proactive Kimi-K2.6:free coherence checkpoint
+    - openrouter.synth_free      # Kimi K2.6:free; absent → plugin won't register
+

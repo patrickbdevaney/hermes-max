@@ -185,9 +185,15 @@ def tier(name: str) -> str:
     if p.get("kind") == "anthropic":
         return "frontier"
     cost = p.get("cost") or {}
-    if float(cost.get("in_per_mtok", 0) or 0) == 0.0 and float(cost.get("out_per_mtok", 0) or 0) == 0.0:
-        return "free"
-    return "paid"
+    # collect rates from a flat block OR a per-model map (cost.<slot>.in_per_mtok)
+    rates: list[Any] = []
+    nested = [v for v in cost.values() if isinstance(v, dict)] if isinstance(cost, dict) else []
+    if nested:
+        for v in nested:
+            rates += [v.get("in_per_mtok", 0), v.get("out_per_mtok", 0)]
+    else:
+        rates = [cost.get("in_per_mtok", 0), cost.get("out_per_mtok", 0)]
+    return "free" if all(float(x or 0) == 0.0 for x in rates) else "paid"
 
 
 def resolve_model(provider: str, model_key: str) -> Optional[dict[str, Any]]:
@@ -271,12 +277,16 @@ def api_key(provider: str, env: Optional[dict[str, str]] = None) -> Optional[str
 
 
 def _cost_block(provider: str, model_key: str) -> dict[str, float]:
-    """Pick the right price block. A provider may ship a flash tier (`cost_flash`)
-    for its cheaper/driver model; the primary `cost` block covers everything else."""
+    """Pick the right price block. Supports per-model cost maps
+    (``cost: { planner: {...}, driver: {...} }``), the legacy ``cost_flash`` driver
+    tier, and a flat ``cost`` block — in that order."""
     p = get_provider(provider) or {}
+    c = p.get("cost") or {}
+    if isinstance(c.get(model_key), dict):        # per-model: cost.<slot>
+        return c[model_key]
     if model_key == "driver" and isinstance(p.get("cost_flash"), dict):
-        return p["cost_flash"]
-    return p.get("cost") or {}
+        return p["cost_flash"]                    # legacy flash tier
+    return c                                       # flat (free providers, etc.)
 
 
 def cost_usd(provider: str, model_key: str, in_tok: int, out_tok: int,

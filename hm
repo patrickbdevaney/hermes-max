@@ -9,6 +9,7 @@
 #   hm up [--MODE]        start all MCPs (+ embed/rerank hint)         scripts/start-all.sh
 #                         MODE = --free|--full-local|--full|--frontier-local|
 #                         --frontier|--local (posture; default = current/free)
+#                         + --free-uplift|--no-free-uplift (plugin toggle)
 #   hm mode [name]        show / switch the cost-quality posture       modes.yaml
 #                         no arg = show; --list = table; <name> = switch live
 #   hm down               stop everything (PID + port fallback)        scripts/stop-all.sh
@@ -28,7 +29,8 @@
 #   hm smoke              real ~15-min end-to-end agent proof           scripts/integration-smoke.sh
 #   hm summary            per-task tool-call summary + bottleneck split scripts/run-summary.sh
 #   hm bottleneck         full-vs-bare timing eval                     scripts/bottleneck-eval.sh
-#   hm cost               conductor spend + Opus sparing proof         scripts/conductor-report.sh
+#   hm cost [window]      fabric ledger ($0.000000): provider/model/role,    lib/inference
+#                         free-vs-paid, remaining free RPD (+legacy conductor)
 #   hm eval [capability]  prove every feature works in the REAL agent  scripts/eval-battery.sh
 #                         loop (asserts real effects); one capability if named
 #   hm setup              first-run: copy config trinity + show providers  scripts/setup.sh
@@ -202,8 +204,21 @@ _apply_inf_mode() {
   echo "  ▸ conductor ceiling synced to: ${ceiling}"
 }
 
+# Persist the free_uplift toggle (plugins/free_uplift) into .env.
+_set_uplift() {
+  local val="$1"   # true|false
+  [ -f "${HMX_ENV_FILE}" ] || return 0
+  if grep -qE '^INFERENCE_MODE_FREE_UPLIFT=' "${HMX_ENV_FILE}"; then
+    sed -i "s@^INFERENCE_MODE_FREE_UPLIFT=.*@INFERENCE_MODE_FREE_UPLIFT=${val}   # set by hm@" "${HMX_ENV_FILE}"
+  else
+    printf 'INFERENCE_MODE_FREE_UPLIFT=%s   # set by hm (plugins/free_uplift)\n' "${val}" >> "${HMX_ENV_FILE}"
+  fi
+  export INFERENCE_MODE_FREE_UPLIFT="${val}"
+  echo "  ▸ free-uplift: ${val} (plugins/free_uplift)"
+}
+
 usage() {
-  sed -n '3,35p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
+  sed -n '3,37p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
 }
 
 _install() {
@@ -301,6 +316,8 @@ case "${cmd}" in
     if [ -n "${HM_PRINT:-}" ]; then echo "${SCRIPTS}/start-all.sh"; exit 0; fi
     # First-run wiring on demand: `hm up --setup` copies the config trinity.
     case " $* " in *" --setup "*) [ -f "${SCRIPTS}/setup.sh" ] && "${SCRIPTS}/setup.sh" || true ;; esac
+    # free_uplift toggle (plugins/free_uplift)
+    case " $* " in *" --free-uplift "*) _set_uplift true ;; *" --no-free-uplift "*) _set_uplift false ;; esac
     # Posture: an explicit --<mode> flag switches; no flag keeps the persisted
     # posture (default 'free' on first run) and never silently escalates to paid.
     _m="$(_inf_mode_from_args "$@")"
@@ -320,6 +337,10 @@ case "${cmd}" in
     # embed (:8002) + rerank (:8003) serves auto-start with the stack on gpu_local
     # (the dense lane + reranker); opt out with HM_WITH_EMBED=0 / HM_WITH_RERANK=0.
     _start_serves
+    # roster: warn (never gate) if a configured model id is deprecated/missing
+    ( cd "${REPO_ROOT}" && python3 -m lib.inference.roster --warn-only 2>/dev/null ) || true
+    # plugins: register optional capabilities (free_uplift) if their conditions hold
+    ( cd "${REPO_ROOT}" && python3 -m plugins.load_plugins 2>/dev/null ) || true
     ;;
   mode)
     sub="${1:-}"
@@ -349,7 +370,13 @@ case "${cmd}" in
   regression)  _dispatch "${SCRIPTS}/regression-eval.sh" "$@" ;;
   summary)     _dispatch "${SCRIPTS}/run-summary.sh" "$@" ;;
   bottleneck)  _dispatch "${SCRIPTS}/bottleneck-eval.sh" "$@" ;;
-  cost)        _dispatch "${SCRIPTS}/conductor-report.sh" "$@" ;;
+  cost)
+    if [ -n "${HM_PRINT:-}" ]; then echo "lib.inference cost + ${SCRIPTS}/conductor-report.sh"; exit 0; fi
+    ( cd "${REPO_ROOT}" && python3 -m lib.inference.modes_cli cost "$@" ) || true
+    if [ -f "${SCRIPTS}/conductor-report.sh" ]; then
+      echo; echo "── legacy conductor ledger ──"; "${SCRIPTS}/conductor-report.sh" || true
+    fi
+    ;;
   eval)        _dispatch "${SCRIPTS}/eval-battery.sh" "$@" ;;
   snapshot)    _dispatch "${SCRIPTS}/snapshot-stores.sh" "$@" ;;
   restore)     _dispatch "${SCRIPTS}/restore-stores.sh" "$@" ;;

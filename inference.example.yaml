@@ -36,10 +36,11 @@ providers:
     base_url: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
     api_key_env: DEEPSEEK_API_KEY              # unset → this rung silently drops
     models:
-      planner: { id: "deepseek-v4-pro",   ctx: 1000000 }
-      driver:  { id: "deepseek-v4-flash", ctx: 1000000 }
-    cost:       { in_per_mtok: 0.435, out_per_mtok: 0.87, cache_hit_in_per_mtok: 0.003625 }  # V4-Pro
-    cost_flash: { in_per_mtok: 0.14,  out_per_mtok: 0.28, cache_hit_in_per_mtok: 0.0028 }     # V4-Flash
+      planner: { id: "deepseek-v4-pro",   ctx: 1000000 }   # verified: 2026-06-01
+      driver:  { id: "deepseek-v4-flash", ctx: 1000000 }   # verified: 2026-06-01
+    cost:                                                   # per-model price map
+      planner: { in_per_mtok: 0.435, out_per_mtok: 0.87, cache_hit_in_per_mtok: 0.003625 }
+      driver:  { in_per_mtok: 0.14,  out_per_mtok: 0.28, cache_hit_in_per_mtok: 0.0028 }
     limits: { rpm: 1000 }
 
   deepinfra:                                   # the operator's FUNDED DeepSeek provider today (leads --full*)
@@ -47,16 +48,18 @@ providers:
     base_url: ${DEEPINFRA_BASE_URL:-https://api.deepinfra.com/v1/openai}   # POST /chat/completions → /v1/openai/chat/completions
     api_key_env: DEEPINFRA_API_KEY
     models:
-      planner: { id: "deepseek-ai/DeepSeek-V4-Pro",   ctx: 1000000 }
-      driver:  { id: "deepseek-ai/DeepSeek-V4-Flash", ctx: 1000000 }
-    cost: { in_per_mtok: 1.30, out_per_mtok: 2.60 }   # DeepInfra list (verify live; deepseek_direct is cheaper)
+      planner: { id: "deepseek-ai/DeepSeek-V4-Pro",   ctx: 1000000 }   # verified: 2026-06-01
+      driver:  { id: "deepseek-ai/DeepSeek-V4-Flash", ctx: 1000000 }   # verified: 2026-06-01
+    cost:                                              # per-model (verify live; deepseek_direct is cheaper)
+      planner: { in_per_mtok: 1.30, out_per_mtok: 2.60 }
+      driver:  { in_per_mtok: 0.10, out_per_mtok: 0.20 }
 
   openrouter:                                  # the :free roster (rotates) + 1M-ctx synth
     kind: openai_compatible
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
     models:
-      synth_free:   { id: "moonshotai/kimi-k2.6:free",      ctx: 1000000 }  # Kimi K2.6 free, 1M ctx
+      synth_free:   { id: "moonshotai/kimi-k2.6:free",      ctx: 262144 }   # Kimi K2.6 free — 262K ctx on OpenRouter free (NOT 1M; that's the paid API)
       plan_free:    { id: "deepseek/deepseek-r1-0528:free", ctx: 163840 }
       code_free:    { id: "qwen/qwen3-coder:free",          ctx: 262144 }
       extract_free: { id: "openai/gpt-oss-20b:free",        ctx: 131072 }

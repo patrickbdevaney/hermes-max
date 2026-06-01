@@ -26,7 +26,7 @@ def cmd_show() -> int:
     name = roles.active_mode_name()
     m = roles.mode_meta(name)
     sat = roles.satisfiability(name)
-    print(f"▸ active mode: {name}")
+    print(f"▸ active mode: {name}   [free-uplift: {_uplift_status()}]")
     print(f"  cost/mo: {m['monthly_cost']}   needs GPU: {'yes' if m['requires_gpu'] else 'no'}"
           f"   ceiling: {m['inference_mode']}")
     print(f"  {m['posture']}")
@@ -124,6 +124,50 @@ def cmd_executor(name: str) -> int:
     return 0
 
 
+def _uplift_status() -> str:
+    from . import config
+    v = (config._effective_env(None).get("INFERENCE_MODE_FREE_UPLIFT", "") or "").lower()
+    return "ON" if v in ("1", "true", "yes", "on") else "OFF"
+
+
+def cmd_cost(window: str = "today") -> int:
+    """Render the fabric ledger ($0.000000) — totals, by provider/model/role, the
+    free-vs-paid split, remaining free RPD, active mode + free_uplift status."""
+    import os
+
+    from . import buckets, config
+    rep = ledger.report(window)
+    mode = roles.active_mode_name()
+    print(f"═══ inference cost — {window} ═══")
+    print(f"  mode: {mode}   free-uplift: {_uplift_status()}   "
+          f"calls: {rep['calls']}   TOTAL: {ledger.fmt_usd(rep['total_usd'])}")
+    print(f"  free vs paid: {rep['free_tok']:,} tok @ $0  |  "
+          f"{rep['paid_tok']:,} tok paid")
+
+    def table(title: str, d: dict, key_w: int = 26) -> None:
+        if not d:
+            return
+        print(f"  ── by {title} ──")
+        for k, e in sorted(d.items(), key=lambda kv: -kv[1]["usd"]):
+            print(f"    {k:<{key_w}} {ledger.fmt_usd(e['usd'])}  "
+                  f"{e['tok']:>10,} tok  {e['calls']:>4} calls")
+
+    table("provider", rep["by_provider"], 16)
+    table("model", rep["by_model"], 30)
+    table("role", rep["by_role"], 20)
+
+    up = rep["by_role"].get("free_uplift")
+    if up:
+        print(f"  ── free_uplift ──  {up['calls']} calls  {up['tok']:,} tok  "
+              f"{ledger.fmt_usd(up['usd'])}")
+
+    if rep["free_budget_remaining"]:
+        print("  ── remaining FREE budget today (RPD) ──")
+        for slot, rem in sorted(rep["free_budget_remaining"].items()):
+            print(f"    {slot:<30} {rem if rem is not None else '∞':>8} req left")
+    return 0
+
+
 def cmd_status_line() -> int:
     name = roles.active_mode_name()
     rep = ledger.report("today")
@@ -152,6 +196,8 @@ def main(argv: list[str]) -> int:
         return cmd_meta(argv[1] if len(argv) > 1 else "")
     if cmd == "providers":
         return cmd_providers()
+    if cmd == "cost":
+        return cmd_cost(argv[1] if len(argv) > 1 else "today")
     if cmd == "executor":
         return cmd_executor(argv[1] if len(argv) > 1 else "")
     if cmd == "status-line":

@@ -70,4 +70,10 @@ else
 fi
 
 echo
+# ── inference roster: confirm configured model ids are still live (warn, not gate) ─
+echo "ROSTER (configured model ids):"
+_RR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && python3 -m lib.inference.roster 2>/dev/null)"
+[ -n "${_RR}" ] && echo "${_RR}" || echo "  • roster unavailable (pyyaml/httpx?)"
+
+echo
 [ "${DOWN}" -eq 0 ] && { echo "all MCP servers healthy"; exit 0; } || { echo "one or more MCP servers DOWN"; exit 1; }

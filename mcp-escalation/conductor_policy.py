@@ -272,3 +272,29 @@ def code_quality_signals(plan_rounds: int = 0, repair_rounds: int = 0,
         except Exception:
             out["recorded"] = False
     return out
+
+
+# ── generic post-verify hook surface (Stage-11) ───────────────────────────────
+# The conductor exposes ONE generic extension point and has ZERO knowledge of any
+# plugin. plugins/load_plugins.py registers optional capabilities (e.g. free_uplift)
+# against this at hm up. A hook returns {"proceed": bool, "flag"?: str}; the first
+# hook that returns proceed=False short-circuits (the caller surfaces its flag).
+_post_verify_hooks: list = []
+
+
+def register_post_verify_hook(fn) -> None:
+    """Register a callable fn(file, plan, completed, router) -> {"proceed": bool,...}."""
+    _post_verify_hooks.append(fn)
+
+
+def run_post_verify_hooks(file: str, plan: Any, completed: Any, router: Any = None) -> dict[str, Any]:
+    """Run registered post-verify hooks in order; first non-proceed wins. Never
+    raises — a hook that errors is skipped (it must never block the core loop)."""
+    for hook in list(_post_verify_hooks):
+        try:
+            result = hook(file, plan, completed, router) or {}
+        except Exception:
+            continue
+        if not result.get("proceed", True):
+            return result
+    return {"proceed": True}
