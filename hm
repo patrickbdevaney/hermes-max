@@ -6,11 +6,13 @@
 # sugar, the scripts are the substance. Runnable as `./hm` from the repo root, or
 # install onto PATH (`hm install`, or via bootstrap.sh).
 #
-#   hm up [--MODE]        start all MCPs (+ embed/rerank hint)         scripts/start-all.sh
-#                         MODE = --free|--full-local|--full|--frontier-local|
-#                         --frontier|--local (posture; default = current/free)
+#   hm up [--free|--full] start all MCPs (+ embed/rerank hint)         scripts/start-all.sh
+#                         --free = Profile A (own a GPU: local drives, free planner)
+#                         --full = Profile B (no GPU: economic API drives + plans)
+#                         advanced MODEs: --full-local|--frontier-local|--frontier|
+#                         --local (see docs/modes.md); default = current/free
 #                         + --free-uplift|--no-free-uplift (plugin toggle)
-#   hm mode [name]        show / switch the cost-quality posture       modes.yaml
+#   hm mode [name]        show / switch the cost-quality posture       config/modes.yaml
 #                         no arg = show; --list = table; <name> = switch live
 #   hm down               stop everything (PID + port fallback)        scripts/stop-all.sh
 #   hm restart [srv|all]  restart one server or all                    scripts/restart.sh
@@ -217,8 +219,71 @@ _set_uplift() {
   echo "  ▸ free-uplift: ${val} (plugins/free_uplift)"
 }
 
+# Short, grouped help — the common path only (progressive disclosure). The full
+# surface is one flag away: `hm help --all`.
+_help_short() {
+  cat <<'EOF'
+hermes-max — agentic coding harness
+
+  Getting started
+    hm up [--free|--full]     start the stack in a profile/mode
+                                --free = own a GPU (Profile A) · --full = no GPU (Profile B)
+    hm down                   stop everything
+    hm status                 what's running + active mode + today's spend
+
+  Using it
+    hm run "task"             run the agent on a task (or just launch `hermes`)
+    hm dev                    the cockpit: agent + live activity + status, one window
+    hm cost                   spend breakdown ($0.000000, free-vs-paid)
+
+  Health & modes
+    hm health                 check endpoints, providers, roster
+    hm mode [name|--list]     show or switch profile/mode
+
+  More:  hm help --all        every command, including advanced/diagnostic verbs
+         hm <verb> --help      one-paragraph help for any verb
+EOF
+}
+
+# The full surface — extracted from the header comment block (DRY: the comment is
+# the authoritative per-verb doc), from line 3 up to the `set -uo pipefail` line.
+_help_all() {
+  sed -n '3,/^set -uo pipefail/p' "${HM_SELF}" | sed -e '/^set -uo pipefail/d' -e 's/^# \{0,1\}//'
+}
+
+# Route `hm help` / `hm` (no args) to the short help; `hm help --all` to the full one.
 usage() {
-  sed -n '3,37p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
+  case " $* " in *" --all "*|*" -a "*|*" all "*) _help_all ;; *) _help_short ;; esac
+}
+
+# One-paragraph help for an individual verb (`hm <verb> --help`).
+_verb_help() {
+  case "$1" in
+    up)         echo "hm up [--free|--full|--MODE] [--free-uplift] — start the whole stack in a profile/mode. --free = Profile A (you own a GPU: local model executes, free planner); --full = Profile B (no GPU: economic API drives and plans). Advanced modes: --full-local --frontier-local --frontier --local (docs/modes.md). Prints which providers are present, which roles are satisfiable, the Hermes backend set, and any roster warnings." ;;
+    down)       echo "hm down — stop every MCP server (by PID file, port fallback) and the embed/rerank serves. Idempotent; confirms every port is free." ;;
+    restart)    echo "hm restart [server|all] — stop then start one named server (e.g. 'hm restart research') or the whole stack, re-running health." ;;
+    status)     echo "hm status — the single 'is it OK and what's it costing' view: per-server UP/DOWN · port · PID · uptime · health, plus the active mode and today's spend." ;;
+    mode)       echo "hm mode [name|--list] — show or switch the cost/quality posture live (no restart). Names: $(_inf list 2>/dev/null | sed -n '2,7p' | awk '{print $1}' | tr '\n' ' '). See docs/modes.md." ;;
+    dev)        echo "hm dev [--MODE] — the one-window tmux cockpit: a hermes pane, a live activity (watch) pane, and a compact status pane (mode + spend). Detachable; reattach with 'hm attach'. tmux absent → prints manual instructions." ;;
+    attach)     echo "hm attach — reattach to the running 'hermes-max' tmux cockpit started by hm dev." ;;
+    run)        echo "hm run \"task\" — launch the Hermes agent on a task (exec's 'hermes'). Equivalent to running 'hermes' directly." ;;
+    cost)       echo "hm cost [today|week|month] — spend breakdown at \$0.000000 precision: by provider/model/role, the free-vs-paid split, and remaining daily free budget per model." ;;
+    health)     echo "hm health — pass/fail healthcheck for scripting: endpoints reachable, providers present, and the full model-roster confirmation (warns on a deprecated/missing id; never gates)." ;;
+    preflight)  echo "hm preflight — validate the whole stack before a task (PASS/FAIL/WARN); auto-fixes the common killers; exit 1 on a BLOCKING failure." ;;
+    watch)      echo "hm watch — the raw live tool-call stream: every call, heartbeat, fallback, and routing decision. (Cockpit uses this; for debugging.)" ;;
+    observe)    echo "hm observe — the live waterfall view of where wall-clock time actually went. (For debugging.)" ;;
+    logs)       echo "hm logs [server] — tail a server's log under ~/.hermes-max/logs/ (or the live log with no arg)." ;;
+    smoke)      echo "hm smoke — a real ~15-minute end-to-end agent proof that drives every component once." ;;
+    regression) echo "hm regression — the regression eval gate." ;;
+    summary)    echo "hm summary — per-task tool-call summary + the inference/tool-work/artificial bottleneck split." ;;
+    bottleneck) echo "hm bottleneck — run the SAME task FULL vs BARE and print both timing splits → bottleneck_report.md." ;;
+    eval)       echo "hm eval [capability] — prove every feature works in a REAL agent turn (asserts a real artifact effect, not a 200). Name one capability for fast iteration." ;;
+    snapshot)   echo "hm snapshot <name> — snapshot the RAG index + KG db + corpus stores to ~/.hermes-max/snapshots/<name>." ;;
+    restore)    echo "hm restore <name> — restore a named store snapshot (the current state is auto-backed-up first)." ;;
+    setup)      echo "hm setup — first-run wiring: copy the config trinity into ~/.hermes-max/ and print which providers are present." ;;
+    install)    echo "hm install — symlink hm onto PATH (~/.local/bin/hm)." ;;
+    *)          return 1 ;;
+  esac
 }
 
 _install() {
@@ -311,6 +376,18 @@ EOF
 if [ -n "${HM_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
 cmd="${1:-}"; shift || true
+
+# `hm <verb> --help` → one-paragraph verb help, before any dispatch/side effect.
+# 'mode' handles its own -h/--help; an empty/help verb falls through to grouped help.
+case "${1:-}" in
+  -h|--help)
+    case "${cmd}" in
+      ""|help|mode) : ;;
+      *) if _verb_help "${cmd}"; then exit 0; fi ;;
+    esac
+    ;;
+esac
+
 case "${cmd}" in
   up)
     if [ -n "${HM_PRINT:-}" ]; then echo "${SCRIPTS}/start-all.sh"; exit 0; fi
@@ -341,6 +418,15 @@ case "${cmd}" in
     ( cd "${REPO_ROOT}" && python3 -m lib.inference.roster --warn-only 2>/dev/null ) || true
     # plugins: register optional capabilities (free_uplift) if their conditions hold
     ( cd "${REPO_ROOT}" && python3 -m plugins.load_plugins 2>/dev/null ) || true
+    # ── one-screen start summary: mode + role satisfiability + present providers.
+    #    (The Hermes backend was printed above by set_mode; roster warnings too.)
+    echo
+    echo "════════ hermes-max is up ════════"
+    ( cd "${REPO_ROOT}" && python3 -m lib.inference.modes_cli show ) 2>/dev/null || true
+    echo "  providers present (a missing key silently drops that rung):"
+    ( cd "${REPO_ROOT}" && python3 -m lib.inference.modes_cli providers ) 2>/dev/null \
+      | awk 'NR==1{next} {printf "    %-16s %s\n", $1, $2 $3}' || true
+    echo "  next:  hermes   (or: hm dev for the cockpit · hm status · hm cost)"
     ;;
   mode)
     sub="${1:-}"
@@ -396,6 +482,6 @@ case "${cmd}" in
   dev)     _dev "$@" ;;
   attach)  _attach ;;
   install) _install ;;
-  ""|-h|--help|help) usage ;;
-  *) echo "hm: unknown verb '${cmd}'"; echo; usage; exit 2 ;;
+  ""|-h|--help|help) usage "$@" ;;
+  *) echo "hm: unknown verb '${cmd}'"; echo; _help_short; exit 2 ;;
 esac
