@@ -281,6 +281,35 @@ if command -v hermes >/dev/null 2>&1; then
   fi
 fi
 
+# ── inference fabric coverage (providers present + roles satisfiable per mode) ──
+hdr "inference fabric"
+if python3 -c "import yaml" >/dev/null 2>&1; then
+  _inf_json="$(cd "${REPO_ROOT}" && python3 - <<'PY' 2>/dev/null
+import json
+from lib.inference import config, roles
+mode = roles.active_mode_name()
+sat = roles.satisfiability(mode)
+print(json.dumps({"mode": mode,
+                  "present": sorted(config.present_providers()),
+                  "warnings": sat["warnings"],
+                  "satisfiable": sat["satisfiable"]}))
+PY
+)"
+  if [ -n "${_inf_json}" ]; then
+    _mode="$(printf '%s' "${_inf_json}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["mode"])' 2>/dev/null)"
+    _present="$(printf '%s' "${_inf_json}" | python3 -c 'import sys,json;print(", ".join(json.load(sys.stdin)["present"]))' 2>/dev/null)"
+    pass "posture '${_mode}' active; providers present: ${_present:-local_vllm only}"
+    # one WARN line per role whose whole chain is absent (a capability is off)
+    while IFS= read -r w; do [ -n "${w}" ] && warn "${w}"; done < <(
+      printf '%s' "${_inf_json}" | python3 -c 'import sys,json
+for w in json.load(sys.stdin)["warnings"]: print(w)' 2>/dev/null)
+  else
+    warn "inference fabric present but could not introspect (check inference.yaml / httpx)"
+  fi
+else
+  warn "PyYAML not installed — inference fabric inert (pip install pyyaml httpx); local-only still works"
+fi
+
 # ════════════════════════════════════════════════════════════════════════════
 echo
 printf '%s═══ pre-flight summary ═══%s\n' "${B}" "${Z}"

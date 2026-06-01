@@ -1,0 +1,125 @@
+# inference.example.yaml — the backend bazaar, as DATA not code.
+# ─────────────────────────────────────────────────────────────────────────────
+# Copy this to ~/.hermes-max/inference.yaml and fill in keys (scripts/setup.sh
+# does this for you on first run). EDIT THIS FILE, NOT THE CODE.
+#
+#   • A provider block whose api_key_env is UNSET in the environment is silently
+#     skipped — not an error. Delete a block, or just don't set its key, to turn
+#     that rung off. With nothing but `local_vllm`, the system is fully local & free.
+#   • `kind` selects the client adapter: openai_compatible | anthropic.
+#   • Model ids are STRINGS on purpose — the free bazaar rotates; swapping a
+#     departed :free model is a one-line edit here, never a code change.
+#
+# This example IS the recommended maximalist constellation. Any user who copies
+# it and fills in the keys they have gets the optimal topology immediately; the
+# keys they lack simply drop their rungs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+providers:
+
+  local_vllm:                                  # the free, private, sovereign executor floor
+    kind: openai_compatible
+    base_url_env: VLLM_BASE_URL                # endpoint from env; NEVER hardcoded
+    api_key_env: null                          # local needs no key
+    discover_model: true                       # id auto-discovered from GET ${VLLM_BASE_URL}/models
+    models:
+      driver:  { ctx: 262144 }                 # id filled at runtime from /v1/models[0].id
+    cost:   { in_per_mtok: 0.0, out_per_mtok: 0.0 }   # local = free
+    limits: { rpm: null, tpm: null }                  # local = unmetered
+    privacy: local
+    # Present only when VLLM_BASE_URL is set AND the endpoint is reachable; if it is
+    # unreachable the local tier is silently ABSENT (the harness still has its own
+    # local fallback via proceed_local).
+
+  deepseek_direct:                             # direct-provider V4-Pro/Flash (alt to deepinfra; usually cheaper)
+    kind: openai_compatible
+    base_url: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+    api_key_env: DEEPSEEK_API_KEY              # unset → this rung silently drops
+    models:
+      planner: { id: "deepseek-v4-pro",   ctx: 1000000 }   # verified: 2026-06-01
+      driver:  { id: "deepseek-v4-flash", ctx: 1000000 }   # verified: 2026-06-01
+    cost:                                                   # per-model price map
+      planner: { in_per_mtok: 0.435, out_per_mtok: 0.87, cache_hit_in_per_mtok: 0.003625 }
+      driver:  { in_per_mtok: 0.14,  out_per_mtok: 0.28, cache_hit_in_per_mtok: 0.0028 }
+    limits: { rpm: 1000 }
+
+  deepinfra:                                   # the operator's FUNDED DeepSeek provider today (leads --full*)
+    kind: openai_compatible
+    base_url: ${DEEPINFRA_BASE_URL:-https://api.deepinfra.com/v1/openai}   # POST /chat/completions → /v1/openai/chat/completions
+    api_key_env: DEEPINFRA_API_KEY
+    models:
+      planner: { id: "deepseek-ai/DeepSeek-V4-Pro",   ctx: 1000000 }   # verified: 2026-06-01
+      driver:  { id: "deepseek-ai/DeepSeek-V4-Flash", ctx: 1000000 }   # verified: 2026-06-01
+    cost:                                              # per-model (verify live; deepseek_direct is cheaper)
+      planner: { in_per_mtok: 1.30, out_per_mtok: 2.60 }
+      driver:  { in_per_mtok: 0.10, out_per_mtok: 0.20 }
+
+  openrouter:                                  # the :free roster (rotates) + 1M-ctx synth
+    kind: openai_compatible
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    models:
+      synth_free:   { id: "moonshotai/kimi-k2.6:free",      ctx: 262144 }   # Kimi K2.6 free — 262K ctx on OpenRouter free (NOT 1M; that's the paid API)
+      plan_free:    { id: "deepseek/deepseek-r1-0528:free", ctx: 163840 }
+      code_free:    { id: "qwen/qwen3-coder:free",          ctx: 262144 }
+      extract_free: { id: "openai/gpt-oss-20b:free",        ctx: 131072 }
+    cost:   { in_per_mtok: 0.0, out_per_mtok: 0.0 }   # :free models = $0 (rate-limited)
+    limits: { rpm: 20, rpd: 1000 }                    # 1000/day needs the one-time $10 deposit
+    notes: ":free roster rotates; ids are config so you can swap in 30s when a model leaves"
+
+  groq:                                        # the fan-out workhorse — PER-MODEL buckets on one key
+    kind: openai_compatible
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    models:
+      fast_filter: { id: "llama-3.1-8b-instant",                     ctx: 131072 }
+      fast_mid:    { id: "meta-llama/llama-4-scout-17b-16e-instruct", ctx: 131072 }
+      synth_oss:   { id: "openai/gpt-oss-120b",                      ctx: 131072 }
+    cost: { in_per_mtok: 0.0, out_per_mtok: 0.0 }     # free tier; buckets are PER-MODEL below
+    limits_per_model:
+      llama-3.1-8b-instant:                       { rpm: 30, rpd: 14400, tpm: 6000 }
+      meta-llama/llama-4-scout-17b-16e-instruct:  { rpm: 30, rpd: 1000,  tpm: 30000 }
+      openai/gpt-oss-120b:                        { rpm: 30, rpd: 1000,  tpm: 8000 }
+
+  cerebras:                                    # fast (30K tok/s) but 5 RPM → single chunked synth rung
+    kind: openai_compatible
+    base_url: https://api.cerebras.ai/v1
+    api_key_env: CEREBRAS_API_KEY
+    models:
+      synth_fast: { id: "gpt-oss-120b", ctx: 65536 }
+      synth_glm:  { id: "zai-glm-4.7",  ctx: 64000 }
+    cost: { in_per_mtok: 0.0, out_per_mtok: 0.0 }
+    limits_per_model:
+      gpt-oss-120b: { rpm: 5, rph: 150, rpd: 2400, tpm: 30000, tpd: 1000000 }
+      zai-glm-4.7:  { rpm: 5, rph: 150, rpd: 2400, tpm: 30000, tpd: 1000000 }
+
+  anthropic:                                   # the spare frontier rung — triple-gated in the conductor
+    kind: anthropic
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+    models:
+      frontier: { id: "claude-opus-4-8", ctx: 1000000 }
+    cost: { in_per_mtok: 5.0, out_per_mtok: 25.0, cache_hit_in_per_mtok: 0.50 }
+    notes: "spare frontier rung only; triple-gated in the conductor (mode=frontier + synth-failed-twice + large blast-radius)"
+
+  # ── THE OPEN BAZAAR — add any OpenAI-compatible provider by copying this block ──
+  # plus one env var. No code changes. base_url_env keeps the endpoint out of the
+  # YAML literal; api_key_env gates presence. This is the extensibility intent.
+  # example_custom:
+  #   kind: openai_compatible
+  #   base_url_env: CUSTOM_PROVIDER_BASE_URL
+  #   api_key_env: CUSTOM_PROVIDER_API_KEY
+  #   models:
+  #     driver: { id: "some-model", ctx: 128000 }
+  #   cost: { in_per_mtok: 0.10, out_per_mtok: 0.30 }
+
+# ── DEFAULT GATEWAY — the catch-all cloud fallback ────────────────────────────
+# When EVERY named rung in a role's chain is absent or exhausted, the router falls
+# through to this gateway. A user with ONLY OPENROUTER_API_KEY set therefore gets a
+# fully working cloud system. Absent key → no fallthrough → {ok:False, proceed_local}.
+default_gateway:
+  kind: openai_compatible
+  base_url: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+  default_model: "moonshotai/kimi-k2.6:free"   # the model used when all named rungs are gone
+  cost: { in_per_mtok: 0.0, out_per_mtok: 0.0 }   # :free gateway model = $0

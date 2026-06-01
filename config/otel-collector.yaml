@@ -1,0 +1,55 @@
+# OpenTelemetry Collector — fan-out for the hermes-max UI L2 span tree (Tier 3).
+#
+# The agent + MCP servers already emit OTLP spans. This collector receives them
+# ONCE and fans them out to two exporters, so each gets its own copy and Phoenix
+# is completely unaffected:
+#   • otlp/phoenix    → the real Phoenix (unchanged) for deep post-hoc inspection
+#   • otlphttp/uibridge → the `hm ui` server's /v1/traces receiver → live L2 tree
+#
+# Wiring (no agent code changes — just repoint the OTLP endpoint at the collector):
+#   1. install a collector binary (otelcol-contrib)
+#   2. run:   otelcol-contrib --config config/otel-collector.yaml
+#   3. point the agent at the collector instead of Phoenix directly, in .env:
+#          PHOENIX_COLLECTOR_ENDPOINT=http://127.0.0.1:4319
+#      (the collector forwards to the real Phoenix on :4317 — Phoenix is unmoved.)
+#   4. start the UI:   hm ui            (default port 7080; match `endpoint` below)
+#
+# Latency: the batch processor timeout is deliberately LOW (200ms) so spans reach
+# the live UI promptly — the spec's "fast span processor in UI mode" lever. Spans
+# still only emit on span-END, so in-progress activity comes from the livelog feed
+# (Tier 1); these spans are the L2 enrichment that lets any L1 row expand to detail.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4319     # the agent points PHOENIX_COLLECTOR_ENDPOINT here
+      http:
+        endpoint: 127.0.0.1:4320
+
+processors:
+  batch:
+    timeout: 200ms
+    send_batch_size: 64
+
+exporters:
+  # Phoenix, exactly as before — the fan-out leaves it untouched.
+  otlp/phoenix:
+    endpoint: 127.0.0.1:4317
+    tls:
+      insecure: true
+  # The hm ui backend's OTLP/HTTP receiver. It accepts BOTH protobuf (default) and
+  # JSON; `encoding: json` makes the wire human-debuggable. Match the host:port to
+  # `hm ui` (default 7080). The exporter appends /v1/traces automatically.
+  otlphttp/uibridge:
+    endpoint: http://127.0.0.1:7080
+    encoding: json
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/phoenix, otlphttp/uibridge]

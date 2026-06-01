@@ -42,6 +42,47 @@ loops**, not design. The plan leaves nothing to invent, so don't.
    check each clause (see [[workflow-done-definition]]). "Done" is the plan's
    condition met and verified — never your opinion.
 
+## The iterative repair loop (closing the gap to Opus, cheapest rung first)
+
+A gap-free V4-Pro plan closes ~80% of the Opus-vs-local quality gap on planned
+tasks. The rest is closed **iteratively** by a verify-driven repair ladder that
+spends the cheapest rung that can fix the failure — never a full regen, never Opus
+prices on every token. For each file, in the plan's order:
+
+1. **Execute from the plan** (`code_execute` role — local/V4-Flash, the workhorse).
+2. **`quick_check` immediately after each edit** (lint + typecheck, ~1s).
+   - fails → `lsp_diagnostics` for the exact symbol/error → one targeted
+     **`code_repair`** call with that diagnostic (not a regen).
+   - still failing after **2** repairs → `request_plan_revision` (V4-Pro fills the
+     gap; the executor was missing a decision, not a fix).
+3. **`verify(file)`** once edits pass quick_check.
+   - fails → run `property_test` / `metamorphic_test` to get the **minimal
+     counterexample**, hand THAT to `code_repair` (targeted).
+   - still failing after **2** repair attempts → escalate to **`code_steer`** (a
+     fast Scout/V4-Flash directional nudge).
+   - still failing after steer → route to **`code_plan`** for a *partial re-plan of
+     the failing file only*.
+4. **`quality_check`** (advisory: docstrings, annotations, no stray TODOs).
+5. **Checkpoint on green.**
+6. **DONE only when every DONE_CONDITION clause is literally met.**
+
+**Rung spend order — cheapest first, most expensive last (let cost climb only as
+failures persist):**
+
+```
+LSP repair (~$0)  →  code_repair / Groq-Scout (~$0)  →  code_steer / V4-Flash (~$0.001)
+  →  code_plan re-plan (~$0.01)  →  code_frontier / Opus (~$0.08–1.25, triple-gated ONLY)
+```
+
+`code_frontier` (Opus) is reached only through the conductor's triple gate
+(mode=frontier **and** synth-failed-twice **and** large blast-radius). Most tasks
+never get near it. Budget at most one Opus call for a genuinely hard file when the
+verify gate refuses to go green — it's still cheap relative to time spent.
+
+> The loop is the same in every posture; only WHO answers each role changes
+> (`hm mode`). In `free`/`local` the repair rungs degrade to the local model; in
+> `full` they're V4-Flash/Scout; the *discipline* never changes.
+
 ## The "no invention" rule (the mechanism that closes the gap)
 
 If you hit a point the plan is **silent** on — a missing signature, an unspecified

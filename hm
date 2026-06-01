@@ -6,9 +6,14 @@
 # sugar, the scripts are the substance. Runnable as `./hm` from the repo root, or
 # install onto PATH (`hm install`, or via bootstrap.sh).
 #
-#   hm up [--MODE]        start all MCPs (+ embed/rerank hint)         scripts/start-all.sh
-#                         MODE = --local|--free|--full|--frontier (default --full);
-#                         the cloud-tier ceiling, presence-gated with fall-through
+#   hm up [--free|--full] start all MCPs (+ embed/rerank hint)         scripts/start-all.sh
+#                         --free = Profile A (own a GPU: local drives, free planner)
+#                         --full = Profile B (no GPU: economic API drives + plans)
+#                         advanced MODEs: --full-local|--frontier-local|--frontier|
+#                         --local (see docs/modes.md); default = current/free
+#                         + --free-uplift|--no-free-uplift (plugin toggle)
+#   hm mode [name]        show / switch the cost-quality posture       config/modes.yaml
+#                         no arg = show; --list = table; <name> = switch live
 #   hm down               stop everything (PID + port fallback)        scripts/stop-all.sh
 #   hm restart [srv|all]  restart one server or all                    scripts/restart.sh
 #   hm status             UP/DOWN · port · PID · uptime · health       scripts/status.sh
@@ -16,6 +21,8 @@
 #   hm observe            live waterfall: where wall time goes          scripts/observe.sh
 #   hm logs [server]      tail a server's log (or the live log)        ~/.hermes-max/logs/
 #   hm run "task"         launch hermes with a task                    hermes
+#   hm ui [--port N]      localhost web view (L0/L1 + live cost) over   ui/server
+#                         the existing livelog+ledger; opens a browser  (Tier 1)
 #   hm snapshot <name>    snapshot RAG+KG+corpus stores                scripts/snapshot-stores.sh
 #   hm restore <name>     restore a named snapshot                     scripts/restore-stores.sh
 #   hm dev [--MODE]       the tmux cockpit (hermes + watch + status)   (this script)
@@ -26,9 +33,11 @@
 #   hm smoke              real ~15-min end-to-end agent proof           scripts/integration-smoke.sh
 #   hm summary            per-task tool-call summary + bottleneck split scripts/run-summary.sh
 #   hm bottleneck         full-vs-bare timing eval                     scripts/bottleneck-eval.sh
-#   hm cost               conductor spend + Opus sparing proof         scripts/conductor-report.sh
+#   hm cost [window]      fabric ledger ($0.000000): provider/model/role,    lib/inference
+#                         free-vs-paid, remaining free RPD (+legacy conductor)
 #   hm eval [capability]  prove every feature works in the REAL agent  scripts/eval-battery.sh
 #                         loop (asserts real effects); one capability if named
+#   hm setup              first-run: copy config trinity + show providers  scripts/setup.sh
 #   hm install            symlink hm onto PATH (~/.local/bin)
 set -uo pipefail
 
@@ -159,8 +168,127 @@ _mode_from_args() {
   echo "${m}"
 }
 
+# ── inference MODE (modes.yaml posture toggle) ─────────────────────────────────
+# The user-facing posture: free | full-local | full | frontier-local | frontier |
+# local. ONE word reassigns the coding role chains (who plans, who executes). The
+# mode name persists to ~/.hermes-max/mode (read live by lib/inference); we also
+# sync CONDUCTOR_MODE to the mode's spend ceiling so the conductor agrees.
+_inf() { ( cd "${REPO_ROOT}" && python3 -m lib.inference.modes_cli "$@" ); }
+
+# Echo a recognized --<mode> flag's name, or '' if none present.
+_inf_mode_from_args() {
+  local a
+  for a in "$@"; do case "${a}" in
+    --free)           echo free; return ;;
+    --full-local)     echo full-local; return ;;
+    --full)           echo full; return ;;
+    --frontier-local) echo frontier-local; return ;;
+    --frontier)       echo frontier; return ;;
+    --local)          echo local; return ;;
+  esac; done
+}
+
+# Apply a posture mode: persist + print coverage, sync the conductor ceiling, and
+# warn (do NOT silently fall back) if it executes locally but no vLLM is up.
+_apply_inf_mode() {
+  local name="$1" meta ceiling gpu
+  _inf set "${name}" || return 1
+  meta="$(_inf meta "${name}" 2>/dev/null)"; ceiling="${meta%% *}"; gpu="${meta##* }"
+  [ -n "${ceiling}" ] && _apply_mode "${ceiling}" >/dev/null 2>&1
+  if [ "${gpu}" = "1" ] && ! _port_up "${VLLM_PORT:-8001}"; then
+    echo "  ⚠ '${name}' executes locally but no vLLM endpoint is up on :${VLLM_PORT:-8001}."
+    echo "    Stand vLLM up, or pick a no-GPU posture:  hm mode full   (V4-Flash executes, no GPU)"
+  fi
+  # Option A: atomically swap the Hermes agent-loop backend to this posture's
+  # executor (local vLLM, or DeepInfra V4-Flash). Reversible; backs up first.
+  # Skip with HM_NO_HERMES_SWAP=1 (config-only changes, no live-agent swap).
+  if [ -z "${HM_NO_HERMES_SWAP:-}" ] && [ -f "${SCRIPTS}/set_mode.sh" ]; then
+    "${SCRIPTS}/set_mode.sh" "${name}" || true
+  fi
+  echo "  ▸ conductor ceiling synced to: ${ceiling}"
+}
+
+# Persist the free_uplift toggle (plugins/free_uplift) into .env.
+_set_uplift() {
+  local val="$1"   # true|false
+  [ -f "${HMX_ENV_FILE}" ] || return 0
+  if grep -qE '^INFERENCE_MODE_FREE_UPLIFT=' "${HMX_ENV_FILE}"; then
+    sed -i "s@^INFERENCE_MODE_FREE_UPLIFT=.*@INFERENCE_MODE_FREE_UPLIFT=${val}   # set by hm@" "${HMX_ENV_FILE}"
+  else
+    printf 'INFERENCE_MODE_FREE_UPLIFT=%s   # set by hm (plugins/free_uplift)\n' "${val}" >> "${HMX_ENV_FILE}"
+  fi
+  export INFERENCE_MODE_FREE_UPLIFT="${val}"
+  echo "  ▸ free-uplift: ${val} (plugins/free_uplift)"
+}
+
+# Short, grouped help — the common path only (progressive disclosure). The full
+# surface is one flag away: `hm help --all`.
+_help_short() {
+  cat <<'EOF'
+hermes-max — agentic coding harness
+
+  Getting started
+    hm up [--free|--full]     start the stack in a profile/mode
+                                --free = own a GPU (Profile A) · --full = no GPU (Profile B)
+    hm down                   stop everything
+    hm status                 what's running + active mode + today's spend
+
+  Using it
+    hm run "task"             run the agent on a task (or just launch `hermes`)
+    hm dev                    the cockpit: agent + live activity + status, one window
+    hm ui                     localhost web view: live timeline + cost, in your browser
+    hm cost                   spend breakdown ($0.000000, free-vs-paid)
+
+  Health & modes
+    hm health                 check endpoints, providers, roster
+    hm mode [name|--list]     show or switch profile/mode
+
+  More:  hm help --all        every command, including advanced/diagnostic verbs
+         hm <verb> --help      one-paragraph help for any verb
+EOF
+}
+
+# The full surface — extracted from the header comment block (DRY: the comment is
+# the authoritative per-verb doc), from line 3 up to the `set -uo pipefail` line.
+_help_all() {
+  sed -n '3,/^set -uo pipefail/p' "${HM_SELF}" | sed -e '/^set -uo pipefail/d' -e 's/^# \{0,1\}//'
+}
+
+# Route `hm help` / `hm` (no args) to the short help; `hm help --all` to the full one.
 usage() {
-  sed -n '3,32p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
+  case " $* " in *" --all "*|*" -a "*|*" all "*) _help_all ;; *) _help_short ;; esac
+}
+
+# One-paragraph help for an individual verb (`hm <verb> --help`).
+_verb_help() {
+  case "$1" in
+    up)         echo "hm up [--free|--full|--MODE] [--free-uplift] — start the whole stack in a profile/mode. --free = Profile A (you own a GPU: local model executes, free planner); --full = Profile B (no GPU: economic API drives and plans). Advanced modes: --full-local --frontier-local --frontier --local (docs/modes.md). Prints which providers are present, which roles are satisfiable, the Hermes backend set, and any roster warnings." ;;
+    down)       echo "hm down — stop every MCP server (by PID file, port fallback) and the embed/rerank serves. Idempotent; confirms every port is free." ;;
+    restart)    echo "hm restart [server|all] — stop then start one named server (e.g. 'hm restart research') or the whole stack, re-running health." ;;
+    status)     echo "hm status — the single 'is it OK and what's it costing' view: per-server UP/DOWN · port · PID · uptime · health, plus the active mode and today's spend." ;;
+    mode)       echo "hm mode [name|--list] — show or switch the cost/quality posture live (no restart). Names: $(_inf list 2>/dev/null | sed -n '2,7p' | awk '{print $1}' | tr '\n' ' '). See docs/modes.md." ;;
+    dev)        echo "hm dev [--MODE] — the one-window tmux cockpit: a hermes pane, a live activity (watch) pane, and a compact status pane (mode + spend). Detachable; reattach with 'hm attach'. tmux absent → prints manual instructions." ;;
+    attach)     echo "hm attach — reattach to the running 'hermes-max' tmux cockpit started by hm dev." ;;
+    run)        echo "hm run \"task\" — launch the Hermes agent on a task (exec's 'hermes'). Equivalent to running 'hermes' directly." ;;
+    ui-test)    echo "hm ui-test — PART V actuation equivalence test: drives a real bounded agent turn through the web UI's own API headlessly and asserts every action surfaced in the SSE visual-flow, real artifacts landed on disk, verify went green, the handback fired, a follow-up turn actuated, and zero secrets leaked. Proves the UI ACTUATES the agent (a complete replacement for hm dev + hermes), not just visualizes it. Runs in --mode free; needs the stack up (hm up)." ;;
+    ui)         echo "hm ui [--port N] [--no-open] [--token [T]] — open the localhost web view: L0 ambient + L1 timeline + L2 span tree + live cost, fed by the existing livelog/ledger/OTLP over SSE. Auto-opens your browser and prints one line (http://localhost:7080). Port is sticky (~/.hermes-max/ui.conf; next free port if taken). No token needed on localhost — hardened by 127.0.0.1 bind + Origin/Host checks + a SameSite CSRF cookie. --token adds a bearer for remote/Tailscale exposure. Read-only. Ctrl-C to stop." ;;
+    cost)       echo "hm cost [today|week|month] — spend breakdown at \$0.000000 precision: by provider/model/role, the free-vs-paid split, and remaining daily free budget per model." ;;
+    health)     echo "hm health — pass/fail healthcheck for scripting: endpoints reachable, providers present, and the full model-roster confirmation (warns on a deprecated/missing id; never gates)." ;;
+    preflight)  echo "hm preflight — validate the whole stack before a task (PASS/FAIL/WARN); auto-fixes the common killers; exit 1 on a BLOCKING failure." ;;
+    watch)      echo "hm watch — the raw live tool-call stream: every call, heartbeat, fallback, and routing decision. (Cockpit uses this; for debugging.)" ;;
+    observe)    echo "hm observe — the live waterfall view of where wall-clock time actually went. (For debugging.)" ;;
+    logs)       echo "hm logs [server] — tail a server's log under ~/.hermes-max/logs/ (or the live log with no arg)." ;;
+    smoke)      echo "hm smoke — a real ~15-minute end-to-end agent proof that drives every component once." ;;
+    regression) echo "hm regression — the regression eval gate." ;;
+    summary)    echo "hm summary — per-task tool-call summary + the inference/tool-work/artificial bottleneck split." ;;
+    bottleneck) echo "hm bottleneck — run the SAME task FULL vs BARE and print both timing splits → bottleneck_report.md." ;;
+    eval)       echo "hm eval [capability] — prove every feature works in a REAL agent turn (asserts a real artifact effect, not a 200). Name one capability for fast iteration." ;;
+    snapshot)   echo "hm snapshot <name> — snapshot the RAG index + KG db + corpus stores to ~/.hermes-max/snapshots/<name>." ;;
+    restore)    echo "hm restore <name> — restore a named store snapshot (the current state is auto-backed-up first)." ;;
+    setup)      echo "hm setup — first-run wiring: copy the config trinity into ~/.hermes-max/ and print which providers are present." ;;
+    install)    echo "hm install — symlink hm onto PATH (~/.local/bin/hm)." ;;
+    *)          return 1 ;;
+  esac
 }
 
 _install() {
@@ -202,8 +330,10 @@ EOF
     echo "• '${TMUX_SESSION}' already running — attaching"
     exec tmux attach -t "${TMUX_SESSION}"
   fi
-  # conductor mode (default --full) before bringing the stack up
-  _apply_mode "$(_mode_from_args "$@")"
+  # posture mode (explicit --<mode> switches; else keep the persisted posture)
+  _m="$(_inf_mode_from_args "$@")"
+  if [ -n "${_m}" ]; then _apply_inf_mode "${_m}"
+  else _apply_inf_mode "$(_inf name 2>/dev/null || echo free)"; fi
   # pre-flight validation FIRST — auto-fixes the killers (timeouts, skills,
   # embed/rerank) and brings the stack up; BLOCKING failure aborts the cockpit so
   # we never launch the agent into a misconfigured stack. Override with HM_FORCE=1.
@@ -233,11 +363,13 @@ EOF
   tmux send-keys -t "${TMUX_SESSION}" "${SCRIPTS}/watch.sh" C-m
   # pane 3: auto-refreshing status (use watch if present, else a sleep loop)
   tmux split-window -v -t "${TMUX_SESSION}"
+  # status pane: active posture + today's spend on top, then the stack status
+  _statpane="(cd ${REPO_ROOT} && python3 -m lib.inference.modes_cli status-line); ${SCRIPTS}/status.sh"
   if command -v watch >/dev/null 2>&1; then
-    tmux send-keys -t "${TMUX_SESSION}" "watch -t -n 4 ${SCRIPTS}/status.sh" C-m
+    tmux send-keys -t "${TMUX_SESSION}" "watch -t -n 4 '${_statpane}'" C-m
   else
     tmux send-keys -t "${TMUX_SESSION}" \
-      "while true; do clear; ${SCRIPTS}/status.sh; sleep 4; done" C-m
+      "while true; do clear; ${_statpane}; sleep 4; done" C-m
   fi
   tmux select-pane -t "${TMUX_SESSION}.0"
   [ -n "${HM_NO_ATTACH:-}" ] && { echo "✓ cockpit '${TMUX_SESSION}' started (detached). hm attach to join."; return 0; }
@@ -249,10 +381,30 @@ EOF
 if [ -n "${HM_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
 cmd="${1:-}"; shift || true
+
+# `hm <verb> --help` → one-paragraph verb help, before any dispatch/side effect.
+# 'mode' handles its own -h/--help; an empty/help verb falls through to grouped help.
+case "${1:-}" in
+  -h|--help)
+    case "${cmd}" in
+      ""|help|mode) : ;;
+      *) if _verb_help "${cmd}"; then exit 0; fi ;;
+    esac
+    ;;
+esac
+
 case "${cmd}" in
   up)
     if [ -n "${HM_PRINT:-}" ]; then echo "${SCRIPTS}/start-all.sh"; exit 0; fi
-    _apply_mode "$(_mode_from_args "$@")"
+    # First-run wiring on demand: `hm up --setup` copies the config trinity.
+    case " $* " in *" --setup "*) [ -f "${SCRIPTS}/setup.sh" ] && "${SCRIPTS}/setup.sh" || true ;; esac
+    # free_uplift toggle (plugins/free_uplift)
+    case " $* " in *" --free-uplift "*) _set_uplift true ;; *" --no-free-uplift "*) _set_uplift false ;; esac
+    # Posture: an explicit --<mode> flag switches; no flag keeps the persisted
+    # posture (default 'free' on first run) and never silently escalates to paid.
+    _m="$(_inf_mode_from_args "$@")"
+    if [ -n "${_m}" ]; then _apply_inf_mode "${_m}"
+    else _apply_inf_mode "$(_inf name 2>/dev/null || echo free)"; fi
     # Raise Hermes' own MCP call timeouts (the 120s long-run killer) before the
     # stack comes up — idempotent, no-op once applied. Never fails `hm up`.
     [ -f "${SCRIPTS}/fix-hermes-timeouts.sh" ] && \
@@ -267,6 +419,36 @@ case "${cmd}" in
     # embed (:8002) + rerank (:8003) serves auto-start with the stack on gpu_local
     # (the dense lane + reranker); opt out with HM_WITH_EMBED=0 / HM_WITH_RERANK=0.
     _start_serves
+    # roster: warn (never gate) if a configured model id is deprecated/missing
+    ( cd "${REPO_ROOT}" && python3 -m lib.inference.roster --warn-only 2>/dev/null ) || true
+    # plugins: register optional capabilities (free_uplift) if their conditions hold
+    ( cd "${REPO_ROOT}" && python3 -m plugins.load_plugins 2>/dev/null ) || true
+    # ── one-screen start summary: mode + role satisfiability + present providers.
+    #    (The Hermes backend was printed above by set_mode; roster warnings too.)
+    echo
+    echo "════════ hermes-max is up ════════"
+    ( cd "${REPO_ROOT}" && python3 -m lib.inference.modes_cli show ) 2>/dev/null || true
+    echo "  providers present (a missing key silently drops that rung):"
+    ( cd "${REPO_ROOT}" && python3 -m lib.inference.modes_cli providers ) 2>/dev/null \
+      | awk 'NR==1{next} {printf "    %-16s %s\n", $1, $2 $3}' || true
+    echo "  next:  hermes   (or: hm dev for the cockpit · hm status · hm cost)"
+    ;;
+  mode)
+    sub="${1:-}"
+    case "${sub}" in
+      ""|show)      _inf show ;;
+      --list|list)  _inf list ;;
+      -h|--help)    echo "hm mode [show|--list|<name>]   names: $(_inf list 2>/dev/null | sed -n '2,7p' | awk '{print $1}' | tr '\n' ' ')" ;;
+      *)
+        if [ -n "${HM_PRINT:-}" ]; then echo "hm mode set ${sub}"; exit 0; fi
+        _apply_inf_mode "${sub}" || exit 2
+        # If the conductor is already running, restart it so the new ceiling applies.
+        if [ "${HMX_MODE_CHANGED}" = "1" ] && timeout 1 bash -c ">/dev/tcp/127.0.0.1/${MCP_ESCALATION_PORT:-9105}" 2>/dev/null; then
+          echo "  • restarting conductor (escalation) to apply the new ceiling"
+          "${SCRIPTS}/restart.sh" escalation >/dev/null 2>&1 || true
+        fi
+        ;;
+    esac
     ;;
   down)        _dispatch "${SCRIPTS}/stop-all.sh" "$@" ;;
   restart)     _dispatch "${SCRIPTS}/restart.sh" "$@" ;;
@@ -276,10 +458,17 @@ case "${cmd}" in
   health)      _dispatch "${SCRIPTS}/healthcheck.sh" "$@" ;;
   preflight)   _dispatch "${SCRIPTS}/preflight.sh" "$@" ;;
   smoke)       _dispatch "${SCRIPTS}/integration-smoke.sh" "$@" ;;
+  ui-test)     _dispatch "${SCRIPTS}/ui-actuation-test.sh" "$@" ;;
   regression)  _dispatch "${SCRIPTS}/regression-eval.sh" "$@" ;;
   summary)     _dispatch "${SCRIPTS}/run-summary.sh" "$@" ;;
   bottleneck)  _dispatch "${SCRIPTS}/bottleneck-eval.sh" "$@" ;;
-  cost)        _dispatch "${SCRIPTS}/conductor-report.sh" "$@" ;;
+  cost)
+    if [ -n "${HM_PRINT:-}" ]; then echo "lib.inference cost + ${SCRIPTS}/conductor-report.sh"; exit 0; fi
+    ( cd "${REPO_ROOT}" && python3 -m lib.inference.modes_cli cost "$@" ) || true
+    if [ -f "${SCRIPTS}/conductor-report.sh" ]; then
+      echo; echo "── legacy conductor ledger ──"; "${SCRIPTS}/conductor-report.sh" || true
+    fi
+    ;;
   eval)        _dispatch "${SCRIPTS}/eval-battery.sh" "$@" ;;
   snapshot)    _dispatch "${SCRIPTS}/snapshot-stores.sh" "$@" ;;
   restore)     _dispatch "${SCRIPTS}/restore-stores.sh" "$@" ;;
@@ -295,9 +484,24 @@ case "${cmd}" in
     command -v hermes >/dev/null 2>&1 || { echo "✗ 'hermes' not on PATH — install/activate Hermes first."; exit 127; }
     exec hermes "$@"
     ;;
+  setup)   _dispatch "${SCRIPTS}/setup.sh" "$@" ;;
+  ui)
+    if [ -n "${HM_PRINT:-}" ]; then echo "python3 -m ui.server $*"; exit 0; fi
+    command -v python3 >/dev/null 2>&1 || { echo "✗ python3 not found — required for 'hm ui'."; exit 127; }
+    if [ ! -f "${REPO_ROOT}/ui/web/dist/index.html" ]; then
+      echo "  • frontend not built yet — building once (cd ui/web && npm install && npm run build)…"
+      if command -v npm >/dev/null 2>&1; then
+        ( cd "${REPO_ROOT}/ui/web" && npm install --no-fund --no-audit >/dev/null 2>&1 && npm run build >/dev/null 2>&1 ) \
+          || echo "  ⚠ frontend build failed — the server still runs and the API works; build manually in ui/web."
+      else
+        echo "  ⚠ npm not found — the server runs and the API works, but the page needs 'npm run build' in ui/web."
+      fi
+    fi
+    cd "${REPO_ROOT}" && exec python3 -m ui.server "$@"
+    ;;
   dev)     _dev "$@" ;;
   attach)  _attach ;;
   install) _install ;;
-  ""|-h|--help|help) usage ;;
-  *) echo "hm: unknown verb '${cmd}'"; echo; usage; exit 2 ;;
+  ""|-h|--help|help) usage "$@" ;;
+  *) echo "hm: unknown verb '${cmd}'"; echo; _help_short; exit 2 ;;
 esac
