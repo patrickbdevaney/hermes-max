@@ -80,15 +80,15 @@ def main() -> int:
     check("free mode: code_execute == local only",
           free_exec == [("local_vllm", "driver")], f"got {free_exec}")
     full_exec = roles.chain_for("code_execute", "full")
-    check("full mode: code_execute == V4-Flash → local",
-          full_exec == [("deepseek_direct", "driver"), ("local_vllm", "driver")],
+    check("full mode: code_execute leads with DeepInfra V4-Flash → local floor",
+          full_exec[0] == ("deepinfra", "driver") and full_exec[-1] == ("local_vllm", "driver"),
           f"got {full_exec}")
     free_plan = roles.chain_for("code_plan", "free")
     check("free mode: code_plan starts with Kimi (openrouter.synth_free)",
           free_plan and free_plan[0] == ("openrouter", "synth_free"), f"got {free_plan}")
     fl_plan = roles.chain_for("code_plan", "full-local")
-    check("full-local: code_plan starts with V4-Pro",
-          fl_plan and fl_plan[0] == ("deepseek_direct", "planner"), f"got {fl_plan}")
+    check("full-local: code_plan leads with DeepInfra V4-Pro (funded)",
+          fl_plan and fl_plan[0] == ("deepinfra", "planner"), f"got {fl_plan}")
 
     # Kimi id correction propagated through inference.yaml
     kimi = config.resolve_model("openrouter", "synth_free") or {}
@@ -165,6 +165,40 @@ def main() -> int:
               buckets.has_headroom("groq", "fast_mid", 100))
     finally:
         buckets._now = orig_now  # type: ignore
+
+    # ── 9. agent-loop executor backend (Option A config swap) ────────────────
+    eb_free = roles.executor_backend("free", env={"OPENROUTER_API_KEY": "x"})
+    check("free executor → local vLLM, no key", eb_free["local"] and not eb_free["api_key_env"],
+          f"got {eb_free}")
+    eb_full = roles.executor_backend("full", env={"DEEPINFRA_API_KEY": "x"})
+    check("full+DeepInfra executor → deepinfra V4-Flash, key=DEEPINFRA_API_KEY",
+          eb_full["provider"] == "deepinfra"
+          and eb_full["model_id"] == "deepseek-ai/DeepSeek-V4-Flash"
+          and eb_full["api_key_env"] == "DEEPINFRA_API_KEY", f"got {eb_full}")
+    eb_full_nokey = roles.executor_backend("full", env={})
+    check("full with NO keys → executor degrades to local floor", eb_full_nokey["local"],
+          f"got {eb_full_nokey}")
+
+    # ── 10. the no-cost sovereign path: free with ONLY OpenRouter + vLLM ─────
+    free_env = {"OPENROUTER_API_KEY": "x"}
+    check("free path: only OpenRouter present (+keyless local)",
+          config.present_providers(free_env) == {"local_vllm", "openrouter"},
+          f"got {config.present_providers(free_env)}")
+    router.set_caller(lambda *a, **k: {"ok": True, "text": "plan", "in_tok": 10,
+                                       "out_tok": 5, "cached_tok": 0, "status": 200,
+                                       "headers": {}, "error": None})
+    try:
+        r = router.run_role("code_plan", [{"role": "user", "content": "plan X"}],
+                            mode="free", env=free_env)
+        check("free code_plan → reaches Kimi via OpenRouter",
+              r["ok"] and r["provider"] == "openrouter" and r["model_id"] == "moonshotai/kimi-k2.6:free",
+              f"got {r.get('provider')}/{r.get('model_id')}")
+        rx = router.run_role("code_execute", [{"role": "user", "content": "do X"}],
+                            mode="free", env=free_env)
+        check("free code_execute → resolves to local vLLM executor",
+              rx["ok"] and rx["provider"] == "local_vllm", f"got {rx.get('provider')}")
+    finally:
+        router.set_caller(None)
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0

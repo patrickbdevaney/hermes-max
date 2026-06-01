@@ -93,7 +93,7 @@ def default_mode() -> str:
 def active_mode_name(env: Optional[dict[str, str]] = None) -> str:
     """Resolve the active mode: ~/.hermes-max/mode file > INFERENCE_MODE env >
     modes.yaml default. An unknown value falls back to the default."""
-    env = os.environ if env is None else env
+    env = config._effective_env(env)
     names = set(all_modes())
     # 1. persisted mode file
     try:
@@ -148,11 +148,45 @@ def chain_for(role: str, mode_name: Optional[str] = None) -> list[tuple[str, str
     return [_split_rung(r) for r in rungs]
 
 
+def executor_backend(mode_name: Optional[str] = None,
+                     env: Optional[dict[str, str]] = None) -> dict[str, Any]:
+    """Resolve the AGENT-LOOP backend for a mode = the first present+under-ceiling
+    rung of `code_execute`. This is what scripts/set_mode.sh writes into
+    ~/.hermes/config.yaml (the model the Hermes loop itself runs on). Falls back to
+    local_vllm.driver when nothing else is usable.
+
+    Returns {provider, model_key, model_id, base_url, api_key_env, present, local}."""
+    env = config._effective_env(env)
+    name = mode_name or active_mode_name(env)
+    allowed = _CEILING_TIERS.get(mode_meta(name)["inference_mode"], {"local", "free", "paid"})
+    present = config.present_providers(env)
+    chain = chain_for("code_execute", name) or [("local_vllm", "driver")]
+    for prov, mkey in chain:
+        spec = config.resolve_model(prov, mkey)
+        if spec is None:
+            continue
+        if prov in present and config.tier(prov) in allowed:
+            return _backend_dict(prov, mkey, spec)
+    # nothing usable → local floor
+    spec = config.resolve_model("local_vllm", "driver") or {"id": ""}
+    return _backend_dict("local_vllm", "driver", spec)
+
+
+def _backend_dict(prov: str, mkey: str, spec: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider": prov, "model_key": mkey, "model_id": spec.get("id", mkey),
+        "base_url": config.base_url(prov) or "",
+        "api_key_env": (config.get_provider(prov) or {}).get("api_key_env") or "",
+        "present": config.provider_present(prov),
+        "local": config.tier(prov) == "local",
+    }
+
+
 def satisfiability(mode_name: Optional[str] = None,
                    env: Optional[dict[str, str]] = None) -> dict[str, Any]:
     """For a mode: which coding/research roles are satisfiable (≥1 present rung
     under the ceiling), and warnings (requires_gpu but no local; empty chains)."""
-    env = os.environ if env is None else env
+    env = config._effective_env(env)
     name = mode_name or active_mode_name(env)
     meta = mode_meta(name)
     allowed = _CEILING_TIERS.get(meta["inference_mode"], {"local", "free", "paid"})

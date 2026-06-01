@@ -312,6 +312,22 @@ falling back when no local vLLM is up — the user must explicitly choose to pay
 (`hm mode full`). If `OPENROUTER_API_KEY` is absent in `free`, the plan chain falls
 through to local planning automatically — no error, no cost.
 
+**Agent-loop backend swap (Option A).** A posture also decides which model the
+Hermes *loop itself* runs on (distinct from the conductor's per-role routing).
+`hm mode <name>` runs `scripts/set_mode.sh`, which resolves the posture's executor
+(the first present, under-ceiling rung of `code_execute`) and atomically rewrites
+the `model:` block of `~/.hermes/config.yaml`: local-executor postures (free /
+full-local / frontier-local / local) → local vLLM (`$VLLM_BASE_URL`, no key);
+remote-executor postures (full / frontier) → DeepSeek-V4-Flash via the funded
+DeepInfra endpoint, key resolved from `.env`. It backs up to `config.yaml.bak` and
+captures the original `model:` block once to `config.model.orig.yaml`, so the swap
+is fully reversible (`hm mode free` rewrites the loop back to local). Endpoints are
+env-driven (`VLLM_BASE_URL`, `DEEPINFRA_BASE_URL`, …) — never hardcoded — and the
+fabric reads keys from `.env` as well as the live environment. The funded provider
+leads: `--full*` chains put `deepinfra.{planner,driver}` first, with `deepseek_direct`
+a cheaper alternative the operator can promote in `roles.yaml` with no code change.
+Skip the live swap with `HM_NO_HERMES_SWAP=1`.
+
 ### The default-mode evaluation (operator)
 
 The proof task (Bloom filter → Groth16) is run under `free` then `full-local`

@@ -19,19 +19,19 @@ providers:
 
   local_vllm:                                  # the always-present, free, private floor
     kind: openai_compatible
-    base_url: http://127.0.0.1:8001/v1         # the Thor/Spark vLLM endpoint
+    base_url: ${VLLM_BASE_URL:-http://100.72.56.36:8001/v1}   # env-driven; never a hardcoded IP
     api_key_env: null                          # local needs no key
     models:
-      driver:  { id: "qwen3.6-35b-a3b", ctx: 262144 }
+      driver:  { id: "${VLLM_MODEL_ID:-qwen3.6-35b-a3b-nvfp4}", ctx: 262144 }
     cost:   { in_per_mtok: 0.0, out_per_mtok: 0.0 }   # local = free
     limits: { rpm: null, tpm: null }                  # local = unmetered
     privacy: local
     # Remove this block only if you have no local GPU. Without it there is no
     # degrade floor and zero-key runs cannot resolve any role.
 
-  deepseek_direct:                             # the cheap paid quality anchor (V4-Pro / V4-Flash)
+  deepseek_direct:                             # direct-provider V4-Pro/Flash (alt to deepinfra; usually cheaper)
     kind: openai_compatible
-    base_url: https://api.deepseek.com/v1
+    base_url: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
     api_key_env: DEEPSEEK_API_KEY              # unset → this rung silently drops
     models:
       planner: { id: "deepseek-v4-pro",   ctx: 1000000 }
@@ -40,14 +40,14 @@ providers:
     cost_flash: { in_per_mtok: 0.14,  out_per_mtok: 0.28, cache_hit_in_per_mtok: 0.0028 }     # V4-Flash
     limits: { rpm: 1000 }
 
-  deepinfra:                                   # US-hosted V4-Pro/Flash (fallback for deepseek_direct)
+  deepinfra:                                   # the operator's FUNDED DeepSeek provider today (leads --full*)
     kind: openai_compatible
-    base_url: https://api.deepinfra.com/v1/openai
+    base_url: ${DEEPINFRA_BASE_URL:-https://api.deepinfra.com/v1/openai}   # POST /chat/completions → /v1/openai/chat/completions
     api_key_env: DEEPINFRA_API_KEY
     models:
       planner: { id: "deepseek-ai/DeepSeek-V4-Pro",   ctx: 1000000 }
       driver:  { id: "deepseek-ai/DeepSeek-V4-Flash", ctx: 1000000 }
-    cost: { in_per_mtok: 1.30, out_per_mtok: 2.60 }   # DeepInfra list (verify live; direct is cheaper)
+    cost: { in_per_mtok: 1.30, out_per_mtok: 2.60 }   # DeepInfra list (verify live; deepseek_direct is cheaper)
 
   openrouter:                                  # the :free roster (rotates) + 1M-ctx synth
     kind: openai_compatible

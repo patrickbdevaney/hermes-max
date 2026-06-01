@@ -103,6 +103,20 @@ def cmd_providers() -> int:
     return 0
 
 
+def cmd_executor(name: str) -> int:
+    """Print the agent-loop backend for a mode as shell-eval-able vars (consumed by
+    scripts/set_mode.sh to write ~/.hermes/config.yaml). Never prints the secret —
+    only the api_key_env NAME; the shell resolves the value itself."""
+    b = roles.executor_backend(name or roles.active_mode_name())
+    print(f"HERMES_EXEC_PROVIDER={b['provider']}")
+    print(f"HERMES_EXEC_MODEL_ID={b['model_id']}")
+    print(f"HERMES_EXEC_BASE_URL={b['base_url']}")
+    print(f"HERMES_EXEC_API_KEY_ENV={b['api_key_env']}")
+    print(f"HERMES_EXEC_LOCAL={1 if b['local'] else 0}")
+    print(f"HERMES_EXEC_PRESENT={1 if b['present'] else 0}")
+    return 0
+
+
 def cmd_status_line() -> int:
     name = roles.active_mode_name()
     rep = ledger.report("today")
@@ -131,6 +145,8 @@ def main(argv: list[str]) -> int:
         return cmd_meta(argv[1] if len(argv) > 1 else "")
     if cmd == "providers":
         return cmd_providers()
+    if cmd == "executor":
+        return cmd_executor(argv[1] if len(argv) > 1 else "")
     if cmd == "status-line":
         return cmd_status_line()
     print(f"unknown subcommand '{cmd}'")

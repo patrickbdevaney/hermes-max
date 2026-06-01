@@ -193,6 +193,12 @@ _apply_inf_mode() {
     echo "  ⚠ '${name}' executes locally but no vLLM endpoint is up on :${VLLM_PORT:-8001}."
     echo "    Stand vLLM up, or pick a no-GPU posture:  hm mode full   (V4-Flash executes, no GPU)"
   fi
+  # Option A: atomically swap the Hermes agent-loop backend to this posture's
+  # executor (local vLLM, or DeepInfra V4-Flash). Reversible; backs up first.
+  # Skip with HM_NO_HERMES_SWAP=1 (config-only changes, no live-agent swap).
+  if [ -z "${HM_NO_HERMES_SWAP:-}" ] && [ -f "${SCRIPTS}/set_mode.sh" ]; then
+    "${SCRIPTS}/set_mode.sh" "${name}" || true
+  fi
   echo "  ▸ conductor ceiling synced to: ${ceiling}"
 }
 

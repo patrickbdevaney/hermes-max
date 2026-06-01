@@ -12,8 +12,26 @@ HTTP adapters; this module is pure config.
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 from typing import Any, Optional
+
+_ENV_RE = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
+
+
+def _expand(obj: Any) -> Any:
+    """Recursively expand ${VAR} / ${VAR:-default} in any string value, read from
+    the live environment. Keeps endpoints out of the YAML literal — base URLs and
+    the local model id come from env (VLLM_BASE_URL, DEEPINFRA_BASE_URL, ...)."""
+    if isinstance(obj, str):
+        def sub(m: "re.Match[str]") -> str:
+            return os.environ.get(m.group(1), m.group(2) if m.group(2) is not None else "")
+        return _ENV_RE.sub(sub, obj)
+    if isinstance(obj, dict):
+        return {k: _expand(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand(v) for v in obj]
+    return obj
 
 try:                                     # PyYAML is the normal path …
     import yaml  # type: ignore
@@ -46,14 +64,60 @@ def _raw_cached(path: str, mtime: float) -> dict[str, Any]:
         "PyYAML is required to parse inference.yaml. Install it: pip install pyyaml")
 
 
+_DOTENV_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
+
+
+@lru_cache(maxsize=4)
+def _dotenv_cached(path: str, mtime: float) -> dict[str, str]:
+    """Parse NAME=value lines from a .env (inline ` # comment` stripped, quotes
+    trimmed). hermes-max stores keys in .env, not the exported environment, so the
+    fabric must consult it — mirrors `hm`'s own _key_present."""
+    out: dict[str, str] = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                m = _DOTENV_RE.match(line)
+                if not m:
+                    continue
+                val = re.sub(r"\s+#.*$", "", m.group(2)).strip().strip('"').strip("'")
+                if val:
+                    out[m.group(1)] = val
+    except OSError:
+        pass
+    return out
+
+
+def _dotenv() -> dict[str, str]:
+    path = os.environ.get("HMX_ENV_FILE") or os.path.join(_REPO_ROOT, ".env")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return {}
+    return _dotenv_cached(path, mtime)
+
+
+def _effective_env(env: Optional[dict[str, str]]) -> dict[str, str]:
+    """Tests pass an explicit env (used verbatim). Real callers (env=None) get the
+    .env file as a fallback under the live os.environ (live env wins)."""
+    if env is not None:
+        return env
+    merged = dict(_dotenv())
+    merged.update(os.environ)
+    return merged
+
+
 def raw() -> dict[str, Any]:
-    """Full parsed inference.yaml (cached, auto-reloads when the file changes)."""
+    """Full parsed inference.yaml with ${ENV} expanded against the LIVE environment
+    (cached parse, expanded per-call so env changes are honored)."""
     path = _config_path()
     try:
         mtime = os.path.getmtime(path)
     except OSError:
         mtime = 0.0
-    return _raw_cached(path, mtime)
+    return _expand(_raw_cached(path, mtime))
 
 
 def providers() -> dict[str, Any]:
@@ -65,8 +129,9 @@ def get_provider(name: str) -> Optional[dict[str, Any]]:
 
 
 def _key_present(provider: dict[str, Any], env: Optional[dict[str, str]] = None) -> bool:
-    """A provider is present if its api_key_env is null (local) OR set+non-empty."""
-    env = os.environ if env is None else env
+    """A provider is present if its api_key_env is null (local) OR set+non-empty
+    in the live env or the repo .env."""
+    env = _effective_env(env)
     key_env = provider.get("api_key_env")
     if key_env in (None, "", "null"):
         return True                       # local / keyless rung
@@ -113,7 +178,7 @@ def kind(provider: str) -> str:
 
 
 def api_key(provider: str, env: Optional[dict[str, str]] = None) -> Optional[str]:
-    env = os.environ if env is None else env
+    env = _effective_env(env)
     p = get_provider(provider) or {}
     key_env = p.get("api_key_env")
     if key_env in (None, "", "null"):

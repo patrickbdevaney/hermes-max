@@ -43,7 +43,7 @@ def run_role(role: str, messages: list[dict[str, str]], *, max_tokens: int = 204
          mode, role, fell}
 
     On total exhaustion: ok=False, proceed_local=True (never raises)."""
-    env = os.environ if env is None else env
+    env = config._effective_env(env)
     mode_name = mode or roles.active_mode_name(env)
     admitted = _CEILING_TIERS.get(roles.ceiling(mode_name, env), {"local", "free", "paid"})
     present = config.present_providers(env)

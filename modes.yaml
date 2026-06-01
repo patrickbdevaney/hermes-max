@@ -46,10 +46,10 @@ modes:
       planning quality at minimal cost. Needs a GPU. Step up from free when you want
       V4-Pro's stronger architectural judgment over Kimi-free.
     chains:
-      code_plan:       [deepseek_direct.planner, openrouter.synth_free, local_vllm.driver]
+      code_plan:       [deepinfra.planner, deepseek_direct.planner, openrouter.synth_free, local_vllm.driver]
       code_execute:    [local_vllm.driver]
-      code_steer:      [groq.fast_mid, deepseek_direct.driver]
-      code_repair:     [groq.fast_mid, deepseek_direct.driver]
+      code_steer:      [groq.fast_mid, deepinfra.driver, deepseek_direct.driver]
+      code_repair:     [groq.fast_mid, deepinfra.driver, deepseek_direct.driver]
       research_fanout: [groq.fast_filter, groq.fast_mid, openrouter.extract_free]
       research_synth:  [openrouter.synth_free, cerebras.synth_fast, local_vllm.driver]
       code_frontier:   []
@@ -59,13 +59,13 @@ modes:
     monthly_cost: "~$17"
     inference_mode: full
     posture: >
-      DeepSeek V4-Pro plans, V4-Flash executes — both API, NO GPU required. ~10% of
-      Claude Code Max, no rate limits. The no-hardware path: anyone can run this.
+      DeepSeek V4-Pro plans, V4-Flash executes — both API (DeepInfra-funded), NO GPU
+      required. ~10% of Claude Code Max, no rate limits. The no-hardware path.
     chains:
-      code_plan:       [deepseek_direct.planner, openrouter.synth_free]
-      code_execute:    [deepseek_direct.driver, local_vllm.driver]
-      code_steer:      [groq.fast_mid, deepseek_direct.driver]
-      code_repair:     [groq.fast_mid, deepseek_direct.driver]
+      code_plan:       [deepinfra.planner, deepseek_direct.planner, openrouter.synth_free]
+      code_execute:    [deepinfra.driver, deepseek_direct.driver, local_vllm.driver]
+      code_steer:      [groq.fast_mid, deepinfra.driver, deepseek_direct.driver]
+      code_repair:     [groq.fast_mid, deepinfra.driver, deepseek_direct.driver]
       research_fanout: [groq.fast_filter, groq.fast_mid, openrouter.extract_free]
       research_synth:  [openrouter.synth_free, cerebras.synth_fast]
       code_frontier:   []
@@ -79,7 +79,7 @@ modes:
       true frontier planning. Economics tighten vs a Claude Code subscription but
       justified for unlimited 14hr/day use, no rate limits, and private local execution.
     chains:
-      code_plan:       [anthropic.frontier, deepseek_direct.planner, openrouter.synth_free]
+      code_plan:       [anthropic.frontier, deepinfra.planner, deepseek_direct.planner, openrouter.synth_free]
       code_execute:    [local_vllm.driver]
       code_steer:      [groq.fast_mid, local_vllm.driver]
       code_repair:     [groq.fast_mid, local_vllm.driver]
@@ -92,14 +92,14 @@ modes:
     monthly_cost: "~$60"
     inference_mode: frontier
     posture: >
-      Opus 4.8 plans, V4-Flash executes — both API, no GPU. Closest to Claude Code+Opus.
-      Cheaper than Max 20x with no rate limits, but appeal narrows vs the subscription.
-      Use for a genuinely hard session; not a daily driver.
+      Opus 4.8 plans, V4-Flash executes (DeepInfra-funded) — both API, no GPU. Closest
+      to Claude Code+Opus. Cheaper than Max 20x with no rate limits, but appeal narrows
+      vs the subscription. Use for a genuinely hard session; not a daily driver.
     chains:
-      code_plan:       [anthropic.frontier, deepseek_direct.planner]
-      code_execute:    [deepseek_direct.driver, local_vllm.driver]
-      code_steer:      [groq.fast_mid, deepseek_direct.driver]
-      code_repair:     [groq.fast_mid, deepseek_direct.driver]
+      code_plan:       [anthropic.frontier, deepinfra.planner, deepseek_direct.planner]
+      code_execute:    [deepinfra.driver, deepseek_direct.driver, local_vllm.driver]
+      code_steer:      [groq.fast_mid, deepinfra.driver, deepseek_direct.driver]
+      code_repair:     [groq.fast_mid, deepinfra.driver, deepseek_direct.driver]
       research_fanout: [groq.fast_filter, groq.fast_mid, openrouter.extract_free]
       research_synth:  [openrouter.synth_free, cerebras.synth_fast]
       code_frontier:   [anthropic.frontier]
