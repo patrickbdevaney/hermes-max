@@ -58,6 +58,27 @@ _dispatch() {
 
 _port_up() { timeout 1 bash -c ">/dev/tcp/127.0.0.1/$1" 2>/dev/null; }
 
+# Probe the ACTUAL $VLLM_BASE_URL (local, LAN, or Tailscale — wherever it points)
+# and classify by REACHABILITY, not location. Echoes: "<state> <host> <model>"
+#   local  — reachable on a loopback host (GPU on this box)
+#   remote — reachable on another host (GPU on another box; Tailscale/LAN)
+#   none   — unset or not answering
+# The endpoint is never assumed to be on :8001/localhost; we read and probe it.
+_probe_vllm() {
+  local base host state model
+  base="${VLLM_BASE_URL:-}"
+  if [ -z "${base}" ]; then echo "none - -"; return; fi
+  host="$(printf '%s' "${base}" | sed -E 's#^[a-zA-Z]+://([^/:]+).*#\1#')"
+  model="$(curl -fsS -m 4 -H 'User-Agent: hermes-max/1.0' "${base%/}/models" 2>/dev/null \
+            | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  if [ -n "${model}" ] || curl -fsS -m 4 -H 'User-Agent: hermes-max/1.0' "${base%/}/models" >/dev/null 2>&1; then
+    case "${host}" in localhost|127.0.0.1|::1|0.0.0.0) state=local ;; *) state=remote ;; esac
+  else
+    state=none
+  fi
+  echo "${state} ${host:-?} ${model:-?}"
+}
+
 # Start the embed (:8002) + rerank (:8003) serves, backgrounded, if not already up.
 # DEFAULT ON for the gpu_local profile (the model serves the dense lane + reranker);
 # opt out with HM_WITH_EMBED=0 / HM_WITH_RERANK=0. On lean_cloud they stay off.
@@ -195,9 +216,14 @@ _apply_inf_mode() {
   _inf set "${name}" || return 1
   meta="$(_inf meta "${name}" 2>/dev/null)"; ceiling="${meta%% *}"; gpu="${meta##* }"
   [ -n "${ceiling}" ] && _apply_mode "${ceiling}" >/dev/null 2>&1
-  if [ "${gpu}" = "1" ] && ! _port_up "${VLLM_PORT:-8001}"; then
-    echo "  ⚠ '${name}' executes locally but no vLLM endpoint is up on :${VLLM_PORT:-8001}."
-    echo "    Stand vLLM up, or pick a no-GPU posture:  hm mode full   (V4-Flash executes, no GPU)"
+  if [ "${gpu}" = "1" ]; then
+    # Probe the real endpoint (local/LAN/Tailscale) — only warn if NONE is reachable.
+    set -- $(_probe_vllm); _vstate="$1"; _vhost="$2"; _vmodel="$3"
+    if [ "${_vstate}" = "none" ]; then
+      echo "  ⚠ '${name}' executes locally but no vLLM endpoint is reachable at ${VLLM_BASE_URL:-<VLLM_BASE_URL unset>}."
+      echo "    Stand vLLM up (local or remote), or pick a no-GPU posture:  hm mode full   (V4-Flash executes, no GPU)"
+    fi
+    # (a reachable remote endpoint is a LIVE driver — set_mode.sh prints the REMOTE GPU line)
   fi
   # Option A: atomically swap the Hermes agent-loop backend to this posture's
   # executor (local vLLM, or DeepInfra V4-Flash). Reversible; backs up first.
@@ -354,17 +380,25 @@ EOF
   fi
   # embed + rerank serves (gpu_local default) so the cockpit's status pane shows them
   _start_serves || true
+  # cockpit cost baseline: snapshot today's spend now so the status pane can show
+  # "this session" as a delta (best-effort; absent → session reads as today).
+  mkdir -p "${HOME}/.hermes-max/ui" 2>/dev/null || true
+  ( cd "${REPO_ROOT}" && python3 -c "from lib.inference import ledger; print(ledger.report('today')['total_usd'])" 2>/dev/null ) \
+    > "${HOME}/.hermes-max/ui/cockpit_base" 2>/dev/null || true
   # pane 1 (large): an interactive shell ready for `hermes`
   tmux new-session -d -s "${TMUX_SESSION}" -n cockpit -x 220 -y 50
   tmux send-keys -t "${TMUX_SESSION}" \
     "echo '── hermes pane — type: hermes ──'; command -v hermes >/dev/null && echo '(hermes ready)' || echo '(hermes not on PATH)'" C-m
-  # pane 2: live watch stream
+  # pane 2: the structured live activity stream (server · tool · input · status ·
+  # timing + research fan-out sub-entries); falls back to the plain watch tail.
   tmux split-window -h -t "${TMUX_SESSION}"
-  tmux send-keys -t "${TMUX_SESSION}" "${SCRIPTS}/watch.sh" C-m
+  tmux send-keys -t "${TMUX_SESSION}" \
+    "python3 ${SCRIPTS}/cockpit_livelog.py 2>/dev/null || ${SCRIPTS}/watch.sh" C-m
   # pane 3: auto-refreshing status (use watch if present, else a sleep loop)
   tmux split-window -v -t "${TMUX_SESSION}"
-  # status pane: active posture + today's spend on top, then the stack status
-  _statpane="(cd ${REPO_ROOT} && python3 -m lib.inference.modes_cli status-line); ${SCRIPTS}/status.sh"
+  # status pane: the live run-context block (mode · cost · task · phase · rung ·
+  # elapsed) on top, then the stack server table.
+  _statpane="python3 ${SCRIPTS}/cockpit_status.py 2>/dev/null || (cd ${REPO_ROOT} && python3 -m lib.inference.modes_cli status-line); ${SCRIPTS}/status.sh"
   if command -v watch >/dev/null 2>&1; then
     tmux send-keys -t "${TMUX_SESSION}" "watch -t -n 4 '${_statpane}'" C-m
   else

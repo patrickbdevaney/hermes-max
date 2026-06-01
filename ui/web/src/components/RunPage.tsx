@@ -143,6 +143,8 @@ function EmptyState({ status, onLaunch }:
   { status: StatusPayload | null; onLaunch: (cwd: string, prompt: string) => void }) {
   const [recent, setRecent] = useState<RecentProject[]>([]);
   const [cwd, setCwd] = useState("");
+  const [browseHint, setBrowseHint] = useState<string | null>(null);
+  const [browsing, setBrowsing] = useState(false);
 
   useEffect(() => {
     api.recent().then((r) => {
@@ -150,6 +152,19 @@ function EmptyState({ status, onLaunch }:
       if (r.projects[0]) setCwd(r.projects[0].path);
     }).catch(() => void 0);
   }, []);
+
+  async function browse() {
+    setBrowseHint(null); setBrowsing(true);
+    try {
+      const r = await api.browseDir(cwd || undefined);
+      if (r.path) setCwd(r.path);
+      else if (r.error) setBrowseHint(r.hint || r.error);
+    } catch (e) {
+      setBrowseHint((e as Error).message);
+    } finally {
+      setBrowsing(false);
+    }
+  }
 
   const driver = status?.driver;
   const costy = status?.mode && !["free", "full-local", "local"].includes(status.mode);
@@ -172,16 +187,26 @@ function EmptyState({ status, onLaunch }:
             placeholder="/path/to/project"
             className="flex-1 rounded-md border border-ink-700 bg-ink-950 px-3 py-2 font-mono text-sm text-mist-100 outline-none focus:border-accent"
           />
+          <button
+            type="button"
+            onClick={browse}
+            disabled={browsing}
+            title="Open the OS folder chooser"
+            className="rounded-md border border-ink-700 px-3 py-2 text-xs text-mist-200 transition-colors hover:bg-ink-800 disabled:opacity-50"
+          >
+            {browsing ? "opening…" : "Browse…"}
+          </button>
           {recent.length > 1 && (
             <select
               value={cwd}
               onChange={(e) => setCwd(e.target.value)}
-              className="max-w-[40%] rounded-md border border-ink-700 bg-ink-950 px-2 py-2 text-xs text-mist-300 outline-none focus:border-accent"
+              className="max-w-[32%] rounded-md border border-ink-700 bg-ink-950 px-2 py-2 text-xs text-mist-300 outline-none focus:border-accent"
             >
               {recent.map((p) => <option key={p.path} value={p.path}>{p.path}</option>)}
             </select>
           )}
         </div>
+        {browseHint && <p className="mt-1 text-[11px] text-warn">{browseHint}</p>}
 
         <div className="mt-3">
           <Composer

@@ -166,6 +166,10 @@ class Handler(BaseHTTPRequestHandler):
             if not provider:
                 return self._deny(400, "provider is required")
             return self._send_json(config_api.test_connection(provider))
+        if path == "/api/browse-dir":
+            # Pop the OS-native folder chooser on the local display (loopback-only,
+            # CSRF-guarded like every POST). Best-effort; returns {path|cancelled|error}.
+            return self._send_json(config_api.browse_dir(body.get("start")))
         return self._deny(404, f"no such endpoint: {path}")
 
     def _otlp_traces(self) -> None:

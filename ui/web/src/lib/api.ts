@@ -61,6 +61,10 @@ export const api = {
     post<TestResult>("/api/test-connection", { provider }),
   applyConfig: (body: { mode?: string; vllm_base_url?: string }) =>
     post<ConfigResult>("/api/config", body),
+  // Open the OS-native directory picker on the local machine (Fix 3).
+  browseDir: (start?: string) =>
+    post<{ path: string | null; cancelled?: boolean; error?: string; hint?: string }>(
+      "/api/browse-dir", { start }),
   // EventSource URL (token in query — EventSource has no header API).
   eventsUrl: (runId: string) =>
     `/api/events/${encodeURIComponent(runId)}?token=${encodeURIComponent(launchToken)}`,
