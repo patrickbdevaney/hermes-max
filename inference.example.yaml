@@ -17,17 +17,19 @@
 
 providers:
 
-  local_vllm:                                  # the always-present, free, private floor
+  local_vllm:                                  # the free, private, sovereign executor floor
     kind: openai_compatible
-    base_url: ${VLLM_BASE_URL:-http://100.72.56.36:8001/v1}   # env-driven; never a hardcoded IP
+    base_url_env: VLLM_BASE_URL                # endpoint from env; NEVER hardcoded
     api_key_env: null                          # local needs no key
+    discover_model: true                       # id auto-discovered from GET ${VLLM_BASE_URL}/models
     models:
-      driver:  { id: "${VLLM_MODEL_ID:-qwen3.6-35b-a3b-nvfp4}", ctx: 262144 }
+      driver:  { ctx: 262144 }                 # id filled at runtime from /v1/models[0].id
     cost:   { in_per_mtok: 0.0, out_per_mtok: 0.0 }   # local = free
     limits: { rpm: null, tpm: null }                  # local = unmetered
     privacy: local
-    # Remove this block only if you have no local GPU. Without it there is no
-    # degrade floor and zero-key runs cannot resolve any role.
+    # Present only when VLLM_BASE_URL is set AND the endpoint is reachable; if it is
+    # unreachable the local tier is silently ABSENT (the harness still has its own
+    # local fallback via proceed_local).
 
   deepseek_direct:                             # direct-provider V4-Pro/Flash (alt to deepinfra; usually cheaper)
     kind: openai_compatible
@@ -96,3 +98,25 @@ providers:
       frontier: { id: "claude-opus-4-8", ctx: 1000000 }
     cost: { in_per_mtok: 5.0, out_per_mtok: 25.0, cache_hit_in_per_mtok: 0.50 }
     notes: "spare frontier rung only; triple-gated in the conductor (mode=frontier + synth-failed-twice + large blast-radius)"
+
+  # ── THE OPEN BAZAAR — add any OpenAI-compatible provider by copying this block ──
+  # plus one env var. No code changes. base_url_env keeps the endpoint out of the
+  # YAML literal; api_key_env gates presence. This is the extensibility intent.
+  # example_custom:
+  #   kind: openai_compatible
+  #   base_url_env: CUSTOM_PROVIDER_BASE_URL
+  #   api_key_env: CUSTOM_PROVIDER_API_KEY
+  #   models:
+  #     driver: { id: "some-model", ctx: 128000 }
+  #   cost: { in_per_mtok: 0.10, out_per_mtok: 0.30 }
+
+# ── DEFAULT GATEWAY — the catch-all cloud fallback ────────────────────────────
+# When EVERY named rung in a role's chain is absent or exhausted, the router falls
+# through to this gateway. A user with ONLY OPENROUTER_API_KEY set therefore gets a
+# fully working cloud system. Absent key → no fallthrough → {ok:False, proceed_local}.
+default_gateway:
+  kind: openai_compatible
+  base_url: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+  default_model: "moonshotai/kimi-k2.6:free"   # the model used when all named rungs are gone
+  cost: { in_per_mtok: 0.0, out_per_mtok: 0.0 }   # :free gateway model = $0

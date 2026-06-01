@@ -98,6 +98,29 @@ def run_role(role: str, messages: list[dict[str, str]], *, max_tokens: int = 204
             "role": role, "fell": fell,
         }
 
+    # ── catch-all: every named rung gone → the default gateway (OpenRouter) ──────
+    gw = config.get_default_gateway()
+    if gw and config.gateway_present(env) and config.gateway_tier() in admitted:
+        model_id = gw.get("default_model") or ""
+        if model_id:
+            t0 = time.time()
+            res = _CALL(gw.get("kind", "openai_compatible"), gw.get("base_url"),
+                        (env.get(gw.get("api_key_env", "")) or None), model_id,
+                        messages, max_tokens=max_tokens)
+            if res.get("ok"):
+                ledger.record(role=role, provider="default_gateway", model=model_id,
+                              in_tok=res["in_tok"], out_tok=res["out_tok"],
+                              cached_tok=res.get("cached_tok", 0), cost_usd=0.0,
+                              wall_ms=int((time.time() - t0) * 1000), mode=mode_name,
+                              rate_headers=res.get("headers", {}))
+                return {"ok": True, "text": res["text"], "provider": "default_gateway",
+                        "model": "default", "model_id": model_id,
+                        "usage": {"in_tok": res["in_tok"], "out_tok": res["out_tok"],
+                                  "cached_tok": res.get("cached_tok", 0)},
+                        "cost_usd": 0.0, "proceed_local": False, "mode": mode_name,
+                        "role": role, "fell": fell}
+            fell.append({"rung": "default_gateway", "why": res.get("error") or f"status {res.get('status')}"})
+
     return {"ok": False, "text": "", "provider": None, "model": None,
             "model_id": None, "usage": {}, "cost_usd": 0.0, "proceed_local": True,
             "mode": mode_name, "role": role, "fell": fell}

@@ -128,24 +128,53 @@ def get_provider(name: str) -> Optional[dict[str, Any]]:
     return providers().get(name)
 
 
-def _key_present(provider: dict[str, Any], env: Optional[dict[str, str]] = None) -> bool:
-    """A provider is present if its api_key_env is null (local) OR set+non-empty
-    in the live env or the repo .env."""
-    env = _effective_env(env)
-    key_env = provider.get("api_key_env")
-    if key_env in (None, "", "null"):
-        return True                       # local / keyless rung
-    return bool((env.get(key_env) or "").strip())
+def provider_present(name: str, env: Optional[dict[str, str]] = None) -> bool:
+    """A provider is usable iff: its key is present (or keyless), its endpoint is set
+    (when `base_url_env`), and — for a `discover_model` provider — the endpoint is
+    reachable with a discoverable model. So local_vllm is present only when
+    VLLM_BASE_URL is set AND /v1/models answers."""
+    p = get_provider(name)
+    if not p:
+        return False
+    key_env = p.get("api_key_env")
+    if key_env not in (None, "", "null"):
+        if not (_effective_env(env).get(key_env) or "").strip():
+            return False
+    if p.get("base_url_env") and not base_url(name, env):
+        return False
+    if p.get("discover_model"):
+        mkey = next(iter((p.get("models") or {}).keys()), "driver")
+        if resolve_model(name, mkey) is None:
+            return False
+    return True
 
 
 def present_providers(env: Optional[dict[str, str]] = None) -> set[str]:
-    """Names of providers whose key is present (or keyless). Missing key → absent."""
-    return {n for n, p in providers().items() if _key_present(p, env)}
+    """Names of providers that are usable right now (key + endpoint + reachability)."""
+    return {n for n in providers() if provider_present(n, env)}
 
 
-def provider_present(name: str, env: Optional[dict[str, str]] = None) -> bool:
-    p = get_provider(name)
-    return bool(p) and _key_present(p, env)
+# ── default gateway (the catch-all cloud fallback) ────────────────────────────
+def get_default_gateway() -> Optional[dict[str, Any]]:
+    return raw().get("default_gateway")
+
+
+def gateway_present(env: Optional[dict[str, str]] = None) -> bool:
+    gw = get_default_gateway()
+    if not gw:
+        return False
+    key_env = gw.get("api_key_env")
+    if key_env in (None, "", "null"):
+        return True
+    return bool((_effective_env(env).get(key_env) or "").strip())
+
+
+def gateway_tier() -> str:
+    gw = get_default_gateway() or {}
+    cost = gw.get("cost") or {}
+    if float(cost.get("in_per_mtok", 0) or 0) == 0.0 and float(cost.get("out_per_mtok", 0) or 0) == 0.0:
+        return "free"
+    return "paid"
 
 
 def tier(name: str) -> str:
@@ -162,14 +191,69 @@ def tier(name: str) -> str:
 
 
 def resolve_model(provider: str, model_key: str) -> Optional[dict[str, Any]]:
-    """Return {id, ctx, ...} for provider.model_key, or None if undefined."""
+    """Return {id, ctx, ...} for provider.model_key, or None if undefined. For a
+    `discover_model` provider the id is filled at runtime from /v1/models; an
+    unreachable endpoint yields None (the rung is treated as absent)."""
     p = get_provider(provider) or {}
-    return (p.get("models") or {}).get(model_key)
+    spec = (p.get("models") or {}).get(model_key)
+    if spec is None:
+        return None
+    if p.get("discover_model"):
+        mid = discover_model(provider)
+        if not mid:
+            return None
+        return {**spec, "id": mid}
+    return spec
 
 
-def base_url(provider: str) -> Optional[str]:
+def base_url(provider: str, env: Optional[dict[str, str]] = None) -> Optional[str]:
+    """Endpoint for a provider. `base_url_env` (preferred) reads it from the env so
+    the URL is never a YAML literal; otherwise the (env-expanded) `base_url` field."""
     p = get_provider(provider) or {}
+    if p.get("base_url_env"):
+        return (_effective_env(env).get(p["base_url_env"]) or "").strip() or None
     return p.get("base_url")
+
+
+# ── local-model auto-discovery (GET ${VLLM_BASE_URL}/models → models[0].id) ────
+_discover_cache: dict[str, Optional[str]] = {}
+_discover_override: Optional[Any] = None       # tests inject: fn(base_url) -> id|None
+
+
+def set_discover(fn: Optional[Any]) -> None:
+    """Inject a discovery function for tests (fn(base_url)->id|None). None resets to
+    the real HTTP discovery."""
+    global _discover_override
+    _discover_override = fn
+    _discover_cache.clear()
+
+
+def _http_discover(base: str) -> Optional[str]:
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + "/models", timeout=2) as r:
+            data = json.load(r)
+        models = data.get("data") or data.get("models") or []
+        return (models[0].get("id") if models else None)
+    except Exception:
+        return None
+
+
+def discover_model(provider: str, env: Optional[dict[str, str]] = None) -> Optional[str]:
+    """Discover the served model id for a `discover_model: true` provider. Cached by
+    base_url; returns None if the endpoint is unset/unreachable (→ tier absent)."""
+    p = get_provider(provider) or {}
+    if not p.get("discover_model"):
+        return None
+    base = base_url(provider, env)
+    if not base:
+        return None
+    if _discover_override is not None:
+        return _discover_override(base)
+    if base not in _discover_cache:
+        _discover_cache[base] = _http_discover(base)
+    return _discover_cache[base]
 
 
 def kind(provider: str) -> str:

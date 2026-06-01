@@ -55,16 +55,27 @@ def stub_fail(kind, base_url, api_key, model, messages, **kw):
             "status": 500, "headers": {}, "error": "stub forced failure"}
 
 
+LOCAL = "http://localhost:8001/v1"
+
+
 def main() -> int:
     print("═══ lib/inference offline smoke ═══")
+    # local model is auto-discovered from /v1/models — stub it (no network in smoke)
+    config.set_discover(lambda base: "qwen3.6-35b-a3b-nvfp4")
 
-    # ── 1. presence gating ──────────────────────────────────────────────────
-    zero_env: dict[str, str] = {}
-    present = config.present_providers(zero_env)
-    check("zero keys → only local_vllm present", present == {"local_vllm"},
-          f"got {present}")
+    # ── 1. presence gating (local needs VLLM_BASE_URL + reachability) ────────
+    nothing = config.present_providers({})
+    check("nothing set → no providers present (local needs VLLM_BASE_URL)",
+          nothing == set(), f"got {nothing}")
+    local_only = config.present_providers({"VLLM_BASE_URL": LOCAL})
+    check("VLLM_BASE_URL set + reachable → only local_vllm present",
+          local_only == {"local_vllm"}, f"got {local_only}")
+    config.set_discover(lambda base: None)
+    check("VLLM_BASE_URL set but UNREACHABLE → local silently absent",
+          config.present_providers({"VLLM_BASE_URL": LOCAL}) == set())
+    config.set_discover(lambda base: "qwen3.6-35b-a3b-nvfp4")
 
-    groq_env = {"GROQ_API_KEY": "x"}
+    groq_env = {"GROQ_API_KEY": "x", "VLLM_BASE_URL": LOCAL}
     check("GROQ key → groq present", "groq" in config.present_providers(groq_env))
     check("GROQ key → deepseek_direct still absent",
           "deepseek_direct" not in config.present_providers(groq_env))
@@ -179,14 +190,14 @@ def main() -> int:
     check("full with NO keys → executor degrades to local floor", eb_full_nokey["local"],
           f"got {eb_full_nokey}")
 
-    # ── 10. the no-cost sovereign path: free with ONLY OpenRouter + vLLM ─────
-    free_env = {"OPENROUTER_API_KEY": "x"}
-    check("free path: only OpenRouter present (+keyless local)",
+    # ── 10. the no-cost sovereign path: free with OpenRouter + local vLLM ────
+    free_env = {"OPENROUTER_API_KEY": "x", "VLLM_BASE_URL": LOCAL}
+    check("free path: OpenRouter + local present",
           config.present_providers(free_env) == {"local_vllm", "openrouter"},
           f"got {config.present_providers(free_env)}")
-    router.set_caller(lambda *a, **k: {"ok": True, "text": "plan", "in_tok": 10,
-                                       "out_tok": 5, "cached_tok": 0, "status": 200,
-                                       "headers": {}, "error": None})
+    ok_caller = lambda *a, **k: {"ok": True, "text": "plan", "in_tok": 10, "out_tok": 5,
+                                 "cached_tok": 0, "status": 200, "headers": {}, "error": None}
+    router.set_caller(ok_caller)
     try:
         r = router.run_role("code_plan", [{"role": "user", "content": "plan X"}],
                             mode="free", env=free_env)
@@ -197,6 +208,27 @@ def main() -> int:
                             mode="free", env=free_env)
         check("free code_execute → resolves to local vLLM executor",
               rx["ok"] and rx["provider"] == "local_vllm", f"got {rx.get('provider')}")
+    finally:
+        router.set_caller(None)
+
+    # ── 11. cloud-only: ONLY OPENROUTER_API_KEY → default_gateway catch-all ──
+    cloud_env = {"OPENROUTER_API_KEY": "x"}     # no VLLM, no named cloud providers
+    check("cloud-only: no providers present (gateway is separate)",
+          config.present_providers(cloud_env) == {"openrouter"})
+    router.set_caller(ok_caller)
+    try:
+        # in FULL mode, code_execute named rungs (deepinfra/deepseek/local) are all
+        # absent → must fall through to the default gateway (OpenRouter Kimi).
+        r = router.run_role("code_execute", [{"role": "user", "content": "x"}],
+                            mode="full", env=cloud_env)
+        check("cloud-only full code_execute → default_gateway catch-all",
+              r["ok"] and r["provider"] == "default_gateway"
+              and r["model_id"] == "moonshotai/kimi-k2.6:free", f"got {r}")
+        # but in LOCAL mode (ceiling=local) the free gateway is above ceiling → proceed_local
+        r2 = router.run_role("code_execute", [{"role": "user", "content": "x"}],
+                            mode="local", env=cloud_env)
+        check("local mode: gateway above ceiling → proceed_local",
+              (not r2["ok"]) and r2["proceed_local"], f"got {r2}")
     finally:
         router.set_caller(None)
 

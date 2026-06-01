@@ -100,6 +100,13 @@ def cmd_providers() -> int:
         else:
             note = f"set {keyenv} — ${cost.get('in_per_mtok','?')}/${cost.get('out_per_mtok','?')} per M"
         print(f"{name:<18}{status:<10}{config.tier(name):<10}{note}")
+    gw = config.get_default_gateway()
+    if gw:
+        ok = config.gateway_present()
+        status = "● present" if ok else "○ absent"
+        print(f"{'default_gateway':<18}{status:<10}{config.gateway_tier():<10}"
+              f"set {gw.get('api_key_env')} — catch-all when all named rungs are gone "
+              f"({gw.get('default_model')})")
     return 0
 
 

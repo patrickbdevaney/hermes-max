@@ -67,11 +67,16 @@ import os, yaml
 path = os.environ["HERMES_CONFIG"]
 c = yaml.safe_load(open(path)) or {}
 m = dict(c.get("model") or {})
-m["default"] = os.environ["MODEL_ID"]
+mid = os.environ["MODEL_ID"]
+local = os.environ.get("LOCAL") == "1"
+# local id is auto-discovered from /v1/models; if discovery was unavailable (empty),
+# KEEP the existing model.default rather than clobbering it with "".
+if mid or not local:
+    m["default"] = mid
 m["provider"] = "custom"
 m["base_url"] = os.environ["BASE_URL"]
 m["api_mode"] = "chat_completions"
-if os.environ.get("LOCAL") == "1":
+if local:
     m.pop("api_key", None)                       # local needs no key
 else:
     key = os.environ.get("APIKEY", "")

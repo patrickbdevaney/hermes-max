@@ -261,7 +261,23 @@ router.py    run_role(): walk the chain, first present+under-ceiling+has-headroo
 `grep -rl "api.deepseek\|api.groq\|openrouter.ai\|api.cerebras\|api.anthropic" --include=*.py`
 finds provider URLs in exactly one place: `inference.yaml` (data) and the conductor
 registry being migrated out (see `MIGRATION.md`). A new provider of an existing
-`kind` is a YAML edit — no Python changes.
+`kind` is a YAML edit (copy the commented `example_custom` block + one env var) — no
+Python changes. That's the open-bazaar intent.
+
+**Two refinements worth knowing:**
+- **Local model auto-discovery.** `local_vllm` sets `base_url_env: VLLM_BASE_URL`
+  (never a hardcoded IP) and `discover_model: true`; the served model id is fetched
+  once from `GET ${VLLM_BASE_URL}/v1/models` (`models[0].id`) and cached. The local
+  tier is present **only** when `VLLM_BASE_URL` is set AND the endpoint answers;
+  unreachable → silently absent (the harness keeps its own local fallback). There is
+  no `VLLM_MODEL_ID` to set.
+- **The default gateway (catch-all).** A top-level `default_gateway` block (OpenRouter)
+  is the fallthrough: when **every** named rung in a role's chain is absent or
+  exhausted, the router calls the gateway's `default_model` (Kimi-K2.6:free). So a
+  user with **only** `OPENROUTER_API_KEY` set has a fully working cloud system. The
+  gateway is free-tier, so it's skipped under the `local` ceiling (proceed_local).
+  Endpoints are env-driven and the fabric reads keys from `.env` as well as the live
+  environment.
 
 ---
 
