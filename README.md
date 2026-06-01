@@ -22,6 +22,12 @@ and **native settings**. Every new capability is an **independent process** with
 its own healthcheck and standalone smoke test; killing any one degrades exactly
 one tool and never crashes the agent (the anti-Frankenstein gate).
 
+> **Providers are config, not code.** MCP servers request a *role*; the inference
+> fabric (`lib/inference/`) chooses a provider from `inference.yaml`. Missing keys
+> silently drop rungs; zero keys = fully local and free. Switch your whole
+> cost/quality posture with one word — `hm mode <name>` — never by editing code.
+> See [ARCHITECTURE.md](ARCHITECTURE.md) §§9–16.
+
 ## Repo layout
 
 ```
