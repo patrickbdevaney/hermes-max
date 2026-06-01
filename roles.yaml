@@ -1,0 +1,87 @@
+# roles.yaml — the harness asks for a ROLE; the fabric picks a provider.
+# ─────────────────────────────────────────────────────────────────────────────
+# Each role maps to an ORDERED chain of `provider.model` rungs (the model name is
+# the key inside that provider's `models:` block in inference.yaml). The router
+# walks the chain and returns the first rung that is: present (key set) AND under
+# the INFERENCE_MODE ceiling AND has rate-bucket headroom. All rungs exhausted →
+# {ok: False, proceed_local: True} (never raises).
+#
+# These are the BASE chains. A MODE (modes.yaml) may OVERRIDE the coding chains
+# (code_*) and research chains for a given cost/quality posture — `hm mode <name>`
+# swaps them live. Roles not overridden by the active mode fall back to here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+roles:
+
+  # ── general roles ──────────────────────────────────────────────────────────
+  plan:                          # high-level planning / spec writing (expensive, infrequent)
+    - openrouter.plan_free       # DeepSeek R1 free — $0, strong reasoning
+    - deepseek_direct.planner    # V4-Pro paid — the quality anchor
+    - deepinfra.planner
+    - local_vllm.driver          # last resort: local plans too (slower, weaker)
+
+  drive:                         # execution / implementation (high token volume)
+    - local_vllm.driver          # default: slow-but-steady, free, private
+    - deepseek_direct.driver     # V4-Flash: faster cloud driving
+    - openrouter.code_free       # Qwen3-Coder free fallback
+
+  steer:                         # mid-execution nudge when the driver is stuck (cheap, infrequent)
+    - groq.fast_mid              # Llama-4-Scout, fast + free
+    - openrouter.extract_free
+    - deepseek_direct.driver
+
+  # ── research roles ─────────────────────────────────────────────────────────
+  research_plan:                 # decompose a research question into sub-questions
+    - openrouter.plan_free       # DeepSeek R1 free
+    - groq.fast_mid
+    - local_vllm.driver
+
+  research_fanout:               # HIGH-VOLUME rote work: query-gen, filter, dedup, extract
+    - groq.fast_filter           # Llama-3.1-8B, 14,400 rpd — the workhorse
+    - groq.fast_mid              # Scout, 1,000 rpd
+    - openrouter.extract_free    # gpt-oss-20b free
+    # local is intentionally NOT here: fanout wants many fast parallel calls, not one slow stream
+
+  research_synth:                # final synthesis over corroborated evidence (1 call)
+    - openrouter.synth_free      # Kimi K2.6 free, 1M ctx — no chunking needed
+    - cerebras.synth_fast        # gpt-oss-120b, 30K tok/s, 64K ctx
+    - groq.synth_oss             # gpt-oss-120b on Groq
+    - local_vllm.driver          # degrade path
+
+  # ── coding performance topology (Stage 8) ──────────────────────────────────
+  # The dominant quality lever is code_plan (V4-Pro). With a gap-free plan the
+  # executor transcribes rather than designs, so code_execute can be the cheap
+  # local/Flash workhorse. The cheapest-first repair ladder closes the remaining
+  # gap iteratively without paying Opus prices per token.
+
+  code_plan:                     # the incontrovertible PLAN.md (expensive, once/task, dominates quality)
+    - deepseek_direct.planner    # V4-Pro: flagship coding quality, permanent $0.435/$0.87
+    - openrouter.plan_free       # DeepSeek R1:free fallback (strong reasoning, $0)
+    - deepinfra.planner          # DeepInfra V4-Pro if direct is down
+    - local_vllm.driver          # last resort: local plans (weaker but free)
+
+  code_execute:                  # implements the plan literally (high-volume, cheap, most tokens here)
+    - local_vllm.driver          # default: Qwen3.6-35B-A3B ~50 tok/s, free, private
+    - deepseek_direct.driver     # V4-Flash: faster cloud execution
+
+  code_steer:                    # mid-execution nudge when executor is stuck or verify fails once
+    - groq.fast_mid              # Llama-4-Scout: fast, free, good enough for a directional nudge
+    - openrouter.extract_free    # gpt-oss-20b free fallback
+    - deepseek_direct.driver     # V4-Flash: cheap paid fallback
+
+  code_repair:                   # targeted repair after verify-fail (LSP diagnostic + error ctx, 1 call)
+    - groq.fast_mid              # quick, cheap, 30K TPM — fast repair loop
+    - deepseek_direct.driver     # V4-Flash if quality matters more than speed
+
+  code_frontier:                 # the Opus rung — triple-gated only (synth-failed-twice + big blast)
+    - anthropic.frontier         # Opus 4.8: $5/$25; ~$0.08-1.25/call. Most tasks NEVER reach here.
+
+  code_draft_pool:               # best-of-N fan-out pool (verifier picks, not voting)
+    - groq.fast_mid              # Llama-4-Scout: fast drafts
+    - openrouter.code_free       # Qwen3-Coder free: strong coding
+    - openrouter.extract_free    # gpt-oss-20b: lighter tasks
+    - deepseek_direct.driver     # V4-Flash paid anchor for quality
+
+  # ── frontier (general) ─────────────────────────────────────────────────────
+  frontier:                      # the sparing Opus rung, triple-gated by the conductor
+    - anthropic.frontier

@@ -1,0 +1,98 @@
+# inference.example.yaml — the backend bazaar, as DATA not code.
+# ─────────────────────────────────────────────────────────────────────────────
+# Copy this to ~/.hermes-max/inference.yaml and fill in keys (scripts/setup.sh
+# does this for you on first run). EDIT THIS FILE, NOT THE CODE.
+#
+#   • A provider block whose api_key_env is UNSET in the environment is silently
+#     skipped — not an error. Delete a block, or just don't set its key, to turn
+#     that rung off. With nothing but `local_vllm`, the system is fully local & free.
+#   • `kind` selects the client adapter: openai_compatible | anthropic.
+#   • Model ids are STRINGS on purpose — the free bazaar rotates; swapping a
+#     departed :free model is a one-line edit here, never a code change.
+#
+# This example IS the recommended maximalist constellation. Any user who copies
+# it and fills in the keys they have gets the optimal topology immediately; the
+# keys they lack simply drop their rungs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+providers:
+
+  local_vllm:                                  # the always-present, free, private floor
+    kind: openai_compatible
+    base_url: http://127.0.0.1:8001/v1         # the Thor/Spark vLLM endpoint
+    api_key_env: null                          # local needs no key
+    models:
+      driver:  { id: "qwen3.6-35b-a3b", ctx: 262144 }
+    cost:   { in_per_mtok: 0.0, out_per_mtok: 0.0 }   # local = free
+    limits: { rpm: null, tpm: null }                  # local = unmetered
+    privacy: local
+    # Remove this block only if you have no local GPU. Without it there is no
+    # degrade floor and zero-key runs cannot resolve any role.
+
+  deepseek_direct:                             # the cheap paid quality anchor (V4-Pro / V4-Flash)
+    kind: openai_compatible
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY              # unset → this rung silently drops
+    models:
+      planner: { id: "deepseek-v4-pro",   ctx: 1000000 }
+      driver:  { id: "deepseek-v4-flash", ctx: 1000000 }
+    cost:       { in_per_mtok: 0.435, out_per_mtok: 0.87, cache_hit_in_per_mtok: 0.003625 }  # V4-Pro
+    cost_flash: { in_per_mtok: 0.14,  out_per_mtok: 0.28, cache_hit_in_per_mtok: 0.0028 }     # V4-Flash
+    limits: { rpm: 1000 }
+
+  deepinfra:                                   # US-hosted V4-Pro/Flash (fallback for deepseek_direct)
+    kind: openai_compatible
+    base_url: https://api.deepinfra.com/v1/openai
+    api_key_env: DEEPINFRA_API_KEY
+    models:
+      planner: { id: "deepseek-ai/DeepSeek-V4-Pro",   ctx: 1000000 }
+      driver:  { id: "deepseek-ai/DeepSeek-V4-Flash", ctx: 1000000 }
+    cost: { in_per_mtok: 1.30, out_per_mtok: 2.60 }   # DeepInfra list (verify live; direct is cheaper)
+
+  openrouter:                                  # the :free roster (rotates) + 1M-ctx synth
+    kind: openai_compatible
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    models:
+      synth_free:   { id: "moonshotai/kimi-k2.6:free",      ctx: 1000000 }  # Kimi K2.6 free, 1M ctx
+      plan_free:    { id: "deepseek/deepseek-r1-0528:free", ctx: 163840 }
+      code_free:    { id: "qwen/qwen3-coder:free",          ctx: 262144 }
+      extract_free: { id: "openai/gpt-oss-20b:free",        ctx: 131072 }
+    cost:   { in_per_mtok: 0.0, out_per_mtok: 0.0 }   # :free models = $0 (rate-limited)
+    limits: { rpm: 20, rpd: 1000 }                    # 1000/day needs the one-time $10 deposit
+    notes: ":free roster rotates; ids are config so you can swap in 30s when a model leaves"
+
+  groq:                                        # the fan-out workhorse — PER-MODEL buckets on one key
+    kind: openai_compatible
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    models:
+      fast_filter: { id: "llama-3.1-8b-instant",                     ctx: 131072 }
+      fast_mid:    { id: "meta-llama/llama-4-scout-17b-16e-instruct", ctx: 131072 }
+      synth_oss:   { id: "openai/gpt-oss-120b",                      ctx: 131072 }
+    cost: { in_per_mtok: 0.0, out_per_mtok: 0.0 }     # free tier; buckets are PER-MODEL below
+    limits_per_model:
+      llama-3.1-8b-instant:                       { rpm: 30, rpd: 14400, tpm: 6000 }
+      meta-llama/llama-4-scout-17b-16e-instruct:  { rpm: 30, rpd: 1000,  tpm: 30000 }
+      openai/gpt-oss-120b:                        { rpm: 30, rpd: 1000,  tpm: 8000 }
+
+  cerebras:                                    # fast (30K tok/s) but 5 RPM → single chunked synth rung
+    kind: openai_compatible
+    base_url: https://api.cerebras.ai/v1
+    api_key_env: CEREBRAS_API_KEY
+    models:
+      synth_fast: { id: "gpt-oss-120b", ctx: 65536 }
+      synth_glm:  { id: "zai-glm-4.7",  ctx: 64000 }
+    cost: { in_per_mtok: 0.0, out_per_mtok: 0.0 }
+    limits_per_model:
+      gpt-oss-120b: { rpm: 5, rph: 150, rpd: 2400, tpm: 30000, tpd: 1000000 }
+      zai-glm-4.7:  { rpm: 5, rph: 150, rpd: 2400, tpm: 30000, tpd: 1000000 }
+
+  anthropic:                                   # the spare frontier rung — triple-gated in the conductor
+    kind: anthropic
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+    models:
+      frontier: { id: "claude-opus-4-8", ctx: 1000000 }
+    cost: { in_per_mtok: 5.0, out_per_mtok: 25.0, cache_hit_in_per_mtok: 0.50 }
+    notes: "spare frontier rung only; triple-gated in the conductor (mode=frontier + synth-failed-twice + large blast-radius)"

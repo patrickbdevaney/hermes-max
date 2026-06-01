@@ -1,0 +1,121 @@
+# modes.yaml — one word reassigns the coding role chains. THE toggle.
+# ─────────────────────────────────────────────────────────────────────────────
+# `hm mode <name>` swaps the chains below in over roles.yaml, live, no restart.
+# The active mode is persisted to ~/.hermes-max/mode and echoed in hm status /
+# hm cost / the cockpit. A mode declares:
+#   requires_gpu   — does it need a local vLLM executor to be compelling?
+#   monthly_cost   — honest estimate for daily coding use
+#   posture        — one paragraph: what plans, what executes, the honest caveat
+#   chains         — role → ordered provider.model chain (overrides roles.yaml)
+#
+# Roles a mode does not list fall back to roles.yaml. A chain rung whose provider
+# key is absent is skipped silently (e.g. no DEEPSEEK_API_KEY in full-local →
+# code_plan falls through to Kimi-K2-free automatically, no error, no cost).
+#
+# Modes are listed in order of appeal (free = the default).
+# ─────────────────────────────────────────────────────────────────────────────
+
+default: free
+
+modes:
+
+  free:                          # DEFAULT — Kimi K2.6 free plans, local executes
+    requires_gpu: true
+    monthly_cost: "$0.00"
+    inference_mode: free         # spend ceiling: $0 providers only
+    posture: >
+      Kimi K2.6 (free, OpenRouter, 1M ctx) plans, local model executes. Zero cost.
+      THE DEFAULT. Most compelling with a Thor/Spark — sovereign + free + near-frontier
+      planning via Kimi K2.6 which replenishes daily. Falls back to R1:free if Kimi is
+      unavailable, then local plans.
+    chains:
+      code_plan:       [openrouter.synth_free, openrouter.plan_free, local_vllm.driver]
+      code_execute:    [local_vllm.driver]
+      code_steer:      [groq.fast_mid, openrouter.extract_free, local_vllm.driver]
+      code_repair:     [groq.fast_mid, local_vllm.driver]
+      research_fanout: [groq.fast_filter, groq.fast_mid, openrouter.extract_free]
+      research_synth:  [openrouter.synth_free, cerebras.synth_fast, local_vllm.driver]
+      code_frontier:   []
+
+  full-local:                    # 2nd — V4-Pro plans, local executes (~$1.50/mo)
+    requires_gpu: true
+    monthly_cost: "~$1.50"
+    inference_mode: full
+    posture: >
+      DeepSeek V4-Pro plans (~$0.05/day), local model executes (free). Near-frontier
+      planning quality at minimal cost. Needs a GPU. Step up from free when you want
+      V4-Pro's stronger architectural judgment over Kimi-free.
+    chains:
+      code_plan:       [deepseek_direct.planner, openrouter.synth_free, local_vllm.driver]
+      code_execute:    [local_vllm.driver]
+      code_steer:      [groq.fast_mid, deepseek_direct.driver]
+      code_repair:     [groq.fast_mid, deepseek_direct.driver]
+      research_fanout: [groq.fast_filter, groq.fast_mid, openrouter.extract_free]
+      research_synth:  [openrouter.synth_free, cerebras.synth_fast, local_vllm.driver]
+      code_frontier:   []
+
+  full:                          # 3rd — V4-Pro plans, V4-Flash executes (~$17/mo, NO GPU)
+    requires_gpu: false
+    monthly_cost: "~$17"
+    inference_mode: full
+    posture: >
+      DeepSeek V4-Pro plans, V4-Flash executes — both API, NO GPU required. ~10% of
+      Claude Code Max, no rate limits. The no-hardware path: anyone can run this.
+    chains:
+      code_plan:       [deepseek_direct.planner, openrouter.synth_free]
+      code_execute:    [deepseek_direct.driver, local_vllm.driver]
+      code_steer:      [groq.fast_mid, deepseek_direct.driver]
+      code_repair:     [groq.fast_mid, deepseek_direct.driver]
+      research_fanout: [groq.fast_filter, groq.fast_mid, openrouter.extract_free]
+      research_synth:  [openrouter.synth_free, cerebras.synth_fast]
+      code_frontier:   []
+
+  frontier-local:                # 4th — Opus 4.8 plans, local executes (~$45/mo)
+    requires_gpu: true
+    monthly_cost: "~$45"
+    inference_mode: frontier
+    posture: >
+      Opus 4.8 plans (frontier reasoning), local model executes. Sovereign execution +
+      true frontier planning. Economics tighten vs a Claude Code subscription but
+      justified for unlimited 14hr/day use, no rate limits, and private local execution.
+    chains:
+      code_plan:       [anthropic.frontier, deepseek_direct.planner, openrouter.synth_free]
+      code_execute:    [local_vllm.driver]
+      code_steer:      [groq.fast_mid, local_vllm.driver]
+      code_repair:     [groq.fast_mid, local_vllm.driver]
+      research_fanout: [groq.fast_filter, groq.fast_mid, openrouter.extract_free]
+      research_synth:  [openrouter.synth_free, cerebras.synth_fast, local_vllm.driver]
+      code_frontier:   [anthropic.frontier]
+
+  frontier:                      # 5th — Opus 4.8 plans, V4-Flash executes (~$60/mo, NO GPU)
+    requires_gpu: false
+    monthly_cost: "~$60"
+    inference_mode: frontier
+    posture: >
+      Opus 4.8 plans, V4-Flash executes — both API, no GPU. Closest to Claude Code+Opus.
+      Cheaper than Max 20x with no rate limits, but appeal narrows vs the subscription.
+      Use for a genuinely hard session; not a daily driver.
+    chains:
+      code_plan:       [anthropic.frontier, deepseek_direct.planner]
+      code_execute:    [deepseek_direct.driver, local_vllm.driver]
+      code_steer:      [groq.fast_mid, deepseek_direct.driver]
+      code_repair:     [groq.fast_mid, deepseek_direct.driver]
+      research_fanout: [groq.fast_filter, groq.fast_mid, openrouter.extract_free]
+      research_synth:  [openrouter.synth_free, cerebras.synth_fast]
+      code_frontier:   [anthropic.frontier]
+
+  local:                         # 6th — pure local, no API, air-gapped floor ($0)
+    requires_gpu: true
+    monthly_cost: "$0.00"
+    inference_mode: local
+    posture: >
+      Pure local, no API at all. Fully sovereign, limited to local model quality.
+      The air-gapped / zero-dependency floor.
+    chains:
+      code_plan:       [local_vllm.driver]
+      code_execute:    [local_vllm.driver]
+      code_steer:      [local_vllm.driver]
+      code_repair:     [local_vllm.driver]
+      research_fanout: [local_vllm.driver]
+      research_synth:  [local_vllm.driver]
+      code_frontier:   []
