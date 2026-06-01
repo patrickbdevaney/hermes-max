@@ -51,6 +51,9 @@ def _config_path() -> str:
     user = os.path.expanduser("~/.hermes-max/inference.yaml")
     if os.path.exists(user):
         return user
+    shipped = os.path.join(_REPO_ROOT, "config", "inference.example.yaml")
+    if os.path.exists(shipped):
+        return shipped
     return os.path.join(_REPO_ROOT, "inference.example.yaml")
 
 

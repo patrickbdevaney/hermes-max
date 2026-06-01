@@ -40,8 +40,15 @@ _CEILING_TIERS = {
 
 
 def _yaml_path(name: str) -> str:
+    """User copy (~/.hermes-max/<name>) wins; else the shipped default in config/.
+    A bare-repo-root copy is still honored for backwards compatibility."""
     user = os.path.expanduser(f"~/.hermes-max/{name}")
-    return user if os.path.exists(user) else os.path.join(_REPO_ROOT, name)
+    if os.path.exists(user):
+        return user
+    shipped = os.path.join(_REPO_ROOT, "config", name)
+    if os.path.exists(shipped):
+        return shipped
+    return os.path.join(_REPO_ROOT, name)
 
 
 @lru_cache(maxsize=4)

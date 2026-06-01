@@ -24,12 +24,17 @@ conductor.yaml
 
 .env.bak.*
 
-# corpus and research artifacts
+# corpus and generated run artifacts. These are regenerated at the repo ROOT by
+# the hm verbs (hm bottleneck, hm eval, the dry-run/research harnesses); the
+# leading slash ignores only those fresh root copies. The captured provenance
+# copies under archive/traces/ ARE tracked (see archive/traces/README.md).
 corpus/
-dry_run_trace.md
-deep_research_trace.md
-eval_battery_report.md
-emergent_eval_report.md
+/dry_run_trace.md
+/deep_research_trace.md
+/eval_battery_report.md
+/emergent_eval_report.md
+/bottleneck_report.md
+/rate_limit_validation_trace.md
 replacements.txt
 
 # hermes runtime state (if not already in ~/.hermes-max)

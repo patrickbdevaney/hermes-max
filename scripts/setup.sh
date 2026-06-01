@@ -25,9 +25,9 @@ _copy_if_absent() {
     echo "  ✓ ${label}: copied default → ${dst} (edit this, not the code)"
   fi
 }
-_copy_if_absent "${REPO_ROOT}/inference.example.yaml" "${CFG_DIR}/inference.yaml" "inference.yaml (backends)"
-_copy_if_absent "${REPO_ROOT}/roles.yaml"             "${CFG_DIR}/roles.yaml"     "roles.yaml (role→chain)"
-_copy_if_absent "${REPO_ROOT}/modes.yaml"             "${CFG_DIR}/modes.yaml"     "modes.yaml (posture presets)"
+_copy_if_absent "${REPO_ROOT}/config/inference.example.yaml" "${CFG_DIR}/inference.yaml" "inference.yaml (backends)"
+_copy_if_absent "${REPO_ROOT}/config/roles.yaml"             "${CFG_DIR}/roles.yaml"     "roles.yaml (role→chain)"
+_copy_if_absent "${REPO_ROOT}/config/modes.yaml"             "${CFG_DIR}/modes.yaml"     "modes.yaml (posture presets)"
 
 # 2. .env from the example, if the user has none yet (keys go here).
 if [ ! -f "${REPO_ROOT}/.env" ] && [ -f "${REPO_ROOT}/.env.example" ]; then
