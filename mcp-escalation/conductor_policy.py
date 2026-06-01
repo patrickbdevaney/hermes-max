@@ -212,3 +212,63 @@ def frequency_report() -> dict[str, Any]:
             "targets": {"synthesize": TARGET_SYNTH_PER_PROJECT, "escalate_opus": TARGET_OPUS_PER_PROJECT},
             "kg_available": bool(q),
             "warnings": warnings or ["within targets"]}
+
+
+# ── Stage-8: coding-quality signals (per-subtask, feeds hm cost + GEPA) ────────
+# The plan/execute loop emits three counters per subtask. They are NOT spend gates;
+# they are DIAGNOSTICS that say WHERE the topology is weak so the planner brief (or
+# the mode ceiling) can be tuned — the highest-ROI lever is always plan quality.
+PLAN_ROUNDS_FLAG = int(os.environ.get("CONDUCTOR_PLAN_ROUNDS_FLAG", "1"))   # >1 → thin brief
+REPAIR_ROUNDS_FLAG = int(os.environ.get("CONDUCTOR_REPAIR_ROUNDS_FLAG", "2"))  # >2 → executor stuck
+STEER_CALLS_FLAG = int(os.environ.get("CONDUCTOR_STEER_CALLS_FLAG", "3"))   # >3/task → too cheap
+
+
+def code_quality_signals(plan_rounds: int = 0, repair_rounds: int = 0,
+                         steer_calls: int = 0, subtask: str = "",
+                         record: bool = False) -> dict[str, Any]:
+    """Diagnose a coding subtask's trajectory and suggest the cheapest fix.
+
+    - plan_rounds  > PLAN_ROUNDS_FLAG   → the brief was thin; make the plan more
+                                          specific for this class of task (planner bug,
+                                          not an executor bug — see workflow-plan-contract).
+    - repair_rounds> REPAIR_ROUNDS_FLAG → the executor can't do this file alone; the
+                                          FILE SPEC needs exact signatures/algorithm.
+    - steer_calls  > STEER_CALLS_FLAG   → the conductor is running too cheap for this
+                                          task; consider raising the mode ceiling.
+
+    Returns the signals, per-signal flags, and a single review-queue suggestion for
+    the GEPA self-improvement loop. Optionally records to the KG (conductor_event)."""
+    flags: list[str] = []
+    if plan_rounds > PLAN_ROUNDS_FLAG:
+        flags.append(f"plan_rounds={plan_rounds}>{PLAN_ROUNDS_FLAG}: thin brief — make the "
+                     "PLAN.md more specific for this task class (planner-quality bug)")
+    if repair_rounds > REPAIR_ROUNDS_FLAG:
+        flags.append(f"repair_rounds={repair_rounds}>{REPAIR_ROUNDS_FLAG}: executor cannot do this "
+                     "file alone — the FILE SPEC needs exact signatures + algorithm")
+    if steer_calls > STEER_CALLS_FLAG:
+        flags.append(f"steer_calls={steer_calls}>{STEER_CALLS_FLAG}: conductor too cheap for this "
+                     "task — consider raising the mode ceiling (hm mode)")
+
+    # the single highest-ROI suggestion (plan quality dominates)
+    if plan_rounds > PLAN_ROUNDS_FLAG or repair_rounds > REPAIR_ROUNDS_FLAG:
+        suggestion = ("strengthen the planner brief for this task class — most of the "
+                      "Opus-parity gap is a planning gap, not an execution gap")
+    elif steer_calls > STEER_CALLS_FLAG:
+        suggestion = "raise the mode ceiling for this task class, or improve the plan's edge-cases"
+    else:
+        suggestion = "within targets — topology is well-matched to this task"
+
+    signals = {"plan_rounds": plan_rounds, "repair_rounds": repair_rounds,
+               "steer_calls": steer_calls}
+    out = {"ok": True, "subtask": subtask, "signals": signals, "flags": flags,
+           "review_queue": bool(flags), "suggestion": suggestion}
+
+    if record and subtask:
+        try:                              # best-effort KG provenance for the GEPA loop
+            _mcp(KG_PORT, "add_observation", {
+                "entity": subtask, "type": "code_quality_signal",
+                "props": {**signals, "review_queue": bool(flags)}})
+            out["recorded"] = True
+        except Exception:
+            out["recorded"] = False
+    return out
