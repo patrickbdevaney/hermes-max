@@ -285,6 +285,27 @@ fi
 # (re)load env now that .env exists
 hmx_load_env
 
+# ── 3b. runtime config → $HERMES_MAX_CONFIG_DIR (default ~/.hermes-max) ───────
+# The repo ships ONLY *.example versions in config/; the live files the system
+# reads live outside the repo. Copy each example to the config dir if the user has
+# no copy yet (idempotent — an existing file is never overwritten, so user edits
+# survive). The loaders fall back to the shipped example until these exist.
+hdr "3b. runtime config (~/.hermes-max)"
+HMX_CFG_DIR="${HERMES_MAX_CONFIG_DIR:-${HOME}/.hermes-max}"
+for _name in inference roles modes conductor; do
+  _src="${REPO_ROOT}/config/${_name}.example.yaml"
+  _dst="${HMX_CFG_DIR}/${_name}.yaml"
+  if [ -f "${_dst}" ]; then
+    c_ok "${_name}.yaml present (${_dst}) — left untouched"
+  elif [ "${CHECK}" -eq 1 ]; then
+    c_warn "${_name}.yaml missing — would copy from config/${_name}.example.yaml"; MISSING=$((MISSING + 1))
+  elif [ -f "${_src}" ]; then
+    mkdir -p "${HMX_CFG_DIR}"
+    cp "${_src}" "${_dst}"
+    c_ok "${_name}.yaml → ${_dst} (edit this, not the repo)"
+  fi
+done
+
 # ── 4. discover + set up every MCP server (generic: scan, don't hardcode) ─────
 hdr "4. MCP servers (discover → venv → deps → smoke)"
 # Discover by filesystem scan so a server dropped in by a later stage is picked

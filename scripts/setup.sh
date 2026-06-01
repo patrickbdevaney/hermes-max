@@ -9,7 +9,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CFG_DIR="${HERMES_MAX_STATE_DIR:-${HOME}/.hermes-max}"
+CFG_DIR="${HERMES_MAX_CONFIG_DIR:-${HOME}/.hermes-max}"
 mkdir -p "${CFG_DIR}"
 
 echo "═══ hermes-max inference fabric setup ═══"
@@ -26,8 +26,9 @@ _copy_if_absent() {
   fi
 }
 _copy_if_absent "${REPO_ROOT}/config/inference.example.yaml" "${CFG_DIR}/inference.yaml" "inference.yaml (backends)"
-_copy_if_absent "${REPO_ROOT}/config/roles.yaml"             "${CFG_DIR}/roles.yaml"     "roles.yaml (role→chain)"
-_copy_if_absent "${REPO_ROOT}/config/modes.yaml"             "${CFG_DIR}/modes.yaml"     "modes.yaml (posture presets)"
+_copy_if_absent "${REPO_ROOT}/config/roles.example.yaml"     "${CFG_DIR}/roles.yaml"     "roles.yaml (role→chain)"
+_copy_if_absent "${REPO_ROOT}/config/modes.example.yaml"     "${CFG_DIR}/modes.yaml"     "modes.yaml (posture presets)"
+_copy_if_absent "${REPO_ROOT}/config/conductor.example.yaml" "${CFG_DIR}/conductor.yaml" "conductor.yaml (escalation overrides)"
 
 # 2. .env from the example, if the user has none yet (keys go here).
 if [ ! -f "${REPO_ROOT}/.env" ] && [ -f "${REPO_ROOT}/.env.example" ]; then

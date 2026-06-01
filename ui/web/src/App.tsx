@@ -1,0 +1,156 @@
+// The shell: a persistent left-nav + top chrome around a hash-routed content area
+// (PART III.1). The run reducer + SSE stream are lifted here so the chrome's live
+// cost and the Run view share one source of truth, and so a run keeps streaming in
+// the background while you visit Cost/Providers/Activity. Five surfaces: Run /
+// Activity / Providers / Cost / Setup.
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { api } from "./lib/api";
+import { openStream } from "./lib/events";
+import type { ConnState } from "./lib/events";
+import { reduce, initialView } from "./state";
+import { useRoute, navigate } from "./lib/router";
+import { journal } from "./lib/runjournal";
+import type { StatusPayload } from "./types";
+import { SideNav } from "./components/SideNav";
+import { TopChrome } from "./components/TopChrome";
+import { RunPage } from "./components/RunPage";
+import { ActivityPage } from "./components/ActivityPage";
+import { ProvidersPage } from "./components/ProvidersPage";
+import { CostPage } from "./components/CostPage";
+import { Wizard } from "./components/wizard/Wizard";
+
+export default function App() {
+  const route = useRoute();
+  const [status, setStatus] = useState<StatusPayload | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [conn, setConn] = useState<ConnState>("connecting");
+  const [view, dispatch] = useReducer(reduce, initialView);
+  const [alive, setAlive] = useState(false);
+  const [firstRun, setFirstRun] = useState(false);
+  const autoRouted = useRef(false);
+
+  const refreshStatus = useCallback(() => {
+    api.status().then(setStatus).catch(() => void 0);
+  }, []);
+
+  // Poll status (mode / providers / driver / today's spend) periodically.
+  useEffect(() => {
+    let stop = false;
+    const tick = () => api.status().then((s) => { if (!stop) setStatus(s); }).catch(() => void 0);
+    tick();
+    const id = setInterval(tick, 10_000);
+    return () => { stop = true; clearInterval(id); };
+  }, []);
+
+  // First-run heuristic: if nothing cloud is configured, route to Setup once.
+  useEffect(() => {
+    api.keysStatus()
+      .then((ks) => {
+        const anyCloud = ks.providers.some((p) => !p.keyless && p.present);
+        setFirstRun(!anyCloud);
+        if (!anyCloud && !autoRouted.current && route.name === "run" && !route.runId) {
+          autoRouted.current = true;
+          navigate("setup");
+        }
+      })
+      .catch(() => setFirstRun(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // A run in the URL becomes the active run (deep-link / Activity / back-button).
+  useEffect(() => {
+    if (route.name === "run" && route.runId && route.runId !== activeRunId) {
+      setActiveRunId(route.runId);
+    }
+  }, [route, activeRunId]);
+
+  // Open / close the SSE stream when the active run changes. Seed the first turn's
+  // user message from the journal (so a deep-linked run still shows what was asked).
+  useEffect(() => {
+    if (!activeRunId) { setConn("connecting"); return; }
+    const meta = journal.get(activeRunId);
+    dispatch({ type: "reset", userText: meta?.prompt ?? null });
+    const stream = openStream(activeRunId, (t, d) => dispatch({ type: "event", evt: t, data: d }), setConn);
+    return () => stream.close();
+  }, [activeRunId]);
+
+  // Calm "alive" pulse: true while events have arrived recently.
+  useEffect(() => {
+    const id = setInterval(() => setAlive(Date.now() - view.lastEventTs < 4000), 1000);
+    return () => clearInterval(id);
+  }, [view.lastEventTs]);
+
+  // ── actuation ──
+  const launch = useCallback(async (cwd: string, prompt: string) => {
+    try {
+      const run = await api.run(cwd, prompt, status?.mode);
+      journal.add({ run_id: run.run_id, prompt, cwd, mode: run.mode ?? status?.mode ?? null, start_ts: Date.now() });
+      setActiveRunId(run.run_id);
+      navigate("run", run.run_id);
+    } catch (e) {
+      // Surface as a transient narration so the user isn't left guessing.
+      dispatch({ type: "reset", userText: prompt });
+      dispatch({ type: "event", evt: "narration", data: { run_id: "x", plain_text: `Couldn't launch: ${(e as Error).message}`, level: "warn" } });
+    }
+  }, [status?.mode]);
+
+  const cont = useCallback(async (prompt: string) => {
+    if (!activeRunId) return;
+    dispatch({ type: "user_message", text: prompt });
+    journal.bumpTurn(activeRunId);
+    try {
+      await api.continueRun(activeRunId, prompt);
+    } catch (e) {
+      dispatch({ type: "event", evt: "narration", data: { run_id: activeRunId, plain_text: `Couldn't continue: ${(e as Error).message}`, level: "warn" } });
+    }
+  }, [activeRunId]);
+
+  const newRun = useCallback(() => {
+    setActiveRunId(null);
+    navigate("run");
+  }, []);
+
+  const fillHeight = route.name === "run";
+
+  return (
+    <div className="flex h-screen overflow-hidden">
+      <SideNav active={route.name} status={status} />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <TopChrome
+          view={view}
+          status={status}
+          conn={conn}
+          alive={alive && !!activeRunId}
+          hasRun={!!activeRunId}
+          refreshStatus={refreshStatus}
+        />
+        <main className="min-h-0 flex-1 overflow-hidden">
+          <div className={`mx-auto h-full max-w-5xl px-6 ${fillHeight ? "py-5" : "overflow-y-auto py-6"}`}>
+            {route.name === "run" && (
+              <RunPage
+                runId={activeRunId}
+                view={view}
+                conn={conn}
+                status={status}
+                onLaunch={launch}
+                onContinue={cont}
+                onNewRun={newRun}
+              />
+            )}
+            {route.name === "activity" && <ActivityPage />}
+            {route.name === "providers" && <ProvidersPage status={status} refreshStatus={refreshStatus} />}
+            {route.name === "cost" && <CostPage />}
+            {route.name === "setup" && (
+              <Wizard
+                status={status}
+                refreshStatus={refreshStatus}
+                firstRun={firstRun}
+                onDone={() => navigate("run")}
+              />
+            )}
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}

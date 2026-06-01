@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* PART II design-system tokens as CSS vars (the canonical source; Tailwind mirrors
+   them). Dark-only, surface-layered, one accent, near-invisible borders. */
+:root {
+  color-scheme: dark;
+
+  --bg-base: #0a0a0b;
+  --bg-surface: #131316;
+  --bg-overlay: #1c1c21;
+  --bg-input: #0e0e10;
+
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  --text-primary: #ededef;
+  --text-secondary: #a1a1aa;
+  --text-tertiary: #6b6b73;
+  --text-disabled: #3f3f46;
+
+  --status-success: #3fb950;
+  --status-warning: #d29922;
+  --status-error: #f85149;
+  --status-info: #58a6ff;
+
+  --accent: #4d8dff;
+  --accent-hover: #6fa3ff;
+  --accent-subtle: rgba(77, 141, 255, 0.12);
+
+  --code-bg: #0e0e10;
+  --code-text: #c9d1d9;
+
+  --font-sans: "Inter", "Geist", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, monospace;
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Headings carry the tight negative tracking (Vercel discipline). */
+h1, h2, h3 { letter-spacing: -0.02em; }
+
+/* Accessibility: honour reduced-motion. State is NEVER conveyed by motion alone
+   (always colour + icon + label), so disabling animation loses no meaning. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #2a2a30; border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }

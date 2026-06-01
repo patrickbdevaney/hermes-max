@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.local
+.vite/
+*.tsbuildinfo
+# tsc -b emit from the composite node project (vite.config.ts → .js/.d.ts)
+vite.config.js
+vite.config.d.ts

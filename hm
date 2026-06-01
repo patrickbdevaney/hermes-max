@@ -21,6 +21,8 @@
 #   hm observe            live waterfall: where wall time goes          scripts/observe.sh
 #   hm logs [server]      tail a server's log (or the live log)        ~/.hermes-max/logs/
 #   hm run "task"         launch hermes with a task                    hermes
+#   hm ui [--port N]      localhost web view (L0/L1 + live cost) over   ui/server
+#                         the existing livelog+ledger; opens a browser  (Tier 1)
 #   hm snapshot <name>    snapshot RAG+KG+corpus stores                scripts/snapshot-stores.sh
 #   hm restore <name>     restore a named snapshot                     scripts/restore-stores.sh
 #   hm dev [--MODE]       the tmux cockpit (hermes + watch + status)   (this script)
@@ -234,6 +236,7 @@ hermes-max — agentic coding harness
   Using it
     hm run "task"             run the agent on a task (or just launch `hermes`)
     hm dev                    the cockpit: agent + live activity + status, one window
+    hm ui                     localhost web view: live timeline + cost, in your browser
     hm cost                   spend breakdown ($0.000000, free-vs-paid)
 
   Health & modes
@@ -267,6 +270,8 @@ _verb_help() {
     dev)        echo "hm dev [--MODE] — the one-window tmux cockpit: a hermes pane, a live activity (watch) pane, and a compact status pane (mode + spend). Detachable; reattach with 'hm attach'. tmux absent → prints manual instructions." ;;
     attach)     echo "hm attach — reattach to the running 'hermes-max' tmux cockpit started by hm dev." ;;
     run)        echo "hm run \"task\" — launch the Hermes agent on a task (exec's 'hermes'). Equivalent to running 'hermes' directly." ;;
+    ui-test)    echo "hm ui-test — PART V actuation equivalence test: drives a real bounded agent turn through the web UI's own API headlessly and asserts every action surfaced in the SSE visual-flow, real artifacts landed on disk, verify went green, the handback fired, a follow-up turn actuated, and zero secrets leaked. Proves the UI ACTUATES the agent (a complete replacement for hm dev + hermes), not just visualizes it. Runs in --mode free; needs the stack up (hm up)." ;;
+    ui)         echo "hm ui [--port N] [--no-open] [--token [T]] — open the localhost web view: L0 ambient + L1 timeline + L2 span tree + live cost, fed by the existing livelog/ledger/OTLP over SSE. Auto-opens your browser and prints one line (http://localhost:7080). Port is sticky (~/.hermes-max/ui.conf; next free port if taken). No token needed on localhost — hardened by 127.0.0.1 bind + Origin/Host checks + a SameSite CSRF cookie. --token adds a bearer for remote/Tailscale exposure. Read-only. Ctrl-C to stop." ;;
     cost)       echo "hm cost [today|week|month] — spend breakdown at \$0.000000 precision: by provider/model/role, the free-vs-paid split, and remaining daily free budget per model." ;;
     health)     echo "hm health — pass/fail healthcheck for scripting: endpoints reachable, providers present, and the full model-roster confirmation (warns on a deprecated/missing id; never gates)." ;;
     preflight)  echo "hm preflight — validate the whole stack before a task (PASS/FAIL/WARN); auto-fixes the common killers; exit 1 on a BLOCKING failure." ;;
@@ -453,6 +458,7 @@ case "${cmd}" in
   health)      _dispatch "${SCRIPTS}/healthcheck.sh" "$@" ;;
   preflight)   _dispatch "${SCRIPTS}/preflight.sh" "$@" ;;
   smoke)       _dispatch "${SCRIPTS}/integration-smoke.sh" "$@" ;;
+  ui-test)     _dispatch "${SCRIPTS}/ui-actuation-test.sh" "$@" ;;
   regression)  _dispatch "${SCRIPTS}/regression-eval.sh" "$@" ;;
   summary)     _dispatch "${SCRIPTS}/run-summary.sh" "$@" ;;
   bottleneck)  _dispatch "${SCRIPTS}/bottleneck-eval.sh" "$@" ;;
@@ -479,6 +485,20 @@ case "${cmd}" in
     exec hermes "$@"
     ;;
   setup)   _dispatch "${SCRIPTS}/setup.sh" "$@" ;;
+  ui)
+    if [ -n "${HM_PRINT:-}" ]; then echo "python3 -m ui.server $*"; exit 0; fi
+    command -v python3 >/dev/null 2>&1 || { echo "✗ python3 not found — required for 'hm ui'."; exit 127; }
+    if [ ! -f "${REPO_ROOT}/ui/web/dist/index.html" ]; then
+      echo "  • frontend not built yet — building once (cd ui/web && npm install && npm run build)…"
+      if command -v npm >/dev/null 2>&1; then
+        ( cd "${REPO_ROOT}/ui/web" && npm install --no-fund --no-audit >/dev/null 2>&1 && npm run build >/dev/null 2>&1 ) \
+          || echo "  ⚠ frontend build failed — the server still runs and the API works; build manually in ui/web."
+      else
+        echo "  ⚠ npm not found — the server runs and the API works, but the page needs 'npm run build' in ui/web."
+      fi
+    fi
+    cd "${REPO_ROOT}" && exec python3 -m ui.server "$@"
+    ;;
   dev)     _dev "$@" ;;
   attach)  _attach ;;
   install) _install ;;

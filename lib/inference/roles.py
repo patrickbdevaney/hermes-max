@@ -39,16 +39,21 @@ _CEILING_TIERS = {
 }
 
 
+def _config_dir() -> str:
+    """The runtime config directory: $HERMES_MAX_CONFIG_DIR if set, else
+    ~/.hermes-max (where bootstrap copies the editable config)."""
+    return os.path.expanduser(
+        os.environ.get("HERMES_MAX_CONFIG_DIR") or "~/.hermes-max")
+
+
 def _yaml_path(name: str) -> str:
-    """User copy (~/.hermes-max/<name>) wins; else the shipped default in config/.
-    A bare-repo-root copy is still honored for backwards compatibility."""
-    user = os.path.expanduser(f"~/.hermes-max/{name}")
+    """User copy (<CONFIG_DIR>/<name>) wins; else the shipped *.example default in
+    config/ (the repo never ships the non-example runtime file)."""
+    user = os.path.join(_config_dir(), name)
     if os.path.exists(user):
         return user
-    shipped = os.path.join(_REPO_ROOT, "config", name)
-    if os.path.exists(shipped):
-        return shipped
-    return os.path.join(_REPO_ROOT, name)
+    example = name.replace(".yaml", ".example.yaml")
+    return os.path.join(_REPO_ROOT, "config", example)
 
 
 @lru_cache(maxsize=4)

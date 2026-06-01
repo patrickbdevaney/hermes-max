@@ -189,10 +189,23 @@ DEFAULT_CAPS: dict[str, float] = {
     "draft_max_n": float(os.environ.get("CONDUCTOR_DRAFT_MAX_N", "5")),
 }
 
-CONDUCTOR_YAML = os.path.expanduser(
-    os.environ.get("CONDUCTOR_CONFIG", os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "conductor.yaml"))
-)
+# Runtime config lives in $HERMES_MAX_CONFIG_DIR (default ~/.hermes-max); the repo
+# ships only config/conductor.example.yaml. CONDUCTOR_CONFIG overrides the path.
+# Precedence: explicit env → <CONFIG_DIR>/conductor.yaml → shipped example. The file
+# is OPTIONAL — absent everywhere, the hardcoded defaults win.
+def _conductor_yaml() -> str:
+    explicit = os.environ.get("CONDUCTOR_CONFIG")
+    if explicit:
+        return os.path.expanduser(explicit)
+    cfg_dir = os.path.expanduser(os.environ.get("HERMES_MAX_CONFIG_DIR") or "~/.hermes-max")
+    user = os.path.join(cfg_dir, "conductor.yaml")
+    if os.path.exists(user):
+        return user
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(repo_root, "config", "conductor.example.yaml")
+
+
+CONDUCTOR_YAML = _conductor_yaml()
 
 
 # ── stdlib-only conductor.yaml parser (no PyYAML needed on a fresh machine) ───

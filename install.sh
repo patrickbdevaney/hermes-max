@@ -62,7 +62,7 @@ fi
 
 # ── 3. config trinity → ~/.hermes-max/ (delegated to scripts/setup.sh) ───────
 if [ "${CHECK}" = "1" ]; then
-  warn "would copy config/{inference.example,roles,modes}.yaml → ~/.hermes-max/ (skipped: --check)"
+  warn "would copy config/{inference,roles,modes,conductor}.example.yaml → \$HERMES_MAX_CONFIG_DIR (skipped: --check)"
 elif [ -f "${REPO_ROOT}/scripts/setup.sh" ]; then
   bash "${REPO_ROOT}/scripts/setup.sh" >/dev/null 2>&1 \
     && ok "config trinity present in ~/.hermes-max/ (edit those copies, not the code)" \

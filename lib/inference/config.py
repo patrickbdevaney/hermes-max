@@ -42,19 +42,24 @@ except Exception:                        # … but never hard-fail on a bare mac
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _config_dir() -> str:
+    """The runtime config directory: $HERMES_MAX_CONFIG_DIR if set, else
+    ~/.hermes-max. This is where bootstrap copies the editable config; the repo
+    ships only *.example versions in config/."""
+    return os.path.expanduser(
+        os.environ.get("HERMES_MAX_CONFIG_DIR") or "~/.hermes-max")
+
+
 def _config_path() -> str:
-    """Active config: ~/.hermes-max/inference.yaml if present, else the shipped
+    """Active config: <CONFIG_DIR>/inference.yaml if present, else the shipped
     example (which doubles as the recommended default constellation)."""
     explicit = os.environ.get("INFERENCE_CONFIG")
     if explicit and os.path.exists(os.path.expanduser(explicit)):
         return os.path.expanduser(explicit)
-    user = os.path.expanduser("~/.hermes-max/inference.yaml")
+    user = os.path.join(_config_dir(), "inference.yaml")
     if os.path.exists(user):
         return user
-    shipped = os.path.join(_REPO_ROOT, "config", "inference.example.yaml")
-    if os.path.exists(shipped):
-        return shipped
-    return os.path.join(_REPO_ROOT, "inference.example.yaml")
+    return os.path.join(_REPO_ROOT, "config", "inference.example.yaml")
 
 
 @lru_cache(maxsize=1)
