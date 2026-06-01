@@ -80,6 +80,29 @@ def cmd_meta(name: str) -> int:
     return 0
 
 
+def cmd_providers() -> int:
+    """Present/absent table for every provider in inference.yaml — what each enables
+    and how to turn it on. Used by setup.sh and `hm preflight`."""
+    from . import config
+    present = config.present_providers()
+    print(f"{'PROVIDER':<18}{'STATUS':<10}{'TIER':<10}ENABLE / COST")
+    for name, block in config.providers().items():
+        ok = name in present
+        status = "● present" if ok else "○ absent"
+        keyenv = block.get("api_key_env") or "(keyless)"
+        cost = block.get("cost") or {}
+        if config.tier(name) == "local":
+            note = "local vLLM — free, private"
+        elif config.tier(name) == "free":
+            note = f"set {keyenv} — free tier"
+        elif config.tier(name) == "frontier":
+            note = f"set {keyenv} — ${cost.get('in_per_mtok','?')}/${cost.get('out_per_mtok','?')} per M (spare frontier)"
+        else:
+            note = f"set {keyenv} — ${cost.get('in_per_mtok','?')}/${cost.get('out_per_mtok','?')} per M"
+        print(f"{name:<18}{status:<10}{config.tier(name):<10}{note}")
+    return 0
+
+
 def cmd_status_line() -> int:
     name = roles.active_mode_name()
     rep = ledger.report("today")
@@ -106,6 +129,8 @@ def main(argv: list[str]) -> int:
         return cmd_ceiling(argv[1] if len(argv) > 1 else "")
     if cmd == "meta":
         return cmd_meta(argv[1] if len(argv) > 1 else "")
+    if cmd == "providers":
+        return cmd_providers()
     if cmd == "status-line":
         return cmd_status_line()
     print(f"unknown subcommand '{cmd}'")

@@ -31,6 +31,7 @@
 #   hm cost               conductor spend + Opus sparing proof         scripts/conductor-report.sh
 #   hm eval [capability]  prove every feature works in the REAL agent  scripts/eval-battery.sh
 #                         loop (asserts real effects); one capability if named
+#   hm setup              first-run: copy config trinity + show providers  scripts/setup.sh
 #   hm install            symlink hm onto PATH (~/.local/bin)
 set -uo pipefail
 
@@ -196,7 +197,7 @@ _apply_inf_mode() {
 }
 
 usage() {
-  sed -n '3,34p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
+  sed -n '3,35p' "${HM_SELF}" | sed 's/^# \{0,1\}//'
 }
 
 _install() {
@@ -292,6 +293,8 @@ cmd="${1:-}"; shift || true
 case "${cmd}" in
   up)
     if [ -n "${HM_PRINT:-}" ]; then echo "${SCRIPTS}/start-all.sh"; exit 0; fi
+    # First-run wiring on demand: `hm up --setup` copies the config trinity.
+    case " $* " in *" --setup "*) [ -f "${SCRIPTS}/setup.sh" ] && "${SCRIPTS}/setup.sh" || true ;; esac
     # Posture: an explicit --<mode> flag switches; no flag keeps the persisted
     # posture (default 'free' on first run) and never silently escalates to paid.
     _m="$(_inf_mode_from_args "$@")"
@@ -356,6 +359,7 @@ case "${cmd}" in
     command -v hermes >/dev/null 2>&1 || { echo "✗ 'hermes' not on PATH — install/activate Hermes first."; exit 127; }
     exec hermes "$@"
     ;;
+  setup)   _dispatch "${SCRIPTS}/setup.sh" "$@" ;;
   dev)     _dev "$@" ;;
   attach)  _attach ;;
   install) _install ;;
