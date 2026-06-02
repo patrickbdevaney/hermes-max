@@ -94,6 +94,8 @@ export interface FeedState {
   _guidanceTotal: number;      // summed conductor guidance cost
   _lastRespTs: number;         // ms of last llm_response (for tok/s fallback)
   _ewmaTokps: number | null;
+  _streamId: number;           // id of the active streamed-answer item (0 = none)
+  _reasonId: number;           // id of the active streamed-reasoning item (0 = none)
 }
 
 export const initialFeed: FeedState = {
@@ -109,6 +111,8 @@ export const initialFeed: FeedState = {
   _guidanceTotal: 0,
   _lastRespTs: 0,
   _ewmaTokps: null,
+  _streamId: 0,
+  _reasonId: 0,
 };
 
 export type FeedAction =
@@ -127,6 +131,38 @@ function pushSeries(arr: number[], v: number): number[] {
   if (!isFinite(v)) return arr;
   const next = [...arr, v];
   return next.length > MAX_SERIES ? next.slice(next.length - MAX_SERIES) : next;
+}
+
+// ── Phase 2 streaming fold ──────────────────────────────────────────────────
+// One live item per turn grows as gen.* deltas arrive (the "typing" effect);
+// the row shows a live tail, the full text lives in `body` (expandable). The
+// item finalizes (stops growing) the moment any structural event arrives.
+function streamTail(t: string): string {
+  const one = t.replace(/\s+/g, " ").trim();
+  return one.length > 110 ? "…" + one.slice(-110) : one;
+}
+
+function streamInto(
+  s: FeedState, which: "_streamId" | "_reasonId",
+  kind: FeedKind, tone: Tone, icon: string, title: string, text: string, now: number,
+): FeedState {
+  const id = s[which];
+  if (id > 0) {
+    const items = s.items.map((it) =>
+      it.id === id ? { ...it, body: (it.body || "") + text, detail: streamTail((it.body || "") + text), ts: now } : it);
+    return { ...s, items };
+  }
+  const newId = s._nextId;
+  const it: FeedItem = { id: newId, kind, tone, icon, title, detail: streamTail(text), body: text, ts: now, repeat: 1 };
+  const next = [...s.items, it];
+  const capped = next.length > MAX_FEED_ITEMS ? next.slice(next.length - MAX_FEED_ITEMS) : next;
+  return { ...s, items: capped, _nextId: newId + 1, [which]: newId };
+}
+
+// A structural event ends the current generation → freeze the streamed items so
+// the next turn's tokens start fresh ones.
+function finalizeStreams(s: FeedState): FeedState {
+  return s._streamId === 0 && s._reasonId === 0 ? s : { ...s, _streamId: 0, _reasonId: 0 };
 }
 
 function ensureSteps(flow: FlowState, total: number): FlowStep[] {
@@ -180,6 +216,18 @@ function applyOne(state: FeedState, evt: EventType, data: any, now: number): Fee
     const r = push(s.items, it, s._nextId);
     s.items = r.items; s._nextId = r.nextId;
   };
+
+  // Phase 2 — streamed token deltas grow a live item; everything else is a
+  // structural event that finalizes the current stream first.
+  if (evt === "gen.token") {
+    const t = data?.text ?? data?.content ?? "";
+    return t ? streamInto(s, "_streamId", "llm", "info", "✎", "responding…", t, now) : s;
+  }
+  if (evt === "gen.reasoning" || evt === "gen.thinking") {
+    const t = data?.text ?? data?.content ?? "";
+    return t ? streamInto(s, "_reasonId", "reasoning", "muted", "✲", "thinking…", t, now) : s;
+  }
+  s = finalizeStreams(s);
 
   switch (evt) {
     case "conductor":

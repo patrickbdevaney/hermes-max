@@ -6,7 +6,7 @@ import type { EventType } from "../types";
 const EVENT_TYPES: EventType[] = [
   "token", "phase", "plan", "plan_item", "tool_call", "file_op", "shell",
   "gate", "checkpoint", "escalation", "cost", "narration", "heartbeat", "span",
-  "conductor",
+  "conductor", "gen.token", "gen.reasoning", "gen.thinking",
 ];
 
 // Memory/robustness limit (Fix D): a backend that is down should not let the browser

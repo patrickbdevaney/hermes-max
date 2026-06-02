@@ -6,7 +6,9 @@
 export type EventType =
   | "token" | "phase" | "plan" | "plan_item" | "tool_call" | "file_op"
   | "shell" | "gate" | "checkpoint" | "escalation" | "cost" | "narration"
-  | "heartbeat" | "span" | "conductor";
+  | "heartbeat" | "span" | "conductor"
+  // Phase 2 — streamed model token deltas (folded into a live feed item)
+  | "gen.token" | "gen.reasoning" | "gen.thinking";
 
 export interface Base { run_id: string; ts?: number; hms?: string }
 

@@ -59,10 +59,13 @@ export function Workshop({ project, onExit }: { project: Project; onExit: () => 
 
   function consume(m: StreamMsg) {
     setMsg(m);
-    if (m.events && m.events.length) {
-      const now = Date.now();
-      dispatch({ type: "batch", events: m.events.map((e) => ({ evt: e.event as any, data: e.data, now })) });
-    }
+    const now = Date.now();
+    // structural events + the coalesced token/reasoning deltas as synthetic gen.*
+    // → the SAME shared reducer renders them (one render path, like the web UI).
+    const evs = (m.events || []).map((e) => ({ evt: e.event as any, data: e.data, now }));
+    if (m.tokens) evs.push({ evt: "gen.token" as any, data: { text: m.tokens }, now });
+    if (m.reasoning) evs.push({ evt: "gen.reasoning" as any, data: { text: m.reasoning }, now });
+    if (evs.length) dispatch({ type: "batch", events: evs });
     if (wasRunning.current && !m.chrome.running && m.chrome.done) {
       setReceipt({ cost_usd: m.chrome.cost_usd, tokens: m.chrome.tokens });
     }

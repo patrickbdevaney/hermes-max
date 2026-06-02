@@ -212,6 +212,11 @@ def _translate(rec: dict[str, Any], run_id: str, calls: dict[str, list[int]],
         name = (rec.get("span") or "").lower()
         why = rec.get("reason") or rec.get("note") or rec.get("basis") or ""
         ret = rec.get("returned") or ""
+        if name in ("gen.token", "gen.reasoning", "gen.thinking"):
+            # Phase 2 — the model's streamed token deltas (written by the conductor's
+            # token callbacks). Pass through verbatim so both surfaces stream live.
+            out.append((name, {**base, "text": rec.get("text") or rec.get("content") or ""}))
+            return out
         if name.startswith("conductor."):
             # The conductor plugin's in-harness event feed (pre_llm_call / post_tool_call
             # / triggers / guidance / run_complete). Pass through as a typed `conductor`
