@@ -128,6 +128,8 @@ fn start(app: AppHandle, dir: String) {
         let mut offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let mut st = WorkshopStatus { running: false, phrase: "Ready when you are.".into(), ..Default::default() };
         let mut persisted = false;
+        let name = crate::projects::name_for_dir(&dir).unwrap_or_else(|| "Your project".into());
+        let mut fail_streak = 0i64;
         while !stop.load(Ordering::SeqCst) {
             if let Ok(mut f) = std::fs::File::open(&path) {
                 let len = f.metadata().map(|m| m.len()).unwrap_or(0);
@@ -153,6 +155,30 @@ fn start(app: AppHandle, dir: String) {
                             st.running = true;
                             persisted = false; // a new turn started
                         }
+                        // S4.1 — native notifications on milestone events.
+                        match ev {
+                            "verify_fail" => {
+                                fail_streak += 1;
+                                if fail_streak == 3 && crate::notify::prefs().attention {
+                                    crate::notify::send(&app, &format!("{name} needs attention"),
+                                        "Tests haven't passed — you may want to steer it.");
+                                }
+                            }
+                            "verify_pass" | "step_advance" => fail_streak = 0,
+                            "trigger" => {
+                                if crate::notify::prefs().conductor && !crate::notify::focused(&app) {
+                                    crate::notify::send(&app, &format!("Planner stepped in on {name}"),
+                                        "The cloud planner is correcting the build.");
+                                }
+                            }
+                            "done_rejected" => {
+                                if crate::notify::prefs().complete {
+                                    crate::notify::send(&app, &format!("{name}: almost done"),
+                                        "One more check before it's ready.");
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -160,8 +186,21 @@ fn start(app: AppHandle, dir: String) {
             st.cost_usd = cost;
             st.tokens = tok;
             let _ = app.emit("workshop-status", st.clone());
+            // keep the tray tooltip in step with the build (walk-away mode)
+            let tip = if st.running {
+                format!("Building {name}… step {}/{}", st.step.max(1), st.total.max(1))
+            } else if st.done {
+                format!("Hermes Studio — {name} is ready")
+            } else {
+                "Hermes Studio — idle".to_string()
+            };
+            crate::tray::set_tooltip(&app, &tip);
             if st.done && !persisted {
                 crate::projects::update_stats(&dir, st.step, st.total, st.cost_usd, st.tokens);
+                if crate::notify::prefs().complete {
+                    crate::notify::send(&app, &format!("✓ {name} is ready"),
+                        &format!("Built · ${:.2}", st.cost_usd));
+                }
                 persisted = true;
             }
             std::thread::sleep(Duration::from_millis(500));

@@ -10,6 +10,8 @@ mod keychain;
 mod config;
 mod projects;
 mod workshop;
+mod notify;
+mod tray;
 
 use tauri::Manager;
 
@@ -25,7 +27,17 @@ fn main() {
             // Start the Python sidecar (+ MCP servers) in the background and emit
             // `stack-ready` once /healthz answers; the loading screen waits on it.
             sidecar::spawn_startup(app.handle().clone());
+            // System tray for walk-away builds.
+            let _ = tray::build(app.handle());
             Ok(())
+        })
+        // Closing the window hides it (the build keeps running in the tray); Quit
+        // from the tray menu actually exits.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             sidecar::start_stack,

@@ -160,6 +160,10 @@ pub fn delete_project(id: String) -> Result<(), String> {
     save_all(&list)
 }
 
+pub fn name_for_dir(dir: &str) -> Option<String> {
+    load_all().into_iter().find(|p| p.dir == dir).map(|p| p.name)
+}
+
 /// Update a project's last-run summary from a completed workshop run (matched by
 /// directory). Drives the project card status/cost (S2) and the cost total (S5).
 pub fn update_stats(dir: &str, step: i64, total: i64, cost: f64, tokens: i64) {

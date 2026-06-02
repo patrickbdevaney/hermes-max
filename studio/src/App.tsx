@@ -44,6 +44,13 @@ export default function App() {
     return () => { if (un) un(); clearTimeout(fb); };
   }, []);
 
+  // Tray "New Project…" brings us back to the project list (S4.2).
+  useEffect(() => {
+    let un: UnlistenFn | undefined;
+    listen("tray-new-project", () => { setActive(null); setScreen("projects"); }).then((u) => (un = u));
+    return () => { if (un) un(); };
+  }, []);
+
   const refreshDetect = () => probeCapabilities().then(setDetect).catch(() => void 0);
 
   if (active) return <Workshop project={active} detect={detect} onExit={() => { setActive(null); setScreen("projects"); }} />;
