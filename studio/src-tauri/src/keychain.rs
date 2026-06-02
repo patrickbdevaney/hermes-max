@@ -15,11 +15,12 @@ pub const PROVIDER_ENVS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "GROQ_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "TOGETHER_API_KEY",
-    "OPENROUTER_API_KEY",
-    "GEMINI_API_KEY",
     "CEREBRAS_API_KEY",
+    "GEMINI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "DEEPINFRA_API_KEY",
+    "OPENROUTER_API_KEY",
+    "TOGETHER_API_KEY",
 ];
 
 pub fn store(account: &str, secret: &str) -> Result<(), String> {
@@ -42,9 +43,12 @@ fn provider_base(env: &str) -> Option<&'static str> {
         "ANTHROPIC_API_KEY" => Some("https://api.anthropic.com/v1"),
         "OPENAI_API_KEY" => Some("https://api.openai.com/v1"),
         "GROQ_API_KEY" => Some("https://api.groq.com/openai/v1"),
+        "CEREBRAS_API_KEY" => Some("https://api.cerebras.ai/v1"),
+        "GEMINI_API_KEY" => Some("https://generativelanguage.googleapis.com/v1beta/openai"),
         "DEEPSEEK_API_KEY" => Some("https://api.deepseek.com/v1"),
-        "TOGETHER_API_KEY" => Some("https://api.together.xyz/v1"),
+        "DEEPINFRA_API_KEY" => Some("https://api.deepinfra.com/v1/openai"),
         "OPENROUTER_API_KEY" => Some("https://openrouter.ai/api/v1"),
+        "TOGETHER_API_KEY" => Some("https://api.together.xyz/v1"),
         _ => None,
     }
 }

@@ -31,28 +31,34 @@ const PROVIDER_KEYS: &[(&str, &str)] = &[
     ("Anthropic", "ANTHROPIC_API_KEY"),
     ("OpenAI", "OPENAI_API_KEY"),
     ("Groq", "GROQ_API_KEY"),
-    ("DeepSeek", "DEEPSEEK_API_KEY"),
-    ("Together", "TOGETHER_API_KEY"),
-    ("OpenRouter", "OPENROUTER_API_KEY"),
-    ("Gemini", "GEMINI_API_KEY"),
     ("Cerebras", "CEREBRAS_API_KEY"),
+    ("Gemini", "GEMINI_API_KEY"),
+    ("DeepSeek", "DEEPSEEK_API_KEY"),
+    ("DeepInfra", "DEEPINFRA_API_KEY"),
+    ("OpenRouter", "OPENROUTER_API_KEY"),
+    ("Together", "TOGETHER_API_KEY"),
 ];
 
-fn endpoint_from_env() -> Option<String> {
-    for k in ["VLLM_BASE_URL", "OPENAI_BASE_URL", "HERMES_ENDPOINT"] {
-        if let Ok(v) = std::env::var(k) {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    None
+/// Look a var up in the process env first, then the repo's .env.
+fn lookup(key: &str, dotenv: &std::collections::HashMap<String, String>) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| dotenv.get(key).filter(|v| !v.trim().is_empty()).cloned())
 }
 
-/// GET {base}/models — returns (reachable, first model id).
+fn endpoint_from(dotenv: &std::collections::HashMap<String, String>) -> Option<String> {
+    ["VLLM_BASE_URL", "OPENAI_BASE_URL", "HERMES_ENDPOINT"]
+        .iter()
+        .find_map(|k| lookup(k, dotenv))
+}
+
+/// GET {base}/models — returns (reachable, first model id). A generous timeout
+/// (remote/Tailscale endpoints are slow to first byte) and 401/403 counts as
+/// REACHABLE: the server is there, it just wants a key.
 fn probe_models(base: &str) -> (Option<bool>, Option<String>) {
     let url = format!("{}/models", base.trim_end_matches('/'));
-    match ureq::get(&url).timeout(Duration::from_millis(1500)).call() {
+    match ureq::get(&url).timeout(Duration::from_secs(6)).call() {
         Ok(resp) => {
             let model = resp
                 .into_json::<serde_json::Value>()
@@ -66,6 +72,7 @@ fn probe_models(base: &str) -> (Option<bool>, Option<String>) {
                 });
             (Some(true), model)
         }
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => (Some(true), None),
         Err(_) => (Some(false), None),
     }
 }
@@ -85,22 +92,20 @@ pub fn probe_capabilities() -> DetectResult {
         None
     };
 
-    let endpoint_url = endpoint_from_env();
+    let dotenv = crate::config::repo_dotenv();
+    let endpoint_url = endpoint_from(&dotenv);
     let endpoint_configured = endpoint_url.is_some();
     let (endpoint_reachable, endpoint_model) = match &endpoint_url {
         Some(u) => probe_models(u),
         None => (None, None),
     };
 
-    // A provider counts as configured if its key is in this process's env OR in
-    // the OS keychain (where Studio stores keys; the sidecar injects them).
+    // A provider counts as configured if its key is in the process env, the
+    // repo's .env, OR the OS keychain (where Studio stores keys).
     let stored = crate::keychain::configured();
     let keys_configured: Vec<String> = PROVIDER_KEYS
         .iter()
-        .filter(|(_, env)| {
-            std::env::var(env).map(|v| !v.trim().is_empty()).unwrap_or(false)
-                || stored.iter().any(|s| s == env)
-        })
+        .filter(|(_, env)| lookup(env, &dotenv).is_some() || stored.iter().any(|s| s == env))
         .map(|(name, _)| name.to_string())
         .collect();
 

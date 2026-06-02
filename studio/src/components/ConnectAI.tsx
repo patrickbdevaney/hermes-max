@@ -15,10 +15,10 @@ export function ConnectAI({ onConnected }: { onConnected: () => void }) {
   const [provider, setProvider] = useState<Provider | null>(null);
   const [key, setKey] = useState("");
 
-  async function testEndpoint() {
+  async function testEndpoint(force = false) {
     setBusy(true); setErr(null);
     try {
-      const r = await configureEndpoint(url.trim());
+      const r = await configureEndpoint(url.trim(), force);
       if (r.ok) { setOk({ model: r.model ?? null }); onConnected(); }
       else setErr(r.error ?? "Couldn't connect.");
     } catch (e) { setErr((e as Error).message); }
@@ -50,11 +50,17 @@ export function ConnectAI({ onConnected }: { onConnected: () => void }) {
         <div className="flex gap-2">
           <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://localhost:11434/v1"
             className="flex-1 rounded-md border border-ink-700 bg-ink-input px-3 py-2 font-mono text-sm text-mist-100 outline-none focus:border-accent" />
-          <button type="button" onClick={testEndpoint} disabled={busy || !url.trim()}
+          <button type="button" onClick={() => testEndpoint(false)} disabled={busy || !url.trim()}
             className="rounded-md border border-ink-700 px-3 py-2 text-xs text-mist-200 hover:bg-ink-850 disabled:opacity-40">
             {busy ? "Testing…" : "Test connection"}
           </button>
         </div>
+        {err && url.trim() && (
+          <button type="button" onClick={() => testEndpoint(true)} disabled={busy}
+            className="text-[11px] text-accent hover:underline disabled:opacity-40">
+            Use this endpoint anyway →
+          </button>
+        )}
       </div>
 
       <div className="flex items-center gap-2 text-[11px] text-mist-500">

@@ -44,21 +44,48 @@ pub fn save(cfg: &StudioConfig) -> Result<(), String> {
     std::fs::write(conf_path(), json).map_err(|e| e.to_string())
 }
 
-/// The environment the Python sidecar (and the agent it spawns) should run with:
-/// the configured endpoint + every stored provider key.
-pub fn agent_env() -> Vec<(String, String)> {
-    let mut env = Vec::new();
-    let cfg = load();
-    if let Some(url) = cfg.endpoint_url.filter(|u| !u.trim().is_empty()) {
-        env.push(("VLLM_BASE_URL".to_string(), url.clone()));
-        env.push(("OPENAI_BASE_URL".to_string(), url));
-    }
-    for e in keychain::PROVIDER_ENVS {
-        if let Some(v) = keychain::get(e) {
-            env.push((e.to_string(), v));
+/// Parse the repo's .env (KEY=VALUE, `export ` and quotes tolerated) so Studio
+/// inherits whatever the repo already has configured — endpoint + provider keys.
+pub fn repo_dotenv() -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    let path = crate::sidecar::repo_root().join(".env");
+    if let Ok(s) = std::fs::read_to_string(path) {
+        for line in s.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                let k = k.trim().trim_start_matches("export ").trim();
+                let v = v.trim().trim_matches('"').trim_matches('\'');
+                if !k.is_empty() {
+                    m.insert(k.to_string(), v.to_string());
+                }
+            }
         }
     }
-    env
+    m
+}
+
+/// The environment the Python sidecar (and the agent it spawns) should run with.
+/// The repo's ENTIRE .env is inherited (the stdlib backend may not load it
+/// itself), then Studio's own choices are layered ON TOP: keychain keys and the
+/// studio.conf endpoint win. So a user never re-enters what the repo already
+/// holds, but anything they set in Studio overrides it.
+pub fn agent_env() -> Vec<(String, String)> {
+    let mut map = repo_dotenv(); // base: everything already in the repo's .env
+    let cfg = load();
+
+    for e in keychain::PROVIDER_ENVS {
+        if let Some(v) = keychain::get(e) {
+            map.insert(e.to_string(), v);
+        }
+    }
+    if let Some(url) = cfg.endpoint_url.filter(|u| !u.trim().is_empty()) {
+        map.insert("VLLM_BASE_URL".to_string(), url.clone());
+        map.insert("OPENAI_BASE_URL".to_string(), url);
+    }
+    map.into_iter().collect()
 }
 
 #[derive(Serialize)]
@@ -82,20 +109,22 @@ pub fn save_studio_settings(settings: serde_json::Value) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn configure_endpoint(url: String, mgr: State<SidecarManager>) -> ApplyResult {
-    match crate::detect::probe_endpoint(url.clone()) {
-        p if p.ok => {
-            let mut cfg = load();
-            cfg.endpoint_url = Some(url);
-            cfg.provider = None;
-            if let Err(e) = save(&cfg) {
-                return ApplyResult { ok: false, error: Some(e), model: None };
-            }
-            mgr.restart(); // backend picks up the new endpoint
-            ApplyResult { ok: true, error: None, model: p.model }
-        }
-        p => ApplyResult { ok: false, error: p.error, model: None },
+pub fn configure_endpoint(url: String, force: bool, mgr: State<SidecarManager>) -> ApplyResult {
+    let probe = crate::detect::probe_endpoint(url.clone());
+    if !probe.ok && !force {
+        // couldn't confirm it — let the UI offer "use it anyway"
+        return ApplyResult { ok: false, error: probe.error, model: None };
     }
+    let mut cfg = load();
+    cfg.endpoint_url = Some(url);
+    cfg.provider = None;
+    if let Err(e) = save(&cfg) {
+        return ApplyResult { ok: false, error: Some(e), model: None };
+    }
+    mgr.restart(); // backend picks up the new endpoint
+    // Saved either way; on a forced save we couldn't confirm a model list, which
+    // is fine (the server may need a key or be slow) — the endpoint is used.
+    ApplyResult { ok: true, error: None, model: probe.model }
 }
 
 #[tauri::command]
