@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import { listProjects, createProject, pickDirectory, type Project } from "../lib/projects";
 import { probeCapabilities, type DetectResult } from "../lib/detect";
+import { activeRuns } from "../lib/project";
 import { computeShadow, fmtMoney } from "../lib/shadow";
 import { ProjectCard } from "../components/ProjectCard";
 
@@ -12,9 +13,21 @@ export function Projects({ onOpen, onSettings }: { onOpen: (p: Project) => void;
   const [projects, setProjects] = useState<Project[]>([]);
   const [detect, setDetect] = useState<DetectResult | null>(null);
   const [creating, setCreating] = useState(false);
+  const [liveDirs, setLiveDirs] = useState<Set<string>>(new Set()); // Phase 6 mission-control
 
   const refresh = () => listProjects().then(setProjects).catch(() => setProjects([]));
   useEffect(() => { refresh(); probeCapabilities().then(setDetect).catch(() => void 0); }, []);
+
+  // Glance across projects: which are building RIGHT NOW (any origin), polled live.
+  useEffect(() => {
+    let stop = false;
+    const tick = () => activeRuns()
+      .then((r) => { if (!stop) setLiveDirs(new Set(r.runs.filter((x) => x.active && x.cwd).map((x) => x.cwd as string))); })
+      .catch(() => void 0);
+    tick();
+    const id = setInterval(tick, 3000);
+    return () => { stop = true; clearInterval(id); };
+  }, []);
 
   const aiDown = detect && detect.suggested_mode === "NeedsSetup";
 
@@ -51,7 +64,7 @@ export function Projects({ onOpen, onSettings }: { onOpen: (p: Project) => void;
           className="flex min-h-[120px] flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-ink-700 text-sm text-mist-300 transition-colors hover:border-accent hover:text-mist-100">
           <span className="text-2xl">+</span> New Project
         </button>
-        {projects.map((p) => <ProjectCard key={p.id} project={p} onOpen={onOpen} onChanged={refresh} />)}
+        {projects.map((p) => <ProjectCard key={p.id} project={p} live={liveDirs.has(p.dir)} onOpen={onOpen} onChanged={refresh} />)}
       </div>
 
       {creating && <NewProject onCancel={() => setCreating(false)} onCreated={(p) => { setCreating(false); refresh(); onOpen(p); }} />}

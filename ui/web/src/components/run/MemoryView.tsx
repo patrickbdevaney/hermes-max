@@ -42,10 +42,10 @@ export function MemoryView({ flow, turns }: { flow: FlowState; turns: number }) 
       <div className="rounded-lg border border-conductor/30 bg-conductor/5 p-3">
         <div className="flex items-center gap-2">
           <span className="text-conductor" aria-hidden>⚓</span>
-          <span className="text-sm font-medium text-mist-100">Execution contract (the anchor)</span>
+          <span className="text-sm font-medium text-mist-100">What the agent is holding onto</span>
         </div>
         <p className="mt-1 text-xs text-mist-400">
-          Re-injected before every LLM call — so it survives context compaction and the agent doesn't drift.
+          The agent re-reads this every turn — so even after a long run it keeps the plan in mind and doesn't drift.
         </p>
         {lastContract && (
           <pre className="mt-2 max-h-40 overflow-auto rounded-md border border-ink-800 bg-ink-input p-2 font-mono text-[11px] leading-relaxed text-mist-300 whitespace-pre-wrap">

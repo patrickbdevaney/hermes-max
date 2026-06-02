@@ -18,9 +18,24 @@ fn post(path: &str, body: Value) -> Result<Value, String> {
     }
 }
 
+fn get(path: &str) -> Result<Value, String> {
+    let url = format!("http://127.0.0.1:{}{}", crate::sidecar::PORT, path);
+    match ureq::get(&url).set("X-HMX-Secret", &crate::secret::ensure()).call() {
+        Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[tauri::command]
 pub fn run_task(cwd: String, prompt: String, mode: Option<String>, approval_gate: bool) -> Result<Value, String> {
     post("/api/run", json!({ "cwd": cwd, "prompt": prompt, "mode": mode, "approval_gate": approval_gate }))
+}
+
+/// All runs the backend knows about (Phase 6 multi-project glance — map to
+/// projects by cwd to show which are live).
+#[tauri::command]
+pub fn active_runs() -> Result<Value, String> {
+    get("/api/runs")
 }
 
 #[tauri::command]

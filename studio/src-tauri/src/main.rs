@@ -12,6 +12,7 @@ mod projects;
 mod stream;   // v2: the single Rust SSE→Channel consumer (replaces workshop.rs)
 mod control;  // v2: control plane (Rust→loopback POST with the per-launch secret)
 mod secret;   // v2: per-launch shared secret
+mod project;  // v2: project memory + checkpoints/fork (Phase 4)
 mod notify;
 mod tray;
 
@@ -72,6 +73,10 @@ fn main() {
             control::set_mode,
             control::approve_guidance,
             control::mcp_control,
+            control::active_runs,
+            project::project_memory,
+            project::checkpoints,
+            project::fork_checkpoint,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Hermes Studio")

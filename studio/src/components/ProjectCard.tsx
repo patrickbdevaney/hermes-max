@@ -21,10 +21,11 @@ function ago(ts?: number | null): string {
   return `Last built ${Math.round(s / 86400)}d ago`;
 }
 
-export function ProjectCard({ project, onOpen, onChanged }:
-  { project: Project; onOpen: (p: Project) => void; onChanged: () => void }) {
+export function ProjectCard({ project, onOpen, onChanged, live }:
+  { project: Project; onOpen: (p: Project) => void; onChanged: () => void; live?: boolean }) {
   const [menu, setMenu] = useState(false);
-  const st = STATUS[project.last_status ?? "ready"] ?? STATUS.ready;
+  // A live run anywhere in this project's dir wins over the stored status (Phase 6).
+  const st = live ? STATUS.building : (STATUS[project.last_status ?? "ready"] ?? STATUS.ready);
 
   const cost = project.lifetime_cost_usd ?? 0;
   const sv = computeShadow(cost, project.lifetime_tokens ?? 0);

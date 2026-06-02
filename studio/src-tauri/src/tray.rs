@@ -56,3 +56,32 @@ pub fn set_tooltip(app: &AppHandle, text: &str) {
         let _ = tray.set_tooltip(Some(text));
     }
 }
+
+/// Phase 5.3 — encode build state in the tray icon GLYPH (a coloured dot), not
+/// just the tooltip: Linux libayatana has no hover/leave events, so the tooltip
+/// alone is invisible until clicked. building=gold · needs-you=amber · done=green
+/// · idle=slate.
+pub fn set_state(app: &AppHandle, state: &str) {
+    let (r, g, b) = match state {
+        "building" => (217u8, 165, 33),
+        "needs" => (230, 194, 0),
+        "done" => (95, 215, 95),
+        _ => (120, 120, 130),
+    };
+    let (w, h) = (22u32, 22u32);
+    let (cx, cy, rad) = (11.0f64, 11.0, 9.0);
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let dx = x as f64 - cx;
+            let dy = y as f64 - cy;
+            if dx * dx + dy * dy <= rad * rad {
+                let i = ((y * w + x) * 4) as usize;
+                px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = 255;
+            }
+        }
+    }
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_icon(Some(tauri::image::Image::new_owned(px, w, h)));
+    }
+}

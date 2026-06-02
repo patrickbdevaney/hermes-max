@@ -4,7 +4,14 @@
 import { useEffect, useState } from "react";
 import { probeCapabilities, type DetectResult } from "../lib/detect";
 import { loadStudioConfig, saveStudioSettings } from "../lib/studioConfig";
+import { getDepth, setDepth, type Depth } from "../lib/settings";
 import { ConnectAI } from "../components/ConnectAI";
+
+const DEPTHS: { id: Depth; label: string; hint: string }[] = [
+  { id: "appliance", label: "Appliance", hint: "Just the stream — idea in, product out." },
+  { id: "standard", label: "Standard", hint: "+ conductor swimlane and flow graph." },
+  { id: "developer", label: "Developer", hint: "+ memory view and the full surface." },
+];
 
 type Prefs = Record<string, boolean>;
 const DEFAULTS: Prefs = {
@@ -21,6 +28,7 @@ export function Settings({ detect, onBack, onChanged }:
   const [prefs, setPrefs] = useState<Prefs>(DEFAULTS);
   const [d, setD] = useState<DetectResult | null>(detect);
   const [changing, setChanging] = useState(false);
+  const [depth, setDepthState] = useState<Depth>(getDepth());
 
   useEffect(() => {
     loadStudioConfig().then((c) => setPrefs({ ...DEFAULTS, ...(c.settings as Prefs) })).catch(() => void 0);
@@ -66,6 +74,19 @@ export function Settings({ detect, onBack, onChanged }:
         <Toggle label="Build complete" checked={prefs.notify_complete} onChange={(v) => set("notify_complete", v)} />
         <Toggle label="Needs attention" hint="Tests failing repeatedly." checked={prefs.notify_attention} onChange={(v) => set("notify_attention", v)} />
         <Toggle label="Planner stepped in" hint="When the window isn't focused." checked={prefs.notify_conductor} onChange={(v) => set("notify_conductor", v)} />
+      </Section>
+
+      <Section title="Depth">
+        <p className="-mt-1 mb-1 text-[11px] text-mist-500">How much of the machinery to show. The appliance default keeps it simple.</p>
+        {DEPTHS.map((opt) => (
+          <button key={opt.id} type="button" onClick={() => { setDepth(opt.id); setDepthState(opt.id); }}
+            className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-xs transition-colors ${
+              depth === opt.id ? "border-accent bg-accent-soft/15" : "border-ink-800 hover:bg-ink-850"}`}>
+            <span><span className={depth === opt.id ? "text-accent" : "text-mist-100"}>{opt.label}</span>
+              <span className="ml-2 text-mist-500">{opt.hint}</span></span>
+            {depth === opt.id && <span className="text-accent">✓</span>}
+          </button>
+        ))}
       </Section>
 
       <Section title="Display">

@@ -151,6 +151,7 @@ pub fn start_run_stream(app: AppHandle, run_id: String, on_event: Channel<Stream
         let mut last_cost = Instant::now() - Duration::from_secs(2);
         let mut fail_streak = 0i64;
         let mut persisted = false;
+        let mut last_state = String::new();
 
         let do_flush = |tok_buf: &mut String, rz_buf: &mut String, evs: &mut Vec<Value>,
                         chrome: &Chrome, done: bool, ch: &Channel<StreamMsg>| {
@@ -229,6 +230,9 @@ pub fn start_run_stream(app: AppHandle, run_id: String, on_event: Channel<Stream
                 chrome.cost_usd = cost; chrome.tokens = tok;
                 last_cost = Instant::now();
             }
+            // tray glyph by state, only on change (Phase 5.3)
+            let want = if fail_streak >= 3 { "needs" } else if chrome.running { "building" } else { "idle" };
+            if want != last_state { crate::tray::set_state(&app, want); last_state = want.to_string(); }
             if last_flush.elapsed() >= Duration::from_millis(20) {
                 do_flush(&mut tok_buf, &mut rz_buf, &mut evs, &chrome, false, &on_event);
                 last_flush = Instant::now();
@@ -241,6 +245,7 @@ pub fn start_run_stream(app: AppHandle, run_id: String, on_event: Channel<Stream
         do_flush(&mut tok_buf, &mut rz_buf, &mut evs, &chrome, chrome.done, &on_event);
         let tip = if chrome.done { format!("Hermes Studio — {project_name} is ready") } else { "Hermes Studio — idle".to_string() };
         crate::tray::set_tooltip(&app, &tip);
+        crate::tray::set_state(&app, if chrome.done { "done" } else { "idle" });
         if chrome.done && !persisted {
             if let Some(ref dir) = cwd {
                 crate::projects::update_stats(dir, chrome.step, chrome.total, chrome.cost_usd, chrome.tokens);
