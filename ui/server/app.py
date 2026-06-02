@@ -21,6 +21,20 @@ _UI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # .../ui
 _DIST = os.path.join(_UI_DIR, "web", "dist")
 
 
+def _studio_secret() -> str:
+    """The Hermes Studio per-launch secret: env first (set when Studio spawns the
+    sidecar), then the 0600 file (so an ADOPTED server — started by `hm ui` before
+    Studio — can validate too). Empty string ⇒ no secret configured."""
+    s = os.environ.get("HERMES_STUDIO_SECRET")
+    if s:
+        return s
+    try:
+        with open(os.path.expanduser("~/.hermes-max/studio.secret")) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 class Handler(BaseHTTPRequestHandler):
     # Set by the server factory in __main__.py.
     launch_token: str = ""     # opt-in bearer (--token), for remote/Tailscale exposure
@@ -58,6 +72,15 @@ class Handler(BaseHTTPRequestHandler):
         vals = query.get("token")
         return vals[0] if vals else None
 
+    def _studio_secret_ok(self) -> bool:
+        """Hermes Studio (the Tauri shell) authenticates control POSTs with a
+        per-launch shared secret instead of Origin+CSRF — on Linux the tauri://
+        origin sends a BLANK Origin (wry #366), so Origin allowlisting can't work.
+        The secret is a 0600 file a DNS-rebinding attacker can't read, so it closes
+        the same hole the Origin/CSRF guard does."""
+        sent = self.headers.get("X-HMX-Secret")
+        return bool(sent) and security.token_ok(sent, _studio_secret())
+
     def _api_authorized(self, query: dict, *, is_post: bool) -> str | None:
         """Localhost hardening, token-free by default. Three guards:
 
@@ -67,14 +90,17 @@ class Handler(BaseHTTPRequestHandler):
           • A SameSite=Strict double-submit cookie (hmx_csrf) is also required on
             POSTs — a cross-site page can't read our cookie to echo it back.
 
-        The launch token is NOT required to open the page; it only kicks in when the
+        A valid X-HMX-Secret (Hermes Studio's per-launch secret) is accepted in
+        lieu of the Origin+CSRF POST guard — the Tauri shell's control path. The
+        launch token is NOT required to open the page; it only kicks in when the
         operator opts into `--token` to expose the UI beyond loopback (Tailscale)."""
         origin = self.headers.get("Origin")
+        secret_ok = self._studio_secret_ok()
         if not security.host_ok(self.headers.get("Host")):
             return "bad Host (loopback only)"
-        if not security.origin_ok(origin):
+        if not secret_ok and not security.origin_ok(origin):
             return "bad Origin (loopback only)"
-        if is_post:
+        if is_post and not secret_ok:
             if not origin:
                 return "POST requires an Origin (loopback)"
             if self.csrf_token and not security.token_ok(self.headers.get("X-HMX-CSRF"), self.csrf_token):
@@ -193,9 +219,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             return self._send_json(config_api.apply_config(body))
         if path.startswith("/api/run/") and path.endswith("/signal"):
-            # Phase 5.2/5.4 — interrupt / pause / resume a live run.
+            # interrupt a live run (SIGTERM the process group — the destructive control).
             run_id = unquote(path[len("/api/run/"):-len("/signal")]).strip("/")
             return self._send_json(runs.signal_run(run_id, body.get("action") or ""))
+        for verb, fn in (("steer", runs.steer_run), ("pause", runs.pause_run),
+                         ("resume", runs.resume_run), ("approve", runs.approve_run)):
+            suffix = "/" + verb
+            if path.startswith("/api/run/") and path.endswith(suffix):
+                # v2 control plane: cooperative steer/pause/resume + conductor approval,
+                # honoured by the conductor between steps (flags under .hermes-conductor/).
+                run_id = unquote(path[len("/api/run/"):-len(suffix)]).strip("/")
+                return self._send_json(fn(run_id, body))
         if path == "/api/plan":
             # Phase 5.4 — write an edited PLAN.md (mid-run edits trigger re-planning
             # the next time the harness re-reads its living plan).

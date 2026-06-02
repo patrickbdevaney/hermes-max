@@ -27,6 +27,8 @@ export interface StackStatus {
   mcp_servers: [string, boolean][];
   hermes_present: boolean;
   active_run: string | null;
+  needs_repo: boolean;       // repo_root unresolved → first-run must set it (v2 1.6)
+  adopted_python: boolean;   // adopted an already-running server (v2 1.5)
 }
 
 export const probeCapabilities = () => invoke<DetectResult>("probe_capabilities");

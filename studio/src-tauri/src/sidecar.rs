@@ -14,8 +14,9 @@ pub const PORT: u16 = 7080;
 
 #[derive(Default)]
 pub struct SidecarManager {
-    children: Mutex<Vec<Child>>,
+    children: Mutex<Vec<Child>>, // ONLY processes we spawned (adopted ones are never added → never killed)
     started: Mutex<bool>,
+    spawned_python: Mutex<bool>, // did WE spawn the python server (vs. adopt a running one)?
 }
 
 #[derive(Serialize, Clone)]
@@ -24,6 +25,8 @@ pub struct StackStatus {
     pub mcp_servers: Vec<(String, bool)>,
     pub hermes_present: bool,
     pub active_run: Option<String>,
+    pub needs_repo: bool,       // repo_root unresolved → first-run must set it (1.6)
+    pub adopted_python: bool,   // we adopted an already-running server (1.5)
 }
 
 // ── small helpers (shared with detect.rs) ────────────────────────────────────
@@ -43,29 +46,36 @@ fn log_path(name: &str) -> PathBuf {
     dir.join(name)
 }
 
-/// Repo root containing `ui/server`: env override, then walk up from the binary,
-/// then a compile-time dev fallback (studio/src-tauri -> repo root).
-pub fn repo_root() -> PathBuf {
+fn valid_root(p: &std::path::Path) -> bool {
+    p.join("ui").join("server").is_dir()
+}
+
+/// A repo root that ACTUALLY contains ui/server, or None. Order (Phase 1.6):
+/// studio.conf (first-run answer) → $HERMES_MAX_ROOT → walk up from the binary →
+/// compile-time dev fallback. None on a clean machine → first-run must resolve it.
+pub fn resolved_root() -> Option<PathBuf> {
+    if let Some(r) = crate::config::load().repo_root {
+        let p = PathBuf::from(&r);
+        if valid_root(&p) { return Some(p); }
+    }
     if let Ok(r) = std::env::var("HERMES_MAX_ROOT") {
         let p = PathBuf::from(r);
-        if p.join("ui").join("server").exists() {
-            return p;
-        }
+        if valid_root(&p) { return Some(p); }
     }
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(|p| p.to_path_buf());
         while let Some(d) = dir {
-            if d.join("ui").join("server").exists() {
-                return d;
-            }
+            if valid_root(&d) { return Some(d); }
             dir = d.parent().map(|p| p.to_path_buf());
         }
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+    dev.filter(|p| valid_root(p))
+}
+
+/// Best-effort root for non-critical callers (logs, `hm` invocations).
+pub fn repo_root() -> PathBuf {
+    resolved_root().unwrap_or_else(|| home().join("hermes-max"))
 }
 
 fn healthz_ok() -> bool {
@@ -117,57 +127,73 @@ impl SidecarManager {
         which("hermes").is_some()
     }
 
-    /// Start the stack (idempotent). Returns once /healthz answers or 5s elapse.
+    /// Start the stack (idempotent), ADOPTING anything already running instead of
+    /// double-starting it (Phase 1.5). Refuses (returns needs_repo) until the
+    /// repo root is resolved (Phase 1.6). Mints the per-launch secret (Phase 1.4).
     pub fn start(&self) -> StackStatus {
+        let root = match resolved_root() {
+            Some(r) => r,
+            None => return self.status(), // needs_repo=true; first-run must resolve it
+        };
+        let secret = crate::secret::ensure(); // mint + persist the 0600 secret file
         let mut started = self.started.lock().unwrap();
         if !*started {
-            let root = repo_root();
-            // 1. Python backend (only if not already serving, e.g. `hm ui` running)
-            if !healthz_ok() {
+            // 1. Python backend — ADOPT if /healthz already answers (hm ui up).
+            if healthz_ok() {
+                *self.spawned_python.lock().unwrap() = false;
+            } else if let Ok(child) = spawn_logged(
+                Command::new("python3")
+                    .args(["-m", "ui.server", "--no-open", "--port", &PORT.to_string()])
+                    .current_dir(&root)
+                    .env("PYTHONPATH", &root)
+                    .env("HERMES_MAX_ROOT", &root)
+                    .env("HERMES_STUDIO_SECRET", &secret)
+                    .envs(crate::config::agent_env()),
+                "python-server.log",
+            ) {
+                self.children.lock().unwrap().push(child);
+                *self.spawned_python.lock().unwrap() = true;
+                for _ in 0..25 {
+                    if healthz_ok() { break; }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+            // 2. MCP servers — ADOPT if any MCP port is already open (hm dev/up up),
+            // otherwise best-effort `hm dev`.
+            let mcp_up = (9101..=9115u16).any(tcp_open);
+            if !mcp_up && which("hm").is_some() {
                 if let Ok(child) = spawn_logged(
-                    Command::new("python3")
-                        .args(["-m", "ui.server", "--no-open", "--port", &PORT.to_string()])
-                        .current_dir(&root)
-                        .env("PYTHONPATH", &root)
-                        // inject the configured endpoint + stored provider keys so the
-                        // backend (and the agent it spawns) can reach the AI
-                        .envs(crate::config::agent_env()),
-                    "python-server.log",
+                    Command::new("hm").arg("dev").current_dir(&root).env("HERMES_MAX_ROOT", &root),
+                    "mcp.log",
                 ) {
                     self.children.lock().unwrap().push(child);
                 }
             }
-            // 2. poll health up to ~5s
-            for _ in 0..25 {
-                if healthz_ok() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            // 3. MCP servers via `hm dev` (best-effort; only if hm is on PATH)
-            if which("hm").is_some() {
-                if let Ok(child) = spawn_logged(Command::new("hm").arg("dev").current_dir(&root), "mcp.log") {
-                    self.children.lock().unwrap().push(child);
-                }
-            }
-            *started = true;
+            *started = true; // reconciled to OBSERVED reality below via status()
         }
         self.status()
     }
 
     pub fn status(&self) -> StackStatus {
         let mcp = (9101..=9115u16).map(|p| (format!(":{p}"), tcp_open(p))).collect();
+        let py = healthz_ok();
+        let spawned = *self.spawned_python.lock().unwrap();
         StackStatus {
-            python_server: healthz_ok(),
+            python_server: py,
             mcp_servers: mcp,
             hermes_present: self.hermes_present(),
             active_run: None,
+            needs_repo: resolved_root().is_none(),
+            adopted_python: py && !spawned,
         }
     }
 
-    /// Stop then start — used after the AI source changes so the backend reloads
-    /// its environment (endpoint / keys).
+    /// Graceful restart (Phase 1.8): REFUSE while a run is streaming — never kill
+    /// the backend out from under a live run view. Only restarts our own sidecars.
     pub fn restart(&self) -> StackStatus {
+        if crate::stream::is_run_active() {
+            return self.status();
+        }
         self.stop_all();
         self.start()
     }
@@ -175,7 +201,7 @@ impl SidecarManager {
     pub fn stop_all(&self) {
         let mut kids = self.children.lock().unwrap();
         for child in kids.iter() {
-            term_group(child.id());
+            term_group(child.id()); // only processes WE spawned are in here
         }
         std::thread::sleep(Duration::from_millis(300)); // grace period
         for child in kids.iter_mut() {
@@ -183,6 +209,7 @@ impl SidecarManager {
             let _ = child.wait();
         }
         kids.clear();
+        *self.spawned_python.lock().unwrap() = false;
         if let Ok(mut s) = self.started.lock() {
             *s = false;
         }

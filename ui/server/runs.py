@@ -237,6 +237,7 @@ def create_run(cwd: str, prompt: str, mode: str | None,
                         "agent yourself, or use the 'live' run to attach.")
     else:
         env = dict(os.environ)
+        env["HERMES_RUN_ID"] = run_id  # let the conductor/agent tag work by run (v2)
         if mode:
             env["CONDUCTOR_MODE"] = mode
         # Phase 5.3 — optional human-in-the-loop: ask the in-harness conductor to
@@ -325,6 +326,73 @@ _SIGNALS = {
     "pause": getattr(signal, "SIGSTOP", signal.SIGTERM),
     "resume": getattr(signal, "SIGCONT", signal.SIGTERM),
 }
+
+
+# ── v2 cooperative controls (flags under <cwd>/.hermes-conductor/) ────────────
+# The conductor honours these between steps (see plugins/conductor). Cooperative,
+# not OS-level — the right scope for a detached one-shot agent (Hard Decision #6).
+def _conductor_dir(run_id: str) -> Optional[str]:
+    run = get_run(run_id)
+    cwd = (run or {}).get("cwd")
+    if not cwd:
+        return None
+    d = os.path.join(cwd, ".hermes-conductor")
+    try:
+        os.makedirs(d, exist_ok=True)
+        return d
+    except OSError:
+        return None
+
+
+def pause_run(run_id: str, _body: dict[str, Any]) -> dict[str, Any]:
+    d = _conductor_dir(run_id)
+    if not d:
+        return {"ok": False, "error": "unknown run"}
+    try:
+        open(os.path.join(d, "pause"), "w").close()
+        return {"ok": True, "paused": True}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+
+
+def resume_run(run_id: str, _body: dict[str, Any]) -> dict[str, Any]:
+    d = _conductor_dir(run_id)
+    if not d:
+        return {"ok": False, "error": "unknown run"}
+    try:
+        p = os.path.join(d, "pause")
+        if os.path.exists(p):
+            os.remove(p)
+        return {"ok": True, "paused": False}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+
+
+def steer_run(run_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    d = _conductor_dir(run_id)
+    text = (body.get("text") or "").strip()
+    if not d:
+        return {"ok": False, "error": "unknown run"}
+    if not text:
+        return {"ok": False, "error": "empty steer"}
+    try:
+        with open(os.path.join(d, "steer.txt"), "a") as f:
+            f.write(text + "\n")
+        return {"ok": True, "queued": True}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+
+
+def approve_run(run_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    d = _conductor_dir(run_id)
+    if not d:
+        return {"ok": False, "error": "unknown run"}
+    try:
+        with open(os.path.join(d, "approve"), "w") as f:
+            f.write("1" if body.get("approve") else "0")
+        return {"ok": True, "approve": bool(body.get("approve"))}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
 
 
 def signal_run(run_id: str, action: str) -> dict[str, Any]:

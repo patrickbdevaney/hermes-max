@@ -4,10 +4,11 @@
 // re-priced at the configured frontier rate), framed as delight not a metric.
 import { useEffect } from "react";
 import { computeShadow, rateLabel, fmtMoney, FRONTIER } from "../lib/shadow";
-import type { WorkshopStatus } from "../lib/workshop";
+
+export interface RunCost { cost_usd: number; tokens: number }
 
 export function CompletionCard({ name, status, onClose, onOpenFolder }:
-  { name: string; status: WorkshopStatus; onClose: () => void; onOpenFolder: () => void }) {
+  { name: string; status: RunCost; onClose: () => void; onOpenFolder: () => void }) {
   const r = computeShadow(status.cost_usd, status.tokens);
 
   // auto-dismiss after a few seconds (dismissable sooner)

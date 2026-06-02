@@ -17,6 +17,11 @@ pub struct StudioConfig {
     pub endpoint_url: Option<String>,
     #[serde(default)]
     pub provider: Option<String>, // active cloud provider id (e.g. "groq")
+    // Where hermes-max lives — resolved at first run (Phase 1.6). Closes the
+    // builds-vs-installs gap: HERMES_MAX_ROOT / walk-up / compile-time fallback
+    // all fail on a clean machine, so we ask once and persist it.
+    #[serde(default)]
+    pub repo_root: Option<String>,
     // Display / notification prefs (S4) — kept here so one file holds all of it.
     #[serde(default)]
     pub settings: serde_json::Value,
@@ -142,6 +147,30 @@ pub fn save_provider_key(provider: String, env: String, key: String, mgr: State<
         }
         Err(e) => ApplyResult { ok: false, error: Some(e), model: None },
     }
+}
+
+/// First-run repo-root resolution (Phase 1.6). Validates that `ui/server` lives
+/// under the given path before persisting it; the sidecar refuses to spawn until
+/// this resolves.
+#[tauri::command]
+pub fn set_repo_root(path: String) -> Result<StudioConfig, String> {
+    let base = std::path::PathBuf::from(shellexpand(&path));
+    if !base.join("ui").join("server").is_dir() {
+        return Err("That folder doesn't look like hermes-max — I couldn't find ui/server inside it.".into());
+    }
+    let mut cfg = load();
+    cfg.repo_root = Some(base.to_string_lossy().to_string());
+    save(&cfg)?;
+    Ok(cfg)
+}
+
+fn shellexpand(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(h) = std::env::var_os("HOME") {
+            return format!("{}/{}", h.to_string_lossy(), rest);
+        }
+    }
+    p.to_string()
 }
 
 #[tauri::command]

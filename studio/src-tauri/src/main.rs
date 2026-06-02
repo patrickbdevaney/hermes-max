@@ -9,7 +9,9 @@ mod detect;
 mod keychain;
 mod config;
 mod projects;
-mod workshop;
+mod stream;   // v2: the single Rust SSE→Channel consumer (replaces workshop.rs)
+mod control;  // v2: control plane (Rust→loopback POST with the per-launch secret)
+mod secret;   // v2: per-launch shared secret
 mod notify;
 mod tray;
 
@@ -22,7 +24,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(sidecar::SidecarManager::default())
-        .manage(workshop::WorkshopTailer::default())
+        .manage(stream::StreamState::default())
         .setup(|app| {
             // Start the Python sidecar (+ MCP servers) in the background and emit
             // `stack-ready` once /healthz answers; the loading screen waits on it.
@@ -49,6 +51,7 @@ fn main() {
             config::save_studio_settings,
             config::configure_endpoint,
             config::save_provider_key,
+            config::set_repo_root,
             config::restart_stack,
             config::open_url,
             projects::list_projects,
@@ -57,8 +60,18 @@ fn main() {
             projects::delete_project,
             projects::open_path,
             projects::pick_directory,
-            workshop::start_workshop,
-            workshop::stop_workshop,
+            stream::start_run_stream,
+            stream::stop_run_stream,
+            control::run_task,
+            control::continue_run,
+            control::steer_run,
+            control::pause_run,
+            control::resume_run,
+            control::interrupt_run,
+            control::write_plan,
+            control::set_mode,
+            control::approve_guidance,
+            control::mcp_control,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Hermes Studio")

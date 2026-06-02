@@ -212,6 +212,27 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
     turns_on = int(state.get("turns_on_current_step", 0))
     guidance = state.get("pending_guidance")
 
+    # ── v2 cooperative controls (flags written by Hermes Studio via ui/server) ──
+    # These are honoured BETWEEN steps; they cannot hard-block the model call, so
+    # they cooperatively instruct the agent (Hard Decision #6).
+    cdir = _state_path(cwd).parent  # <cwd>/.hermes-conductor
+    paused = (cdir / "pause").exists()
+    steer = None
+    try:
+        sp = cdir / "steer.txt"
+        if sp.exists():
+            steer = sp.read_text(encoding="utf-8").strip() or None
+            sp.unlink()
+    except OSError:
+        pass
+    approve_gate = os.environ.get("CONDUCTOR_REQUIRE_APPROVAL") == "1"
+    approved = True
+    if approve_gate:
+        try:
+            approved = (cdir / "approve").read_text(encoding="utf-8").strip() == "1"
+        except OSError:
+            approved = False
+
     lines = [
         f"## Execution State [conductor, turn {state.get('total_turns', 0) + 1}]",
         f"Current step: {step}/{total or '?'} — {sd.get('description', '?')}",
@@ -219,10 +240,24 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
         f"Turns on this step: {turns_on}",
         f"Last verify: {state.get('last_verify_result', 'not run')}",
     ]
-    if guidance:
+    if paused:
+        lines = ["## ⏸ OPERATOR PAUSE",
+                 "The operator has paused this run. Do NOT begin new work. Finish only the "
+                 "current action if one is mid-flight, then STOP and wait — do not start the "
+                 "next step until the pause is lifted.", ""] + lines
+        _emit("paused", {"step": step})
+    if steer:
+        lines += ["", "## Operator steer (apply NOW, non-destructive):", steer]
+        _emit("steer", {"step": step, "text": steer[:200]})
+    if guidance and approved:
         lines += ["", "## Frontier Guidance (from conductor — apply NOW):", str(guidance)]
         state["pending_guidance"] = None
         _emit("guidance_applied", {"step": step})
+    elif guidance and not approved:
+        # approval gate on but not yet approved → hold the guidance, tell the user
+        lines += ["", "## Guidance awaiting operator approval — pause and request approval "
+                  "before proceeding on this step."]
+        _emit("awaiting_approval", {"step": step})
     if sd.get("complexity") == "HIGH" and turns_on == 0:
         lines.append("⚠ This step is HIGH complexity — call reasoning_escalation before "
                      "writing code, or set conductor_requested=true in EXECUTION_STATE.json.")

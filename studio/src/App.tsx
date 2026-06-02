@@ -10,15 +10,16 @@
 import { useEffect, useState } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { IS_TAURI, listen } from "./lib/tauri";
-import { probeCapabilities, type DetectResult } from "./lib/detect";
+import { probeCapabilities, stackHealth, startStack, type DetectResult } from "./lib/detect";
 import type { Project } from "./lib/projects";
 import { Loading } from "./screens/Loading";
+import { RepoSetup } from "./screens/RepoSetup";
 import { FirstRun } from "./screens/FirstRun";
 import { Projects } from "./screens/Projects";
 import { Settings } from "./screens/Settings";
 import { Workshop } from "./screens/Workshop";
 
-type Screen = "loading" | "firstrun" | "projects" | "settings";
+type Screen = "loading" | "reposetup" | "firstrun" | "projects" | "settings";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
@@ -32,6 +33,10 @@ export default function App() {
       if (settled) return;
       settled = true;
       try {
+        // v2 1.6: if the repo root isn't resolved, the sidecar can't start —
+        // resolve it first before anything else.
+        const health = await stackHealth();
+        if (health.needs_repo) { setScreen("reposetup"); return; }
         const d = await probeCapabilities();
         setDetect(d);
         setScreen(d.suggested_mode === "NeedsSetup" || !d.hermes_present ? "firstrun" : "projects");
@@ -53,8 +58,20 @@ export default function App() {
 
   const refreshDetect = () => probeCapabilities().then(setDetect).catch(() => void 0);
 
-  if (active) return <Workshop project={active} detect={detect} onExit={() => { setActive(null); setScreen("projects"); }} />;
+  // After the repo is resolved, start the sidecar now and re-route.
+  async function repoResolved() {
+    setScreen("loading");
+    try { await startStack(); } catch { /* surfaced below */ }
+    try {
+      const d = await probeCapabilities();
+      setDetect(d);
+      setScreen(d.suggested_mode === "NeedsSetup" || !d.hermes_present ? "firstrun" : "projects");
+    } catch { setScreen("firstrun"); }
+  }
+
+  if (active) return <Workshop project={active} onExit={() => { setActive(null); setScreen("projects"); }} />;
   if (screen === "loading") return <Loading />;
+  if (screen === "reposetup") return <RepoSetup onResolved={repoResolved} />;
   if (screen === "firstrun") return <FirstRun detect={detect} onReady={() => { refreshDetect(); setScreen("projects"); }} />;
   if (screen === "settings") return <Settings detect={detect} onBack={() => setScreen("projects")} onChanged={refreshDetect} />;
   return <Projects onOpen={setActive} onSettings={() => setScreen("settings")} />;
