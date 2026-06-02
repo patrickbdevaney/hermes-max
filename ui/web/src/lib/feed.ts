@@ -18,12 +18,13 @@ import type {
 export const MAX_FEED_ITEMS = 500;     // circular buffer; oldest dropped
 export const MAX_GRAPH_NODES = 200;    // flow steps + conductor nodes ceiling
 export const BATCH_FLUSH_MS = 100;     // SSE coalescing window (App-side)
+export const MAX_SERIES = 64;          // sparkline sample ring (tok/s, cost-rate)
 
 // ── the typed feed item (Fix A) ─────────────────────────────────────────────
 export type FeedKind =
   | "user" | "llm" | "tool" | "file" | "verify" | "conductor" | "guidance"
   | "step" | "complete" | "narration" | "gate" | "checkpoint" | "escalation"
-  | "cost" | "shell" | "phase";
+  | "cost" | "shell" | "phase" | "reasoning";
 
 export type Tone = "info" | "good" | "warn" | "bad" | "accent" | "muted";
 
@@ -35,6 +36,7 @@ export interface FeedItem {
   title: string;
   detail?: string;
   meta?: string;         // right-aligned secondary (timing / model / tokens)
+  body?: string;         // multi-line payload for the expandable detail (diff / code)
   step?: number;
   ts: number;            // ms
   hms?: string;
@@ -60,8 +62,15 @@ export interface FlowState {
 export interface ChromeMetrics {
   step: number; total: number; turns: number;
   cost_usd: number; tokps: number | null;
-  model?: string; tier?: string;
+  model?: string; tier?: string;              // planner identity (from guidance)
   running: boolean;
+  // planner / executor cost split — the seed of the cost thesis, made visible
+  // in the persistent chrome. Planner = the rare cloud guidance calls; executor
+  // = the local worker absorbing the bulk of tokens (typically free).
+  plannerTokens: number; plannerCost: number;
+  execProvider?: string; execFreeTok: number; execPaidTok: number;
+  // capped sample rings driving the live sparklines (tok/s trend, cost-rate).
+  tokpsHist: number[]; costHist: number[];
 }
 
 export interface FeedState {
@@ -79,7 +88,11 @@ export interface FeedState {
 export const initialFeed: FeedState = {
   items: [],
   flow: { total: 0, current: 1, steps: [], conductors: [], done: false },
-  chrome: { step: 1, total: 0, turns: 0, cost_usd: 0, tokps: null, running: true },
+  chrome: {
+    step: 1, total: 0, turns: 0, cost_usd: 0, tokps: null, running: true,
+    plannerTokens: 0, plannerCost: 0, execFreeTok: 0, execPaidTok: 0,
+    tokpsHist: [], costHist: [],
+  },
   _nextId: 1,
   _costEventTotal: 0,
   _guidanceTotal: 0,
@@ -96,6 +109,13 @@ export type FeedAction =
 function trunc(s: unknown, n: number): string {
   const str = String(s ?? "").replace(/\s+/g, " ").trim();
   return str.length <= n ? str : str.slice(0, n - 1) + "…";
+}
+
+// capped sample ring for the sparklines — O(1) bounded memory (Fix D).
+function pushSeries(arr: number[], v: number): number[] {
+  if (!isFinite(v)) return arr;
+  const next = [...arr, v];
+  return next.length > MAX_SERIES ? next.slice(next.length - MAX_SERIES) : next;
 }
 
 function ensureSteps(flow: FlowState, total: number): FlowStep[] {
@@ -170,7 +190,7 @@ function applyOne(state: FeedState, evt: EventType, data: any, now: number): Fee
     case "file_op": {
       const d = data as FileOpEvt;
       add({ kind: "file", tone: "accent", icon: "✎", title: trunc(d.path, 80),
-            detail: trunc(d.diff_summary || d.op, 80), meta: d.op, ts: now, hms: d.hms });
+            detail: trunc(d.diff_summary || d.op, 80), body: d.diff_summary, meta: d.op, ts: now, hms: d.hms });
       return s;
     }
     case "shell": {
@@ -216,7 +236,14 @@ function applyOne(state: FeedState, evt: EventType, data: any, now: number): Fee
     case "cost": {
       const d = data as CostEvt;
       s._costEventTotal = d.total_usd;
-      s.chrome = { ...s.chrome, cost_usd: Math.max(s._costEventTotal, s._guidanceTotal) };
+      const cost_usd = Math.max(s._costEventTotal, s._guidanceTotal);
+      s.chrome = {
+        ...s.chrome, cost_usd,
+        execProvider: d.provider ?? s.chrome.execProvider,
+        execFreeTok: d.free_tok ?? s.chrome.execFreeTok,
+        execPaidTok: d.paid_tok ?? s.chrome.execPaidTok,
+        costHist: pushSeries(s.chrome.costHist, cost_usd),
+      };
       return s;
     }
     default:
@@ -255,7 +282,19 @@ function applyConductor(
         }
       }
       s._lastRespTs = now;
-      chrome = { ...chrome, tokps };
+      chrome = {
+        ...chrome, tokps,
+        tokpsHist: tokps != null ? pushSeries(chrome.tokpsHist, tokps) : chrome.tokpsHist,
+      };
+      // Reasoning collapses to a one-line, de-emphasized summary the instant the
+      // turn completes (1.2). Live token-by-token thinking isn't folded into the
+      // feed model, so we surface the honest post-hoc summary with a token badge.
+      const think = d.thinking_tokens ?? 0;
+      if (think > 0) {
+        add({ kind: "reasoning", tone: "muted", icon: "✲",
+              title: `thought for ${think.toLocaleString()} tokens`,
+              meta: d.model || undefined, ts: now, hms: d.hms, step });
+      }
       break;
     }
     case "tool":
@@ -300,7 +339,12 @@ function applyConductor(
         return c;
       });
       flow = { ...flow, conductors };
-      chrome = { ...chrome, cost_usd: Math.max(s._costEventTotal, s._guidanceTotal), model: d.model || chrome.model, tier: d.tier || chrome.tier };
+      chrome = {
+        ...chrome, cost_usd: Math.max(s._costEventTotal, s._guidanceTotal),
+        model: d.model || chrome.model, tier: d.tier || chrome.tier,
+        plannerCost: s._guidanceTotal,
+        plannerTokens: chrome.plannerTokens + (d.tokens ?? 0),
+      };
       break;
     }
     case "step_advance": {

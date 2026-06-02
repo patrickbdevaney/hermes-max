@@ -48,7 +48,7 @@ export function RunPage({ runId, view, feed, conn, status, onLaunch, onContinue,
   const live = conn === "live";
   // Deep-linked to a run the server no longer has: the stream can't open and nothing
   // streams. Tell the truth rather than spin forever.
-  const replayLost = conn === "reconnecting" && view.lastEventTs === 0 && view.turns.every((t) => t.entries.length === 0);
+  const replayLost = (conn === "reconnecting" || conn === "lost") && view.lastEventTs === 0 && view.turns.every((t) => t.entries.length === 0);
 
   return (
     <div className="flex h-full flex-col">
@@ -97,12 +97,12 @@ export function RunPage({ runId, view, feed, conn, status, onLaunch, onContinue,
 
       {/* persistent run chrome: step / turns / cost / tok-s — visible in every tab */}
       <div className="pt-3">
-        <RunChrome chrome={feed.chrome} live={live} />
+        <RunChrome chrome={feed.chrome} live={live} conn={conn} />
       </div>
 
       {/* the active view */}
       <div className="min-h-0 flex-1 py-3">
-        {tab === "feed" && <VirtualFeed items={feed.items} live={live} />}
+        {tab === "feed" && <VirtualFeed items={feed.items} live={live} flow={feed.flow} activeStep={feed.flow.current} />}
         {tab === "flow" && <FlowGraph flow={feed.flow} live={live} />}
         {tab === "turns" && (
           <div className="h-full space-y-5 overflow-y-auto pr-1">

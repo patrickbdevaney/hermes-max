@@ -14,7 +14,7 @@ const EVENT_TYPES: EventType[] = [
 // give up and surface a terminal "reconnecting" so the UI can stop showing a live dot.
 const MAX_SSE_RECONNECTS = 10;
 
-export type ConnState = "connecting" | "live" | "reconnecting";
+export type ConnState = "connecting" | "live" | "reconnecting" | "lost";
 
 export interface EventStream {
   close: () => void;
@@ -34,11 +34,13 @@ export function openStream(
   es.onerror = () => {
     if (closed) return;
     reconnects += 1;
-    onConn("reconnecting");
     // EventSource auto-retries; only intervene once we've exhausted the budget.
     if (reconnects >= MAX_SSE_RECONNECTS) {
       closed = true;
       es.close();
+      onConn("lost");
+    } else {
+      onConn("reconnecting");
     }
   };
 
