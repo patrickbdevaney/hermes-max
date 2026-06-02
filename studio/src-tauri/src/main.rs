@@ -8,6 +8,7 @@ mod sidecar;
 mod detect;
 mod keychain;
 mod config;
+mod projects;
 
 use tauri::Manager;
 
@@ -36,6 +37,12 @@ fn main() {
             config::save_provider_key,
             config::restart_stack,
             config::open_url,
+            projects::list_projects,
+            projects::create_project,
+            projects::rename_project,
+            projects::delete_project,
+            projects::open_path,
+            projects::pick_directory,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Hermes Studio")
