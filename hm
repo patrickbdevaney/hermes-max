@@ -253,6 +253,14 @@ _help_short() {
   cat <<'EOF'
 hermes-max — agentic coding harness
 
+  Pick your mode
+    have a GPU?       hm mode free-full-local   free cascade plans ($0), V4-Pro fallback,
+                                                local executes — best GPU mode (recommended)
+                      hm mode full-local        reliable V4-Pro planner, local executes (~$1-3/mo)
+    no GPU?           hm mode full              V4-Pro plans + V4-Flash executes (~$17/mo)
+    want $0 always?   hm mode free              free cascade plans + local executes (quality varies)
+    (then: hm up · hm run "task" · hm dev)
+
   Getting started
     hm up [--free|--full]     start the stack in a profile/mode
                                 --free = own a GPU (Profile A) · --full = no GPU (Profile B)

@@ -115,6 +115,39 @@ chain = cfg["role_chains"].get("synth", [])
 allowed = set(res.resolve_chain(chain, cfg["providers"], env))
 free = sum(1 for p in chain if cfg["providers"].get(p, {}).get("tier") == "free")
 paid = sum(1 for p in chain if cfg["providers"].get(p, {}).get("tier") == "paid")
+# plan/exec/cost summary, mode-aware (the executor + cost come from the FABRIC mode).
+sys.path.insert(0, sys.argv[1])
+fmode = exec_line = cost_line = ""; ceiling = ""
+try:
+    from lib.inference import roles
+    fmode = roles.active_mode_name()
+    meta = roles.mode_meta(fmode)
+    ceiling = meta.get("inference_mode", "")
+    b = roles.executor_backend(fmode)
+    host = (b.get("base_url") or "").split("//", 1)[-1].split("/", 1)[0]
+    loc = "local" if b.get("local") else "cloud"
+    if b.get("local") and host and not host.startswith(("localhost", "127.0.0.1")):
+        loc = "remote"
+    exec_line = f"{b.get('provider', '?')} ({loc}){(' @ ' + host) if host else ''}  {b.get('model_id', '')}"
+    cost_line = meta.get("monthly_cost", "?")
+except Exception:
+    pass
+# plan kind reflects the CEILING (free → no paid fallback; full/frontier → V4-Pro fallback).
+if fmode == "full-local":
+    plan_kind = "V4-Pro first (paid), free cascade fallback"
+elif ceiling == "free":
+    plan_kind = "free cascade ($0, no paid fallback)"
+elif ceiling in ("full", "frontier"):
+    plan_kind = "free cascade → V4-Pro fallback"
+elif ceiling == "local":
+    plan_kind = "local only"
+else:
+    plan_kind = "free cascade"
+print(f"  plan   {plan_kind}")
+if exec_line:
+    print(f"  exec   {exec_line}")
+if cost_line:
+    print(f"  cost   {cost_line}/mo  ·  $0 while the free planner tier has capacity")
 print(f"  synth cascade  ({free} free → {paid} paid; 429 falls through):")
 for i, pid in enumerate(chain, 1):
     p = cfg["providers"].get(pid, {})

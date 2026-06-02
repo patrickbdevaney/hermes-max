@@ -67,11 +67,11 @@ providers:
       #    frontier rungs; a 429 on one falls through to the next before any paid
       #    token. All verified live in the OpenRouter catalog 2026-06-01.
       synth_kimi:     { id: "moonshotai/kimi-k2.6:free",               ctx: 262144 }
-      synth_qwencoder:{ id: "qwen/qwen3-coder:free",                   ctx: 1048576 }
+      synth_qwencoder: { id: "qwen/qwen3-coder:free",                   ctx: 1048576 }
       synth_nemotron: { id: "nvidia/nemotron-3-super-120b-a12b:free",  ctx: 1000000 }
       synth_qwennext: { id: "qwen/qwen3-next-80b-a3b-instruct:free",   ctx: 262144 }
       synth_glm:      { id: "z-ai/glm-4.5-air:free",                   ctx: 131072 }
-      synth_gptoss120:{ id: "openai/gpt-oss-120b:free",               ctx: 131072 }
+      synth_gptoss120: { id: "openai/gpt-oss-120b:free",               ctx: 131072 }
     cost:   { in_per_mtok: 0.0, out_per_mtok: 0.0 }   # :free models = $0 (rate-limited)
     limits: { rpm: 20, rpd: 1000 }                    # 1000/day needs the one-time $10 deposit
     notes: ":free roster rotates; ids are config so you can swap in 30s when a model leaves"

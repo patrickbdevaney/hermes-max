@@ -151,6 +151,23 @@ def conductor_synthesize(prompt: str, max_tokens: int | None = None) -> dict:
 
 @mcp.tool()
 @_threaded
+def reasoning_escalation(question: str, context: str = "", budget: str = "standard") -> dict:
+    """Ask a LARGER reasoning model a TARGETED question — frontier reasoning on demand
+    for the local executor when it's unsure about a design decision, an invariant, or a
+    test strategy for a complex property. NOT for every call (expensive/slow) — for the
+    specific moments a second opinion changes the next action.
+
+      budget="standard" → fast, $0 (the free synth cascade, modest token cap)
+      budget="deep"     → thorough (free cascade → V4-Pro paid fallback, larger cap)
+
+    Pass the precise question + the relevant code/context. Returns {ok, answer, model,
+    provider, tier, tokens, thinking_tok} — the answer string is what you act on. Stays
+    $0 whenever the free tier has capacity; pays only when every free rung is 429'd."""
+    return conductor_core.reasoning_escalation(question, context, budget)
+
+
+@mcp.tool()
+@_threaded
 def parallel_draft_pool(prompt: str, n: int | None = None,
                         max_tokens: int | None = None) -> dict:
     """Fan a draft brief out across the FREE/cheap parallel_draft POOL concurrently

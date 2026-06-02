@@ -37,6 +37,26 @@ modes:
       research_synth:  [openrouter.synth_free, cerebras.synth_fast, local_vllm.driver]
       code_frontier:   []
 
+  free-full-local:               # GPU HYBRID — free cascade plans ($0), V4-Pro fallback, local executes
+    requires_gpu: true
+    monthly_cost: "$0-3"
+    inference_mode: full         # ceiling allows the V4-Pro fallback AFTER the free cascade 429s
+    quickstart_rank: 1           # the recommended GPU mode
+    free_uplift_eligible: true
+    posture: >
+      Free OpenRouter planner cascade (6 frontier rungs, $0) plans; if every free rung is
+      rate-limited it falls back to DeepInfra V4-Pro (~$0.02/plan); the local model always
+      executes. The best GPU mode: $0 when the free tier has capacity, pennies when it
+      does not. Pairs with --free-uplift for on-demand reasoning escalation.
+    chains:
+      code_plan:       [openrouter.synth_free, openrouter.plan_free, deepinfra.planner, deepseek_direct.planner, local_vllm.driver]
+      code_execute:    [local_vllm.driver]
+      code_steer:      [groq.fast_mid, openrouter.extract_free, local_vllm.driver]
+      code_repair:     [groq.fast_mid, local_vllm.driver]
+      research_fanout: [groq.fast_filter, groq.fast_mid, openrouter.extract_free]
+      research_synth:  [openrouter.synth_free, cerebras.synth_fast, local_vllm.driver]
+      code_frontier:   []
+
   full-local:                    # 2nd — V4-Pro plans, local executes (~$1.50/mo)
     requires_gpu: true
     monthly_cost: "~$1.50"

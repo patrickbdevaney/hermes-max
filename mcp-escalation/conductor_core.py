@@ -289,6 +289,46 @@ _THINKING_BUDGET = {
 }
 
 
+def _fabric_mode() -> str:
+    """The active FABRIC mode name (free / free-full-local / full-local / …), read
+    live from the mode file. Distinct from CONDUCTOR_MODE (the tier ceiling) — used
+    so full-local can prefer the paid synth rung over the free cascade."""
+    f = os.path.expanduser(os.environ.get("HERMES_MODE_FILE", "~/.hermes-max/mode"))
+    try:
+        with open(f) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def reasoning_escalation(question: str, context: str = "", budget: str = "standard") -> dict[str, Any]:
+    """A targeted second opinion from a larger reasoning model (Mode 3). The executor
+    calls this when it's unsure about a design decision, an invariant, or a test
+    strategy — frontier reasoning on demand, without the full planner/executor split.
+
+      budget=standard → fast, $0 (the free synth cascade, modest token cap)
+      budget=deep     → thorough (free cascade → V4-Pro paid fallback, larger cap)
+
+    Returns {ok, answer, model, provider, tier, tokens, thinking_tok}. Never raises;
+    walks the same free-first synth cascade so it stays $0 whenever the free tier has
+    capacity, paying only when every free rung is rate-limited."""
+    mt = 1024 if budget != "deep" else 4096
+    prompt = ("You are a senior engineer giving a targeted second opinion. Answer "
+              "concisely and concretely.\n\n"
+              f"QUESTION:\n{question}\n\nRELEVANT CONTEXT:\n{(context or '')[:8000]}")
+    r = run_role("synth", prompt=prompt, max_tokens=mt)
+    prov = r.get("provider")
+    tier = (reg.load_config()["providers"].get(prov, {}) or {}).get("tier", "?") if prov else "?"
+    return {
+        "ok": bool(r.get("ok")),
+        "answer": r.get("content") or r.get("reason") or "",
+        "model": r.get("model"), "provider": prov, "tier": tier,
+        "tokens": int((r.get("usage") or {}).get("completion_tokens", 0) or 0),
+        "thinking_tok": int(r.get("thinking_tok", 0) or 0),
+        "budget": budget,
+    }
+
+
 def _reasoning_body(base_url: str, budget: int) -> dict[str, Any] | None:
     """A provider-appropriate reasoning param, sent ONLY where it's known-safe so an
     unknown field never 400s a provider. OpenRouter accepts `reasoning.max_tokens`."""
@@ -363,6 +403,11 @@ def run_role(role: str, messages: list[dict] | None = None, *, prompt: str | Non
     chain = cfg["role_chains"].get(role, [])
     env = dict(os.environ)
     present = resolver.resolve_chain(chain, providers, env)
+    # full-local mode promises V4-Pro's planning quality — try PAID synth rungs first
+    # (a stable sort), so the planner doesn't hand back a free-cascade plan instead.
+    # (free / free-full-local leave the free-first cascade order untouched.)
+    if role == "synth" and _fabric_mode() == "full-local":
+        present.sort(key=lambda pid: 0 if providers.get(pid, {}).get("tier") == "paid" else 1)
     if not present:
         return {"ok": False, "proceed_local": True, "role": role, "role_active": False,
                 "reason": f"role '{role}' is OFF (no present provider key in its chain) "

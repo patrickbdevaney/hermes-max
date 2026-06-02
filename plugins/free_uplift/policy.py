@@ -70,9 +70,15 @@ class FreeUpliftPlugin:
 
     # ── the hook ─────────────────────────────────────────────────────────────
     def post_verify_hook(self, file: str, plan: Any, completed: Any,
-                         router: Optional[Callable[..., Any]] = None) -> dict[str, Any]:
+                         router: Optional[Callable[..., Any]] = None,
+                         verify_result: Any = None) -> dict[str, Any]:
         """Returns {"proceed": True} (CLEAN / skipped) or {"proceed": False,
-        "flag": "..."} (a concrete coherence issue). Never raises."""
+        "flag": "..."} (a concrete coherence issue). Never raises.
+
+        Enhanced (Mode 3): when the cheap Kimi coherence check FLAGs an issue OR the
+        verify gate passed with THIN property tests (<3), escalate to a larger free
+        reasoning model (reasoning_escalation) for a deeper second opinion — frontier
+        reasoning on demand, only at the moments it's warranted."""
         try:
             # hard caps — never burn the daily budget on one task/file
             if self._task_calls >= self.max_per_task:
@@ -95,14 +101,59 @@ class FreeUpliftPlugin:
             if not res.get("ok"):
                 return {"proceed": True, "skipped": "uplift_unavailable"}
             text = (res.get("text") or "").strip()
-            if text.upper().startswith("FLAG"):
-                flag = text.split(":", 1)[1].strip() if ":" in text else text
-                self._span("free_uplift_flagged", file, flag)
-                return {"proceed": False, "flag": flag, "file": file}
+            flagged = text.upper().startswith("FLAG")
+            flag = (text.split(":", 1)[1].strip() if ":" in text else text) if flagged else ""
+
+            # Thin property coverage? verify_result may be a dict or an object.
+            ptc = 0
+            if isinstance(verify_result, dict):
+                ptc = int(verify_result.get("property_test_count", 0) or 0)
+            elif verify_result is not None:
+                ptc = int(getattr(verify_result, "property_test_count", 0) or 0)
+
+            # Deeper second opinion when coherence flags OR property tests are thin.
+            if flagged or (verify_result is not None and ptc < 3):
+                deep = self._deep_review(file, plan, completed)
+                if flagged:
+                    self._span("free_uplift_flagged", file, flag)
+                    return {"proceed": False, "flag": flag, "file": file, "deep_review": deep}
+                self._span("free_uplift_clean", file, "deep-reviewed (thin tests)")
+                return {"proceed": True, "deep_review": deep}
+
             self._span("free_uplift_clean", file, "")
             return {"proceed": True}
         except Exception:
             return {"proceed": True, "skipped": "error"}
+
+    def _deep_review(self, file: str, plan: Any, completed: Any) -> Optional[dict[str, Any]]:
+        """Escalate to a larger free reasoning model for a deeper correctness review.
+        Best-effort: free tier first, $0; logs an `uplift·deep` livelog line with the
+        model + token count. Returns the reasoning model's verdict (or None)."""
+        try:
+            import conductor_core  # local import; mcp-escalation on path below
+        except Exception:
+            _esc = os.path.join(_ROOT, "mcp-escalation")
+            if _esc not in sys.path:
+                sys.path.insert(0, _esc)
+            try:
+                import conductor_core  # type: ignore
+            except Exception:
+                return None
+        r = conductor_core.reasoning_escalation(
+            question=("Review this implementation for correctness issues the tests "
+                      "might miss (edge cases, invariants, concurrency, error paths)."),
+            context=self._context(file, plan, completed), budget="standard")
+        try:
+            from lib import livelog
+            tier = r.get("tier", "?")
+            livelog.tool_ok(f"uplift·deep", secs=None,
+                            ret={"file": file, "model": r.get("model"),
+                                 "provider": r.get("provider"), "tier": tier,
+                                 "tokens": r.get("tokens", 0)})
+        except Exception:
+            pass
+        self._span("free_uplift_deep", file, f"{r.get('provider')}/{r.get('model')}")
+        return r
 
     # ── helpers ──────────────────────────────────────────────────────────────
     def _context(self, file: str, plan: Any, completed: Any) -> str:
