@@ -101,6 +101,27 @@ case "${CMODE}" in
 esac
 echo "── conductor (cloud tiers) ──"
 echo "  ${D}mode${Z} ${CMODE}  ·  ${D}live tiers${Z}${tiers:- (none present)}"
+# Synth (planner) cascade: the ordered free→paid rungs, present-gated. A 429 on a
+# free rung falls through to the next before any paid token is spent.
+CONDUCTOR_MODE="${CMODE}" python3 - "${REPO_ROOT}" <<'PY' 2>/dev/null || true
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "mcp-escalation"))
+try:
+    import conductor_registry as reg, conductor_resolver as res
+except Exception:
+    sys.exit(0)
+cfg = reg.load_config(); env = dict(os.environ)
+chain = cfg["role_chains"].get("synth", [])
+allowed = set(res.resolve_chain(chain, cfg["providers"], env))
+free = sum(1 for p in chain if cfg["providers"].get(p, {}).get("tier") == "free")
+paid = sum(1 for p in chain if cfg["providers"].get(p, {}).get("tier") == "paid")
+print(f"  synth cascade  ({free} free → {paid} paid; 429 falls through):")
+for i, pid in enumerate(chain, 1):
+    p = cfg["providers"].get(pid, {})
+    tier = p.get("tier", "?"); model = p.get("models", {}).get("synth", "?")
+    mark = "\033[32m●\033[0m" if pid in allowed else "\033[2m○\033[0m"
+    print(f"    {i} {mark} {pid:<22} {tier:<5} {model}")
+PY
 FRONTIER_STATE="${HERMES_MAX_STATE_DIR:-${HOME}/.hermes-max}/conductor/frontier.json"
 FRONTIER_STATE="${FRONTIER_STATE/#\~/$HOME}"
 if [ "${CMODE}" = "frontier" ] && [ -f "${FRONTIER_STATE}" ]; then

@@ -17,7 +17,7 @@
 #   steer default: cheap-reliable-first — paid V4-Flash BEFORE the fragile free
 #                  tiers (corrected from the operator's own pricing).
 roles:
-  synth: [openrouter, deepinfra, fireworks, together, deepseek, moonshot, anthropic]
+  synth: [openrouter, openrouter_qwen3coder, openrouter_nemotron, openrouter_qwen3next, openrouter_glm, openrouter_gptoss, deepinfra, deepseek]
   steer: [openrouter, deepinfra, cerebras, groq, gemini]
   escalate: [anthropic]
 

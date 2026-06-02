@@ -159,6 +159,59 @@ PROVIDERS: dict[str, dict[str, Any]] = {
                   "synth": {"in": 0.0, "out": 0.0},
                   "draft": {"in": 0.0, "out": 0.0}},
     },
+    # ── the FREE-TIER PLANNER CASCADE — 5 more frontier-size $0 OpenRouter rungs ─
+    # Each is its own registry rung (independent upstream model pool), so a 429 on
+    # one falls through to the next BEFORE any paid token is spent. All verified to
+    # exist as genuine `:free` ids in the OpenRouter catalog on 2026-06-01. (The
+    # spec's minimax-m2.5:free / deepseek-v4-flash:free / deepseek-r1-0528:free are
+    # NOT free on OpenRouter — substituted with real free frontier models.)
+    "openrouter_qwen3coder": {  # 1M ctx, strongest free coding model
+        "base_url": "https://openrouter.ai/api/v1", "env_key_name": "OPENROUTER_API_KEY",
+        "openai_compatible": True,
+        "models": {"synth": "qwen/qwen3-coder:free", "steer": "qwen/qwen3-coder:free",
+                   "draft": "qwen/qwen3-coder:free"},
+        "max_ctx": 1_048_576, "rpm": None, "rpd": 1_000, "tpd": None,
+        "billing_region": "US", "trains_on_data": False,
+        "price": {"synth": {"in": 0.0, "out": 0.0}},
+    },
+    "openrouter_nemotron": {  # 120B, 1M ctx, 60% SWE-Bench, open weights
+        "base_url": "https://openrouter.ai/api/v1", "env_key_name": "OPENROUTER_API_KEY",
+        "openai_compatible": True,
+        "models": {"synth": "nvidia/nemotron-3-super-120b-a12b:free",
+                   "steer": "nvidia/nemotron-3-super-120b-a12b:free",
+                   "draft": "nvidia/nemotron-3-super-120b-a12b:free"},
+        "max_ctx": 1_000_000, "rpm": None, "rpd": 1_000, "tpd": None,
+        "billing_region": "US", "trains_on_data": False,
+        "price": {"synth": {"in": 0.0, "out": 0.0}},
+    },
+    "openrouter_qwen3next": {  # 80B-A3B, 262K ctx
+        "base_url": "https://openrouter.ai/api/v1", "env_key_name": "OPENROUTER_API_KEY",
+        "openai_compatible": True,
+        "models": {"synth": "qwen/qwen3-next-80b-a3b-instruct:free",
+                   "steer": "qwen/qwen3-next-80b-a3b-instruct:free",
+                   "draft": "qwen/qwen3-next-80b-a3b-instruct:free"},
+        "max_ctx": 262_144, "rpm": None, "rpd": 1_000, "tpd": None,
+        "billing_region": "US", "trains_on_data": False,
+        "price": {"synth": {"in": 0.0, "out": 0.0}},
+    },
+    "openrouter_glm": {  # GLM-4.5-Air, 131K ctx, strong reasoner
+        "base_url": "https://openrouter.ai/api/v1", "env_key_name": "OPENROUTER_API_KEY",
+        "openai_compatible": True,
+        "models": {"synth": "z-ai/glm-4.5-air:free", "steer": "z-ai/glm-4.5-air:free",
+                   "draft": "z-ai/glm-4.5-air:free"},
+        "max_ctx": 131_072, "rpm": None, "rpd": 1_000, "tpd": None,
+        "billing_region": "US", "trains_on_data": False,
+        "price": {"synth": {"in": 0.0, "out": 0.0}},
+    },
+    "openrouter_gptoss": {  # gpt-oss-120b, 131K ctx, open reasoning
+        "base_url": "https://openrouter.ai/api/v1", "env_key_name": "OPENROUTER_API_KEY",
+        "openai_compatible": True,
+        "models": {"synth": "openai/gpt-oss-120b:free", "steer": "openai/gpt-oss-120b:free",
+                   "draft": "openai/gpt-oss-120b:free"},
+        "max_ctx": 131_072, "rpm": None, "rpd": 1_000, "tpd": None,
+        "billing_region": "US", "trains_on_data": False,
+        "price": {"synth": {"in": 0.0, "out": 0.0}},
+    },
 }
 
 # ── spend-TIER tags (for CONDUCTOR_MODE) — free-tier vs paid providers ────────
@@ -167,7 +220,11 @@ PROVIDERS: dict[str, dict[str, Any]] = {
 # Independent of which keys are present (a present DeepInfra key is IGNORED in
 # `free` mode). Derived once in load_config() so adding a provider needs only its
 # id here if it's free; everything else defaults to "paid".
-FREE_TIER_PROVIDERS: set[str] = {"cerebras", "groq", "gemini", "openrouter"}
+FREE_TIER_PROVIDERS: set[str] = {
+    "cerebras", "groq", "gemini",
+    "openrouter", "openrouter_qwen3coder", "openrouter_nemotron",
+    "openrouter_qwen3next", "openrouter_glm", "openrouter_gptoss",
+}
 # FRONTIER-tier providers are eligible ONLY in CONDUCTOR_MODE=frontier (never in
 # `full`). Opus 4.8 (anthropic) is the only one: this is what keeps the expensive
 # rung opt-in by `--frontier` and never reachable via `--full` or a synth fallthrough.
@@ -182,7 +239,11 @@ FRONTIER_TIER_PROVIDERS: set[str] = {"anthropic"}
 DEFAULT_ROLE_CHAINS: dict[str, list[str]] = {
     # synth deliberately does NOT include anthropic — Opus is escalation-only, via
     # the three-gated frontier flow, never a synth fallthrough.
-    "synth": ["openrouter", "deepinfra", "fireworks", "together", "deepseek", "moonshot"],
+    # Free-tier planner cascade: six $0 frontier rungs (independent upstream pools)
+    # tried in order before any paid token — then the funded V4-Pro fallbacks.
+    "synth": ["openrouter", "openrouter_qwen3coder", "openrouter_nemotron",
+              "openrouter_qwen3next", "openrouter_glm", "openrouter_gptoss",
+              "deepinfra", "deepseek"],
     "steer": ["openrouter", "deepinfra", "cerebras", "groq", "gemini"],
     "escalate": ["anthropic"],
 }

@@ -176,6 +176,12 @@ def _render_span(rec: dict, hms: str) -> list[str]:
         miss = _trunc(attr("missing"), 30)
         return [_line(hms, "◷", DIM if complete else YEL, "plan", "lint",
                       "complete" if complete else miss)]
+    if "rung_fell" in name:
+        # a cascade fall-through (free rung 429'd / over budget → next rung)
+        model = attr("model") or attr("frm")
+        reason = _trunc(attr("reason"), 30)
+        return [_line(hms, "↳", YEL, attr("frm"), _trunc(model, 12),
+                      _trunc(model, 30), f"{reason} → next")]
     if "role_resolved" in name:
         # An LLM call resolved through the conductor — show it as such, with the
         # thinking budget/tokens (Fix 3) when present (the planner's reasoning).

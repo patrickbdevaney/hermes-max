@@ -387,7 +387,8 @@ def run_role(role: str, messages: list[dict] | None = None, *, prompt: str | Non
         ok_b, why = _budget_check(pid, model, prov, est, commit=True)
         if not ok_b:
             attempts.append({"provider": pid, "skipped": f"{why}_exhausted"})
-            _trace("rung_fell", role=role, frm=pid, to="(next)", reason=f"{why} budget exhausted")
+            _trace("rung_fell", role=role, frm=pid, model=model, to="(next)",
+                   reason=f"{why} budget exhausted")
             continue
         budget = _THINKING_BUDGET.get(role, 0)
         extra_body = _reasoning_body(prov.get("base_url", ""), budget)
@@ -401,7 +402,8 @@ def run_role(role: str, messages: list[dict] | None = None, *, prompt: str | Non
         except Exception as e:  # noqa: BLE001 - any failure -> silently fall to next rung
             reason = f"{type(e).__name__}: {str(e)[:80]}"
             attempts.append({"provider": pid, "failed": reason})
-            _trace("rung_fell", role=role, frm=pid, to="(next)", reason=reason)
+            # model + reason so the cascade is legible in the cockpit (e.g. 429 → next).
+            _trace("rung_fell", role=role, frm=pid, model=model, to="(next)", reason=reason)
             continue
         cost = 0.0 if free else _cost(prov, role, usage)
         if not free:
