@@ -32,13 +32,17 @@ def fmt_usd(x: float) -> str:
 def record(*, role: str, provider: str, model: str, in_tok: int, out_tok: int,
            cached_tok: int = 0, cost_usd: float = 0.0, wall_ms: int = 0,
            mode: str = "", rate_headers: Optional[dict[str, str]] = None,
-           ts: Optional[float] = None) -> dict[str, Any]:
-    """Append one call to the ledger. Returns the row."""
+           thinking_tok: int = 0, ts: Optional[float] = None) -> dict[str, Any]:
+    """Append one call to the ledger. Returns the row.
+
+    `thinking_tok` = reasoning/thinking tokens the model spent (role-aware budgets,
+    Fix 3) — recorded alongside in/out so plan-quality-vs-reasoning can be studied."""
     row = {
         "ts": ts if ts is not None else time.time(),
         "role": role, "provider": provider, "model": model,
         "in_tok": int(in_tok), "out_tok": int(out_tok),
         "cached_tok": int(cached_tok),
+        "thinking_tok": int(thinking_tok),
         "cost_usd": round(float(cost_usd), 6),
         "wall_ms": int(wall_ms), "mode": mode,
         "rate_headers": rate_headers or {},

@@ -25,6 +25,21 @@ from . import config
 # Populate as providers retire models, e.g. {"groq.synth_oss": "gpt-oss-120b pulled 2026-..."}.
 KNOWN_DEPRECATED: dict[str, str] = {}
 
+# The synth (planner) cascade models, with the date each id was verified live in the
+# OpenRouter catalog. A free-tier 429 falls through these in order before any paid
+# token is spent (see mcp-escalation/conductor_registry.py synth chain). NOTE: the
+# spec's minimax-m2.5:free / deepseek-v4-flash:free / deepseek-r1-0528:free are NOT
+# free on OpenRouter (verified 2026-06-01) — real free frontier models substituted.
+KNOWN_SYNTH_MODELS: dict[str, str] = {
+    "moonshotai/kimi-k2.6:free":              "verified: 2026-06-01 (best planner quality)",
+    "qwen/qwen3-coder:free":                  "verified: 2026-06-01 (1M ctx, strongest free coder)",
+    "nvidia/nemotron-3-super-120b-a12b:free": "verified: 2026-06-01 (120B, 1M ctx, SWE-Bench)",
+    "qwen/qwen3-next-80b-a3b-instruct:free":  "verified: 2026-06-01 (80B-A3B, 262K ctx)",
+    "z-ai/glm-4.5-air:free":                  "verified: 2026-06-01 (GLM-4.5, 131K ctx)",
+    "openai/gpt-oss-120b:free":               "verified: 2026-06-01 (120B open reasoning)",
+    "deepseek-ai/DeepSeek-V4-Pro":            "verified: 2026-06-01 (funded paid fallback)",
+}
+
 _CACHE = os.path.expanduser(
     os.environ.get("INFERENCE_ROSTER_CACHE", "~/.hermes-max/inference/roster_cache.json"))
 _TTL = 3600.0

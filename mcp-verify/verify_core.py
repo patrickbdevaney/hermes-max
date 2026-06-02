@@ -228,12 +228,31 @@ def _verify_rust(path: str) -> list[dict[str, Any]]:
     return stages
 
 
+def _find_plan(start: str) -> str | None:
+    """Look for PLAN.md in the task dir and up to 3 parents (a file deep in a
+    project still finds the project's plan contract)."""
+    d = start if os.path.isdir(start) else os.path.dirname(start)
+    for _ in range(4):
+        cand = os.path.join(d, "PLAN.md")
+        if os.path.isfile(cand):
+            return cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
 def verify(path: str, language: str = "auto") -> dict[str, Any]:
     """Run the deterministic gate against `path`.
 
     Returns a structured result. `passed` is True only if at least one stage ran
     and no stage failed or errored. Missing tools are "skipped" and do not pass
     or fail the gate on their own.
+
+    PLANNING GATE (Fix 2): unless VERIFY_REQUIRE_PLAN is disabled, the gate refuses
+    to certify a task with no PLAN.md — a task without a plan has no DONE_CONDITION
+    and cannot be verified, so 'skip planning' can't complete successfully.
     """
     abspath = os.path.abspath(os.path.expanduser(path))
     if not os.path.exists(abspath):
@@ -244,6 +263,40 @@ def verify(path: str, language: str = "auto") -> dict[str, Any]:
             "stages": [],
             "summary": f"path does not exist: {abspath}",
         }
+
+    # Planning gate. By default (Fix 3) an unsigned/absent plan WARNS but never blocks —
+    # so a transient conductor 429 (which leaves a minimal local-fallback plan) can't
+    # dead-end the run; the gate still certifies on the actual tests. Set
+    # VERIFY_HARD_BLOCK_PLAN=1 to restore the old hard block (refuse without a
+    # conductor-signed plan). VERIFY_REQUIRE_PLAN=0 disables the check entirely.
+    plan_warnings: list[str] = []
+    require_plan = os.environ.get("VERIFY_REQUIRE_PLAN", "true").strip().lower() in (
+        "1", "true", "yes", "on")
+    hard_block = os.environ.get("VERIFY_HARD_BLOCK_PLAN", "").strip().lower() in (
+        "1", "true", "yes", "on")
+    if require_plan:
+        plan_path = _find_plan(abspath)
+        signed = False
+        if plan_path is not None:
+            try:
+                plan_text = open(plan_path, encoding="utf-8", errors="replace").read()
+            except OSError:
+                plan_text = ""
+            signed = bool(re.search(r"(?mi)^##\s*Plan authored by:.*\bvia conductor\b", plan_text))
+        if not signed:
+            why = ("no PLAN.md found" if plan_path is None
+                   else "PLAN.md is not conductor-signed (conductor unavailable / self-written)")
+            if hard_block:
+                return {
+                    "path": abspath, "language": language, "passed": False, "blocked": True,
+                    "stages": [],
+                    "summary": (f"VERIFY BLOCKED: {why}. Call the conductor_plan MCP tool so "
+                                "the strong cloud reasoner authors a signed PLAN.md, then "
+                                "execute against it."),
+                }
+            warn = (f"VERIFY WARNING: {why} — proceeding with verify; output quality may be "
+                    "lower. (conductor_plan produces a signed plan when the conductor is up.)")
+            plan_warnings.append(warn)
 
     lang = language if language and language != "auto" else detect_language(abspath)
     if lang in ("js", "javascript", "typescript"):
@@ -262,9 +315,46 @@ def verify(path: str, language: str = "auto") -> dict[str, Any]:
             "passed": False,
             "stages": [],
             "summary": f"unsupported or undetected language: {lang}",
+            "plan_warnings": plan_warnings,
         }
 
-    return _finalize(abspath, lang, stages)
+    result = _finalize(abspath, lang, stages)
+    if plan_warnings:
+        result["plan_warnings"] = plan_warnings
+    return result
+
+
+def _fail_state_path() -> str:
+    import json  # noqa: F401  (kept local; module already imports os)
+    d = os.path.expanduser(os.environ.get("HERMES_MAX_STATE_DIR", "~/.hermes-max")) + "/conductor"
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(d, "verify_fails.json")
+
+
+def _note_consecutive_fail(abspath: str, passed: bool) -> int:
+    """Track consecutive verify failures per path. Returns the running fail count
+    (0 after a pass). Two in a row means the executor's APPROACH is wrong, not just
+    buggy — a frontier diagnosis beats a third attempt at the same flawed approach."""
+    import json
+    p = _fail_state_path()
+    try:
+        state = json.load(open(p))
+    except (OSError, ValueError):
+        state = {}
+    if passed:
+        state.pop(abspath, None)
+        count = 0
+    else:
+        count = int(state.get(abspath, 0)) + 1
+        state[abspath] = count
+    try:
+        json.dump(state, open(p, "w"))
+    except OSError:
+        pass
+    return count
 
 
 def _finalize(abspath: str, lang: str, stages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -279,13 +369,48 @@ def _finalize(abspath: str, lang: str, stages: list[dict[str, Any]]) -> dict[str
     else:
         summary = "FAIL: " + ", ".join(f"{s['name']} {s['status']}" for s in bad)
 
-    return {
+    result: dict[str, Any] = {
         "path": abspath,
         "language": lang,
         "passed": passed,
         "stages": stages,
         "summary": summary,
     }
+
+    # Trigger B (mid-loop uplift): on the SECOND consecutive failure of the same path,
+    # recommend a deep reasoning_escalation. (Returned as a recommendation the executor
+    # acts on — verify runs in its own venv without the conductor's HTTP client; the
+    # workflow skill calls reasoning_escalation with this payload.)
+    fail_count = _note_consecutive_fail(abspath, passed)
+    if not passed and fail_count >= 2:
+        failing = next((s for s in bad), {})
+        out = _truncate(str(failing.get("output", "")))[:1500]
+        base = os.path.basename(abspath)
+        if fail_count >= 3:
+            # 3+ fails on the same approach → the PLAN is wrong, not just the code.
+            # Recommend review_and_adapt (revise the plan), not another patch attempt.
+            result["escalate"] = {
+                "trigger": "plan_adapt", "tool": "review_and_adapt", "budget": "deep",
+                "issue": (f"Step implementation in {base} has failed verify {fail_count}× — "
+                          f"the planned approach appears unworkable:\n{out}"),
+                "context_path": abspath,
+                "note": (f"verify failed {fail_count}× on {base}. The approach is likely "
+                         "unworkable as planned — call review_and_adapt with the issue and "
+                         "step number to revise the plan, then execute the revision (do NOT "
+                         "keep patching the same approach)."),
+            }
+        else:
+            result["escalate"] = {
+                "trigger": "verify_double_fail", "tool": "reasoning_escalation", "budget": "deep",
+                "question": (f"This implementation has failed verify {fail_count} times on the "
+                             f"same approach. Diagnose WHY it fails and propose a corrected "
+                             f"approach:\n{out}"),
+                "context_path": abspath,
+                "note": (f"verify failed {fail_count}× on {base} — the approach is likely "
+                         "wrong. Call reasoning_escalation(trigger='verify_double_fail', "
+                         "budget='deep') with the failing output, then re-implement."),
+            }
+    return result
 
 
 def quick_check(path: str, language: str = "auto") -> dict[str, Any]:

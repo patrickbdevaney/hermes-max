@@ -101,6 +101,63 @@ case "${CMODE}" in
 esac
 echo "── conductor (cloud tiers) ──"
 echo "  ${D}mode${Z} ${CMODE}  ·  ${D}live tiers${Z}${tiers:- (none present)}"
+# Synth (planner) cascade: the ordered free→paid rungs, present-gated. A 429 on a
+# free rung falls through to the next before any paid token is spent.
+CONDUCTOR_MODE="${CMODE}" python3 - "${REPO_ROOT}" <<'PY' 2>/dev/null || true
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "mcp-escalation"))
+try:
+    import conductor_registry as reg, conductor_resolver as res
+except Exception:
+    sys.exit(0)
+cfg = reg.load_config(); env = dict(os.environ)
+# plan/exec/cost summary, mode-aware (the executor + cost come from the FABRIC mode).
+sys.path.insert(0, sys.argv[1])
+fmode = exec_line = cost_line = ""; ceiling = ""
+try:
+    from lib.inference import roles
+    fmode = roles.active_mode_name()
+    meta = roles.mode_meta(fmode)
+    ceiling = meta.get("inference_mode", "")
+    b = roles.executor_backend(fmode)
+    host = (b.get("base_url") or "").split("//", 1)[-1].split("/", 1)[0]
+    loc = "local" if b.get("local") else "cloud"
+    if b.get("local") and host and not host.startswith(("localhost", "127.0.0.1")):
+        loc = "remote"
+    exec_line = f"{b.get('provider', '?')} ({loc}){(' @ ' + host) if host else ''}  {b.get('model_id', '')}"
+    cost_line = meta.get("monthly_cost", "?")
+except Exception:
+    pass
+# the EFFECTIVE synth chain for this mode (same builder the conductor uses).
+chain = reg.synth_chain_for_mode(cfg["role_chains"].get("synth", []), cfg["providers"], fmode)
+allowed = set(res.resolve_chain(chain, cfg["providers"], env))
+free = sum(1 for p in chain if cfg["providers"].get(p, {}).get("tier") == "free")
+paid = sum(1 for p in chain if cfg["providers"].get(p, {}).get("tier") == "paid")
+# plan kind reflects the mode's economic intent.
+if fmode == "free-full-local":
+    plan_kind = "kimi-k2.6:free → V4-Pro fallback"
+elif fmode == "full-local":
+    plan_kind = "V4-Pro first (paid), free cascade fallback"
+elif ceiling == "free":
+    plan_kind = "free cascade ($0 hard, no paid fallback)"
+elif ceiling in ("full", "frontier"):
+    plan_kind = "free cascade → V4-Pro fallback"
+elif ceiling == "local":
+    plan_kind = "local only"
+else:
+    plan_kind = "free cascade"
+print(f"  plan   {plan_kind}")
+if exec_line:
+    print(f"  exec   {exec_line}")
+if cost_line:
+    print(f"  cost   {cost_line}/mo  ·  $0 while the free planner tier has capacity")
+print(f"  synth chain  ({free} free → {paid} paid; 429 falls through):")
+for i, pid in enumerate(chain, 1):
+    p = cfg["providers"].get(pid, {})
+    tier = p.get("tier", "?"); model = p.get("models", {}).get("synth", "?")
+    mark = "\033[32m●\033[0m" if pid in allowed else "\033[2m○\033[0m"
+    print(f"    {i} {mark} {pid:<22} {tier:<5} {model}")
+PY
 FRONTIER_STATE="${HERMES_MAX_STATE_DIR:-${HOME}/.hermes-max}/conductor/frontier.json"
 FRONTIER_STATE="${FRONTIER_STATE/#\~/$HOME}"
 if [ "${CMODE}" = "frontier" ] && [ -f "${FRONTIER_STATE}" ]; then

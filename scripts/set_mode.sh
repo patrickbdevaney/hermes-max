@@ -91,7 +91,12 @@ os.replace(tmp, path)
 PY
 
 if [ "${HERMES_EXEC_LOCAL}" = "1" ]; then
-  echo "  ▸ Hermes loop → LOCAL  ${HERMES_EXEC_MODEL_ID}  @ ${HERMES_EXEC_BASE_URL}  (no key)"
+  # Classify by HOST, not by the local-executor flag: a reachable endpoint on another
+  # box (Tailscale/LAN) is a REMOTE GPU, not a local one.
+  _host="$(printf '%s' "${HERMES_EXEC_BASE_URL}" | sed -E 's#^[a-zA-Z]+://([^/:]+).*#\1#')"
+  case "${_host}" in localhost|127.0.0.1|::1|0.0.0.0) _loc="LOCAL GPU @ ${_host}" ;;
+                     *) _loc="REMOTE GPU @ ${_host}" ;; esac
+  echo "  ▸ Hermes loop → ${_loc}  ${HERMES_EXEC_MODEL_ID}  @ ${HERMES_EXEC_BASE_URL}  (no key)"
 else
   _key_note="(⚠ no key for ${HERMES_EXEC_API_KEY_ENV} — auth will fail)"
   [ -n "${APIKEY}" ] && _key_note="(key from ${HERMES_EXEC_API_KEY_ENV})"

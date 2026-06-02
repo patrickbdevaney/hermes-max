@@ -1,5 +1,17 @@
 # QUICKSTART — clone to a built project in 5 minutes
 
+## Pick your mode
+
+| You have… | Use | What it does | Cost |
+|-----------|-----|--------------|------|
+| **a local GPU** | `hm mode free-full-local` | free OpenRouter planner cascade ($0) → DeepInfra V4-Pro fallback if all free rungs 429 → local model executes | **$0–3/mo** (recommended) |
+| a local GPU, want reliability | `hm mode full-local` | V4-Pro plans (paid, tried first) → local model executes | ~$1–3/mo |
+| **no GPU** | `hm mode full` | V4-Pro plans + V4-Flash executes — both API | ~$17/mo |
+| **want $0 always** | `hm mode free` | free cascade plans → local executes (no paid fallback; quality varies) | $0 |
+
+`hm` with no arguments prints this table. Add `--free-uplift` to any GPU mode for an
+on-demand reasoning escalation (a larger free model reviews each verified file).
+
 Two profiles, side by side. Pick the one that matches your hardware.
 
 ```bash

@@ -16,6 +16,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/lib.sh"
 hmx_load_env 2>/dev/null || true
 
+# Prefer the structured JSONL renderer (server · tool · input · status · timing +
+# research fan-out sub-entries) — the same view the cockpit shows. Opt out with
+# HMX_WATCH_PLAIN=1 for the legacy colourised tail of live.log below.
+if [ -z "${HMX_WATCH_PLAIN:-}" ] && command -v python3 >/dev/null 2>&1 \
+   && [ -f "${SCRIPT_DIR}/cockpit_livelog.py" ]; then
+  exec python3 "${SCRIPT_DIR}/cockpit_livelog.py"
+fi
+
 LOG_DIR="${HERMES_MAX_LOG_DIR:-${HMX_LOG_DIR:-${HOME}/.hermes-max/logs}}"
 LOG_DIR="${LOG_DIR/#\~/$HOME}"
 LIVE="${LOG_DIR}/live.log"

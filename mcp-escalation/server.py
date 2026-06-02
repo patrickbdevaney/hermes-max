@@ -151,6 +151,55 @@ def conductor_synthesize(prompt: str, max_tokens: int | None = None) -> dict:
 
 @mcp.tool()
 @_threaded
+def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict:
+    """Your FIRST action on any new task — BEFORE any file write, before any internal
+    reasoning. The CONDUCTOR authors the plan, not you: it maps the repo, routes a
+    PLAN.md through the strong synth chain (kimi-k2.6:free → V4-Pro) with the full
+    8192-token thinking budget, and writes a SIGNED PLAN.md to `cwd`. Pass the task
+    description and the working directory; repo_map is auto-fetched if omitted.
+
+    Do NOT plan internally or reason through the architecture yourself — call this and
+    execute against what it returns. The verify gate REJECTS any PLAN.md that lacks the
+    conductor signature ('## Plan authored by: <model> via conductor'), so a plan you
+    wrote yourself cannot pass. Returns {ok, plan, model, provider, path, signed}."""
+    return conductor_core.conductor_plan(task, cwd, repo_map)
+
+
+@mcp.tool()
+@_threaded
+def review_and_adapt(issue: str, current_step: int, completed_steps: list | None = None,
+                     context: str = "", cwd: str = "", budget: str = "standard") -> dict:
+    """The living plan: when a PLAN.md step proves IMPOSSIBLE as written (a referenced API
+    doesn't exist, an approach can't work), call this — do NOT attempt impossible
+    implementations and do NOT spin. The conductor revises PLAN.md from `current_step`
+    onward; your completed_steps are preserved verbatim. Pass the specific issue, the
+    step number, the list of completed step descriptions, and the cwd. Returns the revised
+    plan; re-read PLAN.md and continue. Counts against the deep budget (max 2/run)."""
+    return conductor_core.review_and_adapt(issue, current_step, completed_steps, context, cwd, budget)
+
+
+@mcp.tool()
+@_threaded
+def reasoning_escalation(question: str, context: str = "", budget: str = "standard",
+                         trigger: str = "self_declared") -> dict:
+    """Ask a LARGER reasoning model a TARGETED question — frontier reasoning on demand.
+    Your ESCAPE HATCH from the thinking budget: when you hit an architectural or
+    algorithmic question you can't resolve confidently within your budget, DO NOT keep
+    reasoning — call this with the specific question and act on the precise answer.
+
+      budget="standard" → fast, $0 (free synth cascade, modest cap)
+      budget="deep"     → thorough (free cascade → V4-Pro paid fallback, larger cap)
+      trigger: self_declared | verify_double_fail | complex_step
+
+    Capped per run (standard×5, deep×2) so it can't burn the credit. Returns {ok,
+    answer, guidance, model, tier, tokens, run_escalations} — `guidance` is a structured
+    '## Frontier guidance' block to put at the top of your next step. Stays $0 whenever
+    the free tier has capacity."""
+    return conductor_core.reasoning_escalation(question, context, budget, trigger)
+
+
+@mcp.tool()
+@_threaded
 def parallel_draft_pool(prompt: str, n: int | None = None,
                         max_tokens: int | None = None) -> dict:
     """Fan a draft brief out across the FREE/cheap parallel_draft POOL concurrently

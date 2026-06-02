@@ -73,6 +73,100 @@ def _current_offset() -> int:
         return 0
 
 
+# ── run registry (Fix 4: universal SSE) ───────────────────────────────────────
+# Any hermes run — launched here, in `hm dev`, or bare in a terminal via the shell
+# wrapper — drops a descriptor in ~/.hermes-max/runs/. The livelog is a SINGLE global
+# JSONL, so a descriptor records the byte OFFSET at start; the events endpoint tails
+# the global log from there, scoping the stream to that run. This makes terminal runs
+# visible in the browser within a poll interval.
+def _registry_dir() -> str:
+    d = os.path.expanduser(os.environ.get(
+        "HERMES_MAX_STATE_DIR", "~/.hermes-max")) + "/runs"
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _descriptor_path(run_id: str) -> str:
+    safe = "".join(c for c in run_id if c.isalnum() or c in "-_")
+    return os.path.join(_registry_dir(), f"{safe}.json")
+
+
+def write_descriptor(run: dict[str, Any]) -> None:
+    """Persist a run descriptor (no secrets — cwd/prompt/mode/offset only)."""
+    try:
+        desc = {
+            "run_id": run["run_id"],
+            "started_at": run.get("started_at")
+            or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(run.get("start_ts", time.time()))),
+            "start_ts": float(run.get("start_ts", time.time())),
+            "cwd": run.get("cwd"), "prompt": run.get("prompt"),
+            "mode": run.get("mode"), "pid": run.get("pid"),
+            "start_offset": int(run.get("start_offset", 0)),
+            "status": run.get("status", "running"),
+            "origin": run.get("origin", "ui"),
+        }
+        with open(_descriptor_path(run["run_id"]), "w") as f:
+            json.dump(desc, f, indent=2)
+    except (OSError, ValueError, KeyError):
+        pass
+
+
+def _read_descriptor(run_id: str) -> Optional[dict[str, Any]]:
+    try:
+        with open(_descriptor_path(run_id)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def list_runs(limit: int = 50) -> list[dict[str, Any]]:
+    """All known runs (registry descriptors merged with in-memory launches), most
+    recent first, each a JSON-safe public view with a live `active` flag."""
+    seen: dict[str, dict[str, Any]] = {}
+    # registry descriptors (covers terminal + hm dev + ui runs)
+    try:
+        for fn in os.listdir(_registry_dir()):
+            if not fn.endswith(".json"):
+                continue
+            d = _read_descriptor(fn[:-5])
+            if not d:
+                continue
+            active = str(d.get("status", "")) == "running" and _pid_alive(d.get("pid"))
+            seen[d["run_id"]] = {
+                "run_id": d["run_id"], "cwd": d.get("cwd"), "prompt": d.get("prompt"),
+                "mode": d.get("mode"), "start_ts": d.get("start_ts"),
+                "origin": d.get("origin", "?"),
+                "status": "running" if active else (d.get("status") or "exited"),
+                "active": active,
+            }
+    except OSError:
+        pass
+    # in-memory launches (authoritative for proc liveness)
+    with _lock:
+        mem = list(_RUNS.values())
+    for run in mem:
+        pv = public_view(run)
+        pv["active"] = pv.get("status") == "running"
+        pv["origin"] = run.get("origin", "ui")
+        seen[pv["run_id"]] = {**seen.get(pv["run_id"], {}), **pv}
+    runs = sorted(seen.values(), key=lambda r: r.get("start_ts") or 0, reverse=True)
+    return runs[:limit]
+
+
+def _pid_alive(pid: Any) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 def attach_live() -> dict[str, Any]:
     """Register (idempotently) the synthetic 'live' run anchored at log end now."""
     with _lock:
@@ -88,9 +182,26 @@ def attach_live() -> dict[str, Any]:
 def get_run(run_id: str) -> Optional[dict[str, Any]]:
     with _lock:
         run = _RUNS.get(run_id)
-    if run is None and run_id == "live":
+    if run is not None:
+        return run
+    if run_id == "live":
         return attach_live()
-    return run
+    # A run discovered via the registry (terminal / hm dev / another browser): build a
+    # streamable run dict anchored at its recorded global-log offset. No proc handle —
+    # liveness comes from the descriptor's pid/status.
+    d = _read_descriptor(run_id)
+    if d is not None:
+        run = {
+            "run_id": run_id, "cwd": d.get("cwd") or os.getcwd(),
+            "prompt": d.get("prompt"), "mode": d.get("mode"),
+            "start_ts": float(d.get("start_ts", time.time())),
+            "start_offset": int(d.get("start_offset", 0)),
+            "proc": None, "launched": False, "origin": d.get("origin", "registry"),
+        }
+        with _lock:
+            _RUNS[run_id] = run
+        return run
+    return None
 
 
 def _run_log_dir() -> str:
@@ -156,10 +267,13 @@ def create_run(cwd: str, prompt: str, mode: str | None,
         "run_id": run_id, "cwd": cwd, "prompt": prompt, "mode": mode,
         "start_ts": time.time(), "start_offset": offset,
         "proc": proc, "launched": proc is not None, "launch_error": launch_error,
+        "pid": proc.pid if proc is not None else None, "origin": "ui",
+        "status": "running" if proc is not None else "attached",
     }
     with _lock:
         _RUNS[run_id] = run
     _remember_project(cwd)
+    write_descriptor(run)   # make UI-launched runs visible in the registry too (Fix 4)
     return public_view(run)
 
 

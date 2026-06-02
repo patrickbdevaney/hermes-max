@@ -113,6 +113,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(feeds.cost_payload(window))
         if path == "/api/projects/recent":
             return self._send_json({"projects": runs.recent_projects()})
+        if path == "/api/runs":
+            # All known runs (registry ∪ in-memory) so the UI shows ANY hermes run —
+            # terminal, hm dev, or launched here (Fix 4: universal SSE).
+            return self._send_json({"runs": runs.list_runs()})
         if path == "/api/keys/status":
             return self._send_json(config_api.keys_status())
         if path.startswith("/api/events/"):
@@ -166,6 +170,10 @@ class Handler(BaseHTTPRequestHandler):
             if not provider:
                 return self._deny(400, "provider is required")
             return self._send_json(config_api.test_connection(provider))
+        if path == "/api/browse-dir":
+            # Pop the OS-native folder chooser on the local display (loopback-only,
+            # CSRF-guarded like every POST). Best-effort; returns {path|cancelled|error}.
+            return self._send_json(config_api.browse_dir(body.get("start")))
         return self._deny(404, f"no such endpoint: {path}")
 
     def _otlp_traces(self) -> None:

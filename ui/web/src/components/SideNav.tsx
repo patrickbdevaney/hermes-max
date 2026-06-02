@@ -16,8 +16,8 @@ const ITEMS: { name: RouteName; label: string; hint: string }[] = [
   { name: "setup", label: "Setup", hint: "profile · mode · keys" },
 ];
 
-export function SideNav({ active, status }:
-  { active: RouteName; status: StatusPayload | null }) {
+export function SideNav({ active, status, liveRuns = 0 }:
+  { active: RouteName; status: StatusPayload | null; liveRuns?: number }) {
   const mode = modeInfo(status?.mode);
   return (
     <nav className="flex w-52 shrink-0 flex-col border-r border-ink-800 bg-ink-950 px-3 py-4">
@@ -40,6 +40,11 @@ export function SideNav({ active, status }:
                 <span className="flex items-center gap-2">
                   {on && <span className="h-3.5 w-0.5 rounded bg-accent" aria-hidden />}
                   <span className={on ? "" : "pl-2.5"}>{it.label}</span>
+                  {it.name === "run" && liveRuns > 0 && (
+                    <span className="ml-auto flex items-center gap-1 text-[10px] text-good">
+                      <Dot tone="good" pulse />{liveRuns}
+                    </span>
+                  )}
                 </span>
               </a>
             </li>

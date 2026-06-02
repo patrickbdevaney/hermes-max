@@ -26,6 +26,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import sys
 import threading
 import time
 from datetime import date
@@ -279,13 +280,332 @@ def _cap_messages(messages: list[dict], cap_tokens: int) -> list[dict]:
 
 
 # ── the single-call primitive (the seam the smoke test stubs) ─────────────────
+# Role-aware thinking/reasoning budgets (Fix 3) for the conductor's own roles. A
+# CEILING, not a floor; env-overridable. synth = the planner (generous), steer =
+# cheap nudge (light), escalate = frontier deliberation (generous).
+_THINKING_BUDGET = {
+    "synth": int(os.environ.get("CONDUCTOR_SYNTH_THINKING", "8192")),
+    "steer": int(os.environ.get("CONDUCTOR_STEER_THINKING", "2048")),
+    "escalate": int(os.environ.get("CONDUCTOR_ESCALATE_THINKING", "8192")),
+}
+
+# Per-rung retry on a transient 429/5xx before falling to the next rung (Fix 3) —
+# a brief retry keeps the run on the $0 free rung instead of cascading to paid.
+_RUNG_RETRIES = int(os.environ.get("CONDUCTOR_RUNG_RETRIES", "2"))
+_RUNG_BACKOFF_S = float(os.environ.get("CONDUCTOR_RUNG_BACKOFF_S", "5"))
+
+
+def _fabric_mode() -> str:
+    """The active FABRIC mode name (free / free-full-local / full-local / …), read
+    live from the mode file. Distinct from CONDUCTOR_MODE (the tier ceiling) — used
+    so full-local can prefer the paid synth rung over the free cascade."""
+    f = os.path.expanduser(os.environ.get("HERMES_MODE_FILE", "~/.hermes-max/mode"))
+    try:
+        with open(f) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+_PLAN_SIGNATURE = "## Plan authored by:"   # must be followed by "<model> via conductor"
+
+
+def _scopemap_repo_map(cwd: str) -> str:
+    """Best-effort structural map via the scopemap core (added to path lazily)."""
+    try:
+        import os as _os
+        repo = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        sm = _os.path.join(repo, "mcp-scopemap")
+        if sm not in sys.path:
+            sys.path.insert(0, sm)
+        import scopemap_core
+        return scopemap_core.get_repo_map(cwd)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, Any]:
+    """THE planner entrypoint (the guaranteed first step on any new task). The CONDUCTOR
+    authors PLAN.md — not the executor's internal chain-of-thought. It maps the repo
+    (scopemap), routes the plan through the synth chain (kimi-k2.6:free → V4-Pro on 429)
+    with the full 8192-token thinking budget, and writes a SIGNED PLAN.md to `cwd`:
+
+        ## Plan authored by: <model> via conductor
+
+    The verify gate refuses any PLAN.md without that signature, so a plan the executor
+    wrote itself can never pass — the architectural thinking is done by the strong
+    cloud reasoner, the local model only executes against the contract.
+
+    Idempotent: if a validly-signed PLAN.md already exists in `cwd`, it is returned
+    unchanged. Returns {ok, plan, model, provider, signed, wrote, path}."""
+    import os as _os
+    cwd = _os.path.abspath(_os.path.expanduser(cwd or _os.getcwd()))
+    plan_path = _os.path.join(cwd, "PLAN.md")
+    reset_escalation_budget()   # new task = new run: zero the mid-loop escalation counters
+    # idempotent: a validly-signed plan already present → return it
+    try:
+        if _os.path.isfile(plan_path):
+            existing = open(plan_path).read()
+            if _PLAN_SIGNATURE in existing and "via conductor" in existing:
+                return {"ok": True, "plan": existing, "signed": True,
+                        "wrote": False, "path": plan_path,
+                        "model": "(existing)", "provider": "(existing)"}
+    except OSError:
+        pass
+
+    if not repo_map and cwd:
+        repo_map = _scopemap_repo_map(cwd)        # auto get_repo_map (spec point 4)
+    greenfield = (not repo_map) or "greenfield" in repo_map.lower()
+    ctx = ("GREENFIELD — no existing code to map." if greenfield
+           else f"Repository structure (one line per file):\n{repo_map[:8000]}")
+    prompt = (
+        "You are the PLANNER. Produce a PLAN.md for the task. Output ONLY the markdown "
+        "plan (no preamble). It is a contract the executor follows literally — concrete "
+        "and gap-free.\n\n"
+        f"{ctx}\n\nTASK:\n{task}\n\n"
+        "The plan MUST contain: a one-paragraph approach; a '## Files' list with a FILE "
+        "SPEC (key functions/classes + signatures) per file; a '## Steps' ordered list; "
+        "and a 'DONE_CONDITION:' line with the exact verifiable gate (e.g. 'pytest "
+        "green, N tests pass').\n"
+        "Mark EACH step with a complexity flag: 'complexity: standard' or "
+        "'complexity: HIGH'. For HIGH steps (novel concurrency invariants, atomicity "
+        "guarantees, non-obvious property-test strategies, anything a small local model "
+        "shouldn't design alone) add a one-line 'note:' with the key consideration — the "
+        "executor will call reasoning_escalation BEFORE attempting those steps.")
+    # synth chain already carries thinking_budget 8192 (see _THINKING_BUDGET["synth"]).
+    res = run_role("synth", prompt=prompt, max_tokens=4096)
+    if not (res.get("ok") and res.get("content")):
+        return {"ok": False, "plan": "", "signed": False, "wrote": False,
+                "path": plan_path, "reason": res.get("reason", "no synth rung available")}
+    model = res.get("model", "unknown")
+    body = res["content"].strip()
+    # strip any header the model emitted, then prepend the canonical signature
+    signed = f"## Plan authored by: {model} via conductor\n\n{body}\n"
+    try:
+        with open(plan_path, "w") as f:
+            f.write(signed)
+    except OSError as e:
+        return {"ok": False, "plan": signed, "signed": True, "wrote": False,
+                "path": plan_path, "reason": f"write failed: {e}"}
+    return {"ok": True, "plan": signed, "signed": True, "wrote": True, "path": plan_path,
+            "model": model, "provider": res.get("provider"),
+            "thinking_tok": res.get("thinking_tok", 0)}
+
+
+# ── escalation economic guard (per-run call budget) ───────────────────────────
+def _esc_budget_path() -> str:
+    d = os.path.expanduser(os.environ.get("HERMES_MAX_STATE_DIR", "~/.hermes-max")) + "/conductor"
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "escalation_budget.json")
+
+
+def _esc_caps() -> dict[str, int]:
+    return {"standard": int(os.environ.get("CONDUCTOR_MAX_ESC_STANDARD", "5")),
+            "deep": int(os.environ.get("CONDUCTOR_MAX_ESC_DEEP", "2"))}
+
+
+def reset_escalation_budget() -> None:
+    """Start-of-run reset (called by conductor_plan): zero the per-run call counters."""
+    try:
+        with open(_esc_budget_path(), "w") as f:
+            json.dump({"standard": 0, "deep": 0, "paid": 0, "cost_usd": 0.0}, f)
+    except OSError:
+        pass
+
+
+def _esc_counts() -> dict[str, Any]:
+    try:
+        with open(_esc_budget_path()) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"standard": 0, "deep": 0, "paid": 0, "cost_usd": 0.0}
+
+
+def _esc_account(budget: str, paid: bool, cost: float) -> dict[str, Any]:
+    c = _esc_counts()
+    c[budget] = int(c.get(budget, 0)) + 1
+    if paid:
+        c["paid"] = int(c.get("paid", 0)) + 1
+        c["cost_usd"] = round(float(c.get("cost_usd", 0.0)) + cost, 6)
+    try:
+        with open(_esc_budget_path(), "w") as f:
+            json.dump(c, f)
+    except OSError:
+        pass
+    return c
+
+
+def escalation_summary() -> dict[str, Any]:
+    """End-of-run summary: total escalations, free vs paid, $ spent."""
+    c = _esc_counts()
+    total = int(c.get("standard", 0)) + int(c.get("deep", 0))
+    paid = int(c.get("paid", 0))
+    return {"calls": total, "free": total - paid, "paid": paid,
+            "cost_usd": round(float(c.get("cost_usd", 0.0)), 6)}
+
+
+_TRIGGER_TOOL = {
+    "self_declared": "uplift·ask", "verify_double_fail": "uplift·stuck",
+    "complex_step": "uplift·step",
+}
+
+
+def review_and_adapt(issue: str, current_step: int, completed_steps: list | None = None,
+                     context: str = "", cwd: str = "", budget: str = "standard") -> dict[str, Any]:
+    """The living plan (Fix 4): when the executor discovers a plan step is impossible as
+    written, the conductor REVISES PLAN.md from `current_step` onward — completed steps
+    are preserved verbatim, so prior work isn't thrown away. Counts against the deep
+    escalation budget (max 2 paid/run). Logs `plan.adapt step N <model> <tok>`. Returns
+    {ok, revised, model, provider, path}."""
+    import os as _os
+    completed_steps = completed_steps or []
+    # budget guard (shared with deep escalations)
+    caps = _esc_caps()
+    if int(_esc_counts().get("deep", 0)) >= caps.get("deep", 2):
+        _emit_livelog("plan·adapt", ok=False, reason="deep budget exhausted — proceed with current plan")
+        return {"ok": False, "refused": True, "reason": f"deep budget ({caps['deep']}) reached this run"}
+
+    done = "\n".join(f"- [x] step {i + 1}: {s}" for i, s in enumerate(completed_steps)) or "(none)"
+    prompt = (
+        f"The executor hit an issue at step {current_step} of the plan.\n\n"
+        f"Issue: {issue}\n\n"
+        f"Completed steps (preserve these EXACTLY — do not redo them):\n{done}\n\n"
+        f"Context:\n{(context or '')[:6000]}\n\n"
+        f"Revise the plan FROM step {current_step} onward to address this issue. Output the "
+        "revised steps as a markdown '## Steps' list (use real, verified APIs). Keep the "
+        "DONE_CONDITION intact unless the issue requires changing it. Mark "
+        "'complexity: HIGH' on any revised step that needs frontier reasoning.")
+    t0 = time.time()
+    r = run_role("synth", prompt=prompt, max_tokens=2048 if budget != "deep" else 4096)
+    secs = time.time() - t0
+    if not (r.get("ok") and r.get("content")):
+        _emit_livelog("plan·adapt", ok=False, reason=str(r.get("reason", "no rung"))[:80], secs=secs)
+        return {"ok": False, "reason": r.get("reason", "synth unavailable")}
+    prov = r.get("provider")
+    tier = (reg.load_config()["providers"].get(prov, {}) or {}).get("tier", "?") if prov else "?"
+    _esc_account("deep", paid=(tier != "free"), cost=float(r.get("cost_usd", 0.0) or 0.0))
+    # Rewrite PLAN.md: keep the conductor signature + the completed steps verbatim, append
+    # the revision. Staying signed means verify still treats it as conductor-authored.
+    cwd = _os.path.abspath(_os.path.expanduser(cwd or _os.getcwd()))
+    plan_path = _os.path.join(cwd, "PLAN.md")
+    ts = time.strftime("%H:%M:%S", time.localtime())
+    try:
+        old = open(plan_path).read() if _os.path.isfile(plan_path) else ""
+    except OSError:
+        old = ""
+    sig = old.splitlines()[0] if old.startswith("## Plan authored by:") else \
+        f"## Plan authored by: {r.get('model')} via conductor"
+    revised = (f"{sig} (adapted at step {current_step} by {r.get('model')} via conductor, {ts})\n\n"
+               f"{old.split(chr(10), 1)[1] if (chr(10) in old) else ''}\n"
+               f"## Plan adaptation — revised from step {current_step} ({ts})\n"
+               f"Issue: {issue}\n\n"
+               f"Completed (preserved):\n{done}\n\n{r['content'].strip()}\n")
+    try:
+        with open(plan_path, "w") as f:
+            f.write(revised)
+    except OSError as e:
+        return {"ok": False, "reason": f"write failed: {e}", "revised": r["content"]}
+    out_tok = int((r.get("usage") or {}).get("completion_tokens", 0) or 0)
+    _emit_livelog("plan·adapt", ok=True, secs=secs,
+                  ret={"step": current_step, "model": r.get("model"), "tier": tier, "tokens": out_tok})
+    return {"ok": True, "revised": r["content"], "model": r.get("model"), "provider": prov,
+            "tier": tier, "tokens": out_tok, "path": plan_path}
+
+
+def reasoning_escalation(question: str, context: str = "", budget: str = "standard",
+                         trigger: str = "self_declared") -> dict[str, Any]:
+    """A targeted second opinion from a larger reasoning model (mid-loop frontier uplift).
+    The executor's escape hatch from its CoT budget: instead of spinning on a hard
+    architectural/algorithmic question, ask it directly and act on a precise answer.
+
+    Triggers: self_declared (executor unsure) | verify_double_fail (stuck, 2× fail) |
+              complex_step (a plan step marked complexity:HIGH).
+      budget=standard → fast, $0 (free synth cascade, modest cap)
+      budget=deep     → thorough (free cascade → V4-Pro paid fallback, larger cap)
+
+    Economic guard: capped per run (CONDUCTOR_MAX_ESC_STANDARD=5, _DEEP=2). Past the
+    deep cap, further deep asks are logged and refused (the executor proceeds with what
+    it has) so one pathological run can't burn the credit. The answer is returned as a
+    structured '## Frontier guidance' block ready to inject into the executor's context.
+    Never raises."""
+    caps = _esc_caps()
+    counts = _esc_counts()
+    tool = _TRIGGER_TOOL.get(trigger, "uplift·deep")
+    if int(counts.get(budget, 0)) >= caps.get(budget, 99):
+        _emit_livelog(tool, ok=False,
+                      reason=f"{budget} escalation budget exhausted ({caps[budget]}) — proceed with current context")
+        return {"ok": False, "refused": True, "budget": budget, "trigger": trigger,
+                "answer": "", "reason": f"{budget} escalation cap ({caps[budget]}) reached this run"}
+
+    mt = 1024 if budget != "deep" else 4096
+    prompt = ("You are a senior engineer giving a targeted second opinion. Answer "
+              "concisely and concretely (no preamble).\n\n"
+              f"QUESTION:\n{question}\n\nRELEVANT CONTEXT:\n{(context or '')[:8000]}")
+    t0 = time.time()
+    r = run_role("synth", prompt=prompt, max_tokens=mt)
+    secs = time.time() - t0
+    prov = r.get("provider")
+    tier = (reg.load_config()["providers"].get(prov, {}) or {}).get("tier", "?") if prov else "?"
+    out_tok = int((r.get("usage") or {}).get("completion_tokens", 0) or 0)
+    cost = float(r.get("cost_usd", 0.0) or 0.0)
+    ans = r.get("content") or r.get("reason") or ""
+    if r.get("ok"):
+        _esc_account(budget, paid=(tier != "free"), cost=cost)
+        _emit_livelog(tool, ok=True, secs=secs,
+                      ret={"q": question[:50], "model": r.get("model"), "tier": tier,
+                           "tokens": out_tok, "thinking_tok": r.get("thinking_tok", 0)})
+    else:
+        _emit_livelog(tool, ok=False, reason=str(ans)[:80], secs=secs)
+    # structured guidance block — ready to PREPEND to the executor's next prompt
+    ts = time.strftime("%H:%M:%S", time.localtime())
+    guidance = (f"## Frontier guidance (from {r.get('model','?')}, {ts})\n"
+                f"Question: {question}\nAnswer: {ans}\n---\n")
+    return {
+        "ok": bool(r.get("ok")), "trigger": trigger, "budget": budget,
+        "answer": ans, "guidance": guidance,
+        "model": r.get("model"), "provider": prov, "tier": tier,
+        "tokens": out_tok, "thinking_tok": int(r.get("thinking_tok", 0) or 0),
+        "cost_usd": cost, "run_escalations": _esc_counts(),
+    }
+
+
+def _emit_livelog(tool: str, ok: bool, ret: dict | None = None,
+                  reason: str | None = None, secs: float | None = None) -> None:
+    """Best-effort livelog emit (repo root on path lazily). Never raises."""
+    try:
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if repo not in sys.path:
+            sys.path.insert(0, repo)
+        from lib import livelog
+        if ok:
+            livelog.tool_ok(tool, secs=secs, ret=ret)
+        else:
+            livelog.tool_fail(tool, reason=reason, secs=secs)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _reasoning_body(base_url: str, budget: int) -> dict[str, Any] | None:
+    """A provider-appropriate reasoning param, sent ONLY where it's known-safe so an
+    unknown field never 400s a provider. OpenRouter accepts `reasoning.max_tokens`."""
+    if budget <= 0:
+        return None
+    if "openrouter" in (base_url or ""):
+        return {"reasoning": {"max_tokens": budget}}
+    return None
+
+
 def _post_chat(base_url: str, api_key: str, model: str, messages: list[dict],
-               max_tokens: int) -> tuple[dict[str, Any], dict[str, str]]:
-    """Returns (json_body, response_headers). Headers feed the live TPM budget."""
+               max_tokens: int, extra_body: dict[str, Any] | None = None
+               ) -> tuple[dict[str, Any], dict[str, str]]:
+    """Returns (json_body, response_headers). Headers feed the live TPM budget.
+    `extra_body` carries the thinking/reasoning budget (Fix 3)."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     payload = {"model": model, "messages": messages, "max_tokens": max_tokens}
+    if extra_body:
+        payload.update(extra_body)
     with httpx.Client(timeout=TIMEOUT) as client:
         resp = client.post(f"{base_url.rstrip('/')}/chat/completions",
                            json=payload, headers=headers)
@@ -337,6 +657,10 @@ def run_role(role: str, messages: list[dict] | None = None, *, prompt: str | Non
     providers = cfg["providers"]
     caps = cfg["caps"]
     chain = cfg["role_chains"].get(role, [])
+    # The synth (planner) chain is reshaped by the FABRIC mode (free = full cascade;
+    # free-full-local = kimi:free → V4-Pro only; full-local = V4-Pro paid first).
+    if role == "synth":
+        chain = reg.synth_chain_for_mode(chain, providers, _fabric_mode())
     env = dict(os.environ)
     present = resolver.resolve_chain(chain, providers, env)
     if not present:
@@ -363,27 +687,53 @@ def run_role(role: str, messages: list[dict] | None = None, *, prompt: str | Non
         ok_b, why = _budget_check(pid, model, prov, est, commit=True)
         if not ok_b:
             attempts.append({"provider": pid, "skipped": f"{why}_exhausted"})
-            _trace("rung_fell", role=role, frm=pid, to="(next)", reason=f"{why} budget exhausted")
+            _trace("rung_fell", role=role, frm=pid, model=model, to="(next)",
+                   reason=f"{why} budget exhausted")
             continue
-        try:
-            data, hdrs = _post_chat(prov["base_url"], key, model, msgs, mt_eff)
-            _update_budget_from_headers(pid, model, hdrs)
-            content = data.get("choices", [{}])[0].get("message", {}).get("content")
-            usage = data.get("usage", {}) or {}
-            if content is None:  # reasoning models can return empty content if budget burned
-                raise ValueError("empty content (reasoning budget exhausted?)")
-        except Exception as e:  # noqa: BLE001 - any failure -> silently fall to next rung
-            reason = f"{type(e).__name__}: {str(e)[:80]}"
+        budget = _THINKING_BUDGET.get(role, 0)
+        extra_body = _reasoning_body(prov.get("base_url", ""), budget)
+        # Two attempts per rung with a short backoff before falling through — a free-tier
+        # 429 is often transient, so a brief retry keeps the run on the $0 rung instead of
+        # cascading straight to paid (Fix 3). Non-429 errors fall through immediately.
+        data = hdrs = None
+        reason = ""
+        for _attempt in range(_RUNG_RETRIES):
+            try:
+                data, hdrs = _post_chat(prov["base_url"], key, model, msgs, mt_eff, extra_body)
+                _update_budget_from_headers(pid, model, hdrs)
+                content = data.get("choices", [{}])[0].get("message", {}).get("content")
+                usage = data.get("usage", {}) or {}
+                if content is None:  # reasoning models can return empty content if budget burned
+                    raise ValueError("empty content (reasoning budget exhausted?)")
+                reason = ""
+                break
+            except Exception as e:  # noqa: BLE001
+                reason = f"{type(e).__name__}: {str(e)[:80]}"
+                status = getattr(getattr(e, "response", None), "status_code", 0) or 0
+                transient = status in (429, 500, 502, 503, 529) or "429" in reason or "529" in reason
+                if transient and _attempt + 1 < _RUNG_RETRIES:
+                    time.sleep(_RUNG_BACKOFF_S)
+                    continue
+                break
+        if reason:
             attempts.append({"provider": pid, "failed": reason})
-            _trace("rung_fell", role=role, frm=pid, to="(next)", reason=reason)
+            # model + reason so the cascade is legible in the cockpit (e.g. 429x2 → next).
+            _trace("rung_fell", role=role, frm=pid, model=model, to="(next)",
+                   reason=(f"429x{_RUNG_RETRIES} → next" if "429" in reason else reason))
             continue
         cost = 0.0 if free else _cost(prov, role, usage)
         if not free:
             _record_cost(pid, role, cost)
-        _trace("role_resolved", role=role, provider=pid, model=model, fell=len(attempts))
+        # Surface the actual thinking tokens spent (role-aware budget, Fix 3) so the
+        # planner's reasoning is visible in the cockpit / cost view.
+        _details = usage.get("completion_tokens_details") or {}
+        thinking_tok = int(_details.get("reasoning_tokens") or usage.get("reasoning_tokens") or 0)
+        _trace("role_resolved", role=role, provider=pid, model=model, fell=len(attempts),
+               thinking_budget=budget, thinking_tok=thinking_tok,
+               out_tok=int(usage.get("completion_tokens", 0) or 0))
         return {"ok": True, "role": role, "role_active": True, "provider": pid, "model": model,
                 "content": content, "usage": usage, "cost_usd": round(cost, 6),
-                "free": free, "fell": attempts}
+                "free": free, "thinking_tok": thinking_tok, "fell": attempts}
 
     return {"ok": False, "proceed_local": True, "role": role, "role_active": True,
             "attempts": attempts,

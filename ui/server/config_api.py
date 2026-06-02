@@ -6,6 +6,9 @@ boolean ever comes back out.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -14,6 +17,46 @@ from typing import Any, Optional
 from lib.inference import config, roles
 
 from . import secrets_store
+
+
+# ── native directory picker (Fix 3) ───────────────────────────────────────────
+# The UI is served from this Python backend on the user's own machine, so we can
+# pop the OS-native folder chooser on their display. zenity (GNOME) first, then
+# kdialog (KDE), then yad. Returns {path} on selection, {cancelled} if dismissed,
+# {error} if no dialog tool / no display.
+def _dialog_tool() -> Optional[str]:
+    for t in ("zenity", "kdialog", "yad"):
+        if shutil.which(t):
+            return t
+    return None
+
+
+def browse_dir(start: str | None = None) -> dict[str, Any]:
+    """Open the OS native directory picker and return the chosen path. Best-effort:
+    needs a dialog tool AND a display (headless → graceful error → text entry)."""
+    tool = _dialog_tool()
+    if not tool:
+        return {"path": None, "error": "no dialog tool found",
+                "hint": "install zenity for directory browsing: sudo apt install zenity"}
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return {"path": None, "error": "no display available (headless session)"}
+    home = os.path.expanduser(start or "~")
+    if tool == "zenity":
+        cmd = ["zenity", "--file-selection", "--directory",
+               "--title=Select project directory", f"--filename={home}/"]
+    elif tool == "kdialog":
+        cmd = ["kdialog", "--getexistingdirectory", home]
+    else:  # yad
+        cmd = ["yad", "--file", "--directory", "--title=Select project directory"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"path": None, "error": f"dialog failed: {e}"}
+    if r.returncode == 0:
+        path = r.stdout.strip()
+        return {"path": path or None} if path else {"path": None, "cancelled": True}
+    # non-zero return = user cancelled/closed the dialog
+    return {"path": None, "cancelled": True}
 
 # Every env var that could hold a provider secret — used for masked status and for
 # injecting keychain-held keys into a launched agent.

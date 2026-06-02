@@ -93,6 +93,7 @@ def mode_meta(name: str) -> dict[str, Any]:
         "requires_gpu": bool(m.get("requires_gpu", False)),
         "monthly_cost": m.get("monthly_cost", "?"),
         "inference_mode": m.get("inference_mode", "full"),
+        "tagline": " ".join((m.get("tagline") or "").split()),
         "posture": " ".join((m.get("posture") or "").split()),
         "chains": m.get("chains") or {},
     }
@@ -139,6 +140,20 @@ def ceiling(mode_name: Optional[str] = None,
             env: Optional[dict[str, str]] = None) -> str:
     name = mode_name or active_mode_name(env)
     return mode_meta(name).get("inference_mode", "full")
+
+
+def thinking_budget(role: str, mode_name: Optional[str] = None) -> int:
+    """Role-aware reasoning/thinking-token ceiling (Fix 3). Reads the top-level
+    `thinking_budget:` map in roles.yaml (role → tokens); an active mode may override
+    via its `thinking_budget` block. 0 = no extended thinking requested. The budget
+    is a CEILING, not a floor — the model uses less on a simple task."""
+    base = (_load("roles.yaml").get("thinking_budget") or {})
+    name = mode_name or active_mode_name()
+    over = ((_modes_doc().get("modes") or {}).get(name) or {}).get("thinking_budget") or {}
+    try:
+        return int(over.get(role, base.get(role, 0)) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _split_rung(rung: str) -> tuple[str, str]:
