@@ -11,7 +11,7 @@
 const c = (v) => `oklch(var(--${v}-c) / <alpha-value>)`;
 
 export default {
-  content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  content: ["./index.html", "./src/**/*.{ts,tsx}", "../ui/web/src/**/*.{ts,tsx}"],
   theme: {
     extend: {
       fontFamily: {

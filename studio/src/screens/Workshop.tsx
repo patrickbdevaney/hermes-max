@@ -5,15 +5,15 @@
 // The run VIEW is still the web UI, shown in an iframe DEEP-LINKED to this run
 // (#/run/<id>) — a TEMPORARY transition fallback (Hard Decision #2). Phase 3
 // replaces it with a native render fed by the same Channel stream.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { renameProject, openProjectFolder, type Project } from "../lib/projects";
 import { startRunStream, stopRunStream, type StreamMsg } from "../lib/runstream";
 import { runTask, continueRun, steerRun, pauseRun, resumeRun, interruptRun } from "../lib/control";
 import { computeShadow, fmtMoney, fmtMultiple } from "../lib/shadow";
+import { reduceFeed, initialFeed } from "@webui/lib/feed";
 import { StatusDot } from "../components/StatusDot";
 import { CompletionCard } from "../components/CompletionCard";
-
-const WEB_UI = "http://127.0.0.1:7080";
+import { RunView } from "../run/RunView";
 
 export function Workshop({ project, onExit }: { project: Project; onExit: () => void }) {
   const [runId, setRunId] = useState<string | null>(null);
@@ -26,6 +26,9 @@ export function Workshop({ project, onExit }: { project: Project; onExit: () => 
   const [receipt, setReceipt] = useState<{ cost_usd: number; tokens: number } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const wasRunning = useRef(false);
+  // The SHARED reducer (same as the web UI) folds the Channel's structured event
+  // stream into the feed/flow/chrome the native RunView renders (Phase 3.2).
+  const [feed, dispatch] = useReducer(reduceFeed, initialFeed);
 
   useEffect(() => () => { stopRunStream().catch(() => void 0); }, []);
 
@@ -34,6 +37,10 @@ export function Workshop({ project, onExit }: { project: Project; onExit: () => 
 
   function consume(m: StreamMsg) {
     setMsg(m);
+    if (m.events && m.events.length) {
+      const now = Date.now();
+      dispatch({ type: "batch", events: m.events.map((e) => ({ evt: e.event as any, data: e.data, now })) });
+    }
     if (wasRunning.current && !m.chrome.running && m.chrome.done) {
       setReceipt({ cost_usd: m.chrome.cost_usd, tokens: m.chrome.tokens });
     }
@@ -48,7 +55,8 @@ export function Workshop({ project, onExit }: { project: Project; onExit: () => 
       if (runId && !running) {
         await continueRun(runId, t);                 // turn 2+ on the same run
       } else {
-        const h = await runTask(project.dir, t);     // fresh run — Studio owns the id
+        dispatch({ type: "reset", userText: t });     // clear the feed for a fresh run
+        const h = await runTask(project.dir, t);       // fresh run — Studio owns the id
         setRunId(h.run_id);
         await startRunStream(h.run_id, consume);
       }
@@ -108,10 +116,10 @@ export function Workshop({ project, onExit }: { project: Project; onExit: () => 
         </div>
       )}
 
-      {/* run view */}
+      {/* run view — rendered NATIVELY from the Channel via the shared reducer
+          (Phase 3.2). The iframe is gone: one origin, one reducer, Cmd-K works. */}
       {runId ? (
-        // TEMPORARY transition fallback — the full web UI deep-linked to this run.
-        <iframe title="hermes-max" src={`${WEB_UI}/#/run/${encodeURIComponent(runId)}`} className="min-h-0 flex-1 border-0" />
+        <div className="min-h-0 flex-1"><RunView feed={feed} live={running} /></div>
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center px-6">
           <div className="w-full max-w-xl space-y-3 text-center">
