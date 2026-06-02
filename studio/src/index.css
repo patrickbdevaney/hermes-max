@@ -1,0 +1,162 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================================
+   PHASE 0 — design-token foundation (OKLCH, perceptually uniform)
+   ----------------------------------------------------------------------------
+   Every colour is stored as an OKLCH *channel triple* (`--x-c: L C H`) so that
+   Tailwind's `<alpha-value>` opacity modifiers (`bg-accent/30`) resolve to a
+   real `oklch(L C H / .3)` — one source of truth, alpha for free. A resolved
+   convenience var (`--x: oklch(var(--x-c))`) is provided for direct use in CSS
+   and SVG (the hand-rolled Flow graph paints strokes with these).
+
+   The neutral ramp is WARM and LOW-SATURATION (Linear's lesson: keep "chrome
+   blue" out of the greys). Hue ~75 (warm) at chroma ≈0.004–0.008. Two NEW
+   semantic identities carry the product thesis and must never be confused with
+   the accent or any status colour:
+     --conductor  the supervisor/intelligence colour — a warm GOLD
+     --executor   the calm worker-lane neutral — a cool desaturated slate
+   ========================================================================== */
+:root {
+  color-scheme: dark;
+
+  /* ── neutral surfaces (warm, low-sat) ───────────────────────────────── */
+  --ink-950-c: 0.155 0.004 75;   /* bg-base   */
+  --ink-900-c: 0.205 0.005 75;   /* bg-surface (cards, panels) */
+  --ink-850-c: 0.255 0.006 75;   /* bg-overlay (popovers, raised) */
+  --ink-800-c: 0.285 0.006 75;   /* hairline fills / badges */
+  --ink-700-c: 0.335 0.007 75;   /* borders, edges */
+  --ink-600-c: 0.405 0.008 75;
+  --ink-input-c: 0.175 0.004 75; /* recessed input wells */
+
+  /* ── text hierarchy (warm) ──────────────────────────────────────────── */
+  --mist-100-c: 0.945 0.004 80;  /* primary (headings, key values) */
+  --mist-200-c: 0.865 0.005 80;
+  --mist-300-c: 0.715 0.006 80;  /* secondary (body, labels) */
+  --mist-400-c: 0.545 0.007 80;  /* tertiary (captions, cost) */
+  --mist-500-c: 0.455 0.006 80;  /* quaternary (timestamps) */
+  --mist-600-c: 0.365 0.005 80;  /* faintest (gutter rules) */
+
+  /* ── accent — primary action + live/active ONLY (calm blue) ─────────── */
+  --accent-c:       0.665 0.155 250;
+  --accent-hover-c: 0.730 0.140 250;
+
+  /* ── status (always paired with icon + label; never colour-alone) ───── */
+  --status-success-c: 0.720 0.170 150;
+  --status-warning-c: 0.720 0.160 60;   /* orange — shifted off gold so it
+                                            never reads as the conductor */
+  --status-error-c:   0.640 0.205 25;
+  --status-info-c:    0.700 0.130 245;
+
+  /* ── the two thesis identities (NEW) ────────────────────────────────── */
+  --conductor-c:       0.805 0.135 90;   /* warm gold — supervisor */
+  --conductor-hover-c: 0.860 0.120 90;
+  --executor-c:        0.625 0.014 250;  /* cool calm slate — worker */
+
+  --code-text-c: 0.835 0.022 230;
+
+  /* ── resolved convenience vars (direct CSS / SVG strokes) ───────────── */
+  --bg-base:    oklch(var(--ink-950-c));
+  --bg-surface: oklch(var(--ink-900-c));
+  --bg-overlay: oklch(var(--ink-850-c));
+  --bg-input:   oklch(var(--ink-input-c));
+
+  --text-primary:   oklch(var(--mist-100-c));
+  --text-secondary: oklch(var(--mist-300-c));
+  --text-tertiary:  oklch(var(--mist-400-c));
+  --text-disabled:  oklch(var(--mist-600-c));
+
+  --border-subtle:  oklch(1 0 0 / 0.06);
+  --border-default: oklch(1 0 0 / 0.10);
+  --border-strong:  oklch(1 0 0 / 0.16);
+
+  --accent:        oklch(var(--accent-c));
+  --accent-hover:  oklch(var(--accent-hover-c));
+  --edge:          oklch(var(--ink-700-c));   /* default flow-graph edge */
+
+  --status-success: oklch(var(--status-success-c));
+  --status-warning: oklch(var(--status-warning-c));
+  --status-error:   oklch(var(--status-error-c));
+  --status-info:    oklch(var(--status-info-c));
+
+  --conductor:       oklch(var(--conductor-c));
+  --conductor-hover: oklch(var(--conductor-hover-c));
+  --executor:        oklch(var(--executor-c));
+
+  /* ── spacing scale (4 / 8 px; no arbitrary values anywhere) ─────────── */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px;
+
+  /* ── typography — distinctive, with intent ──────────────────────────── */
+  /* A display face for headings, a refined text face for body, a tabular-
+     figures mono for every number. Distinctive system faces are preferred
+     over generic Inter/Arial (Anthropic's frontend-design guidance); the
+     stacks degrade gracefully and bundle no webfonts (sovereignty). */
+  --font-display: "Space Grotesk", "Geist", "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  --font-sans: "Geist", "SF Pro Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Tabular figures everywhere by default — token counts and costs must not
+     shift width as digits change (a top craft signal). */
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "ss01" 1;
+}
+
+/* Headings carry the display face + tight negative tracking (Vercel discipline). */
+h1, h2, h3 { font-family: var(--font-display); letter-spacing: -0.02em; }
+
+/* All monospace renders tabular by construction (numbers, code, costs). */
+code, pre, .font-mono { font-variant-numeric: tabular-nums; }
+
+/* Accessibility: honour reduced-motion. State is NEVER conveyed by motion
+   alone (always colour + icon + label), so disabling animation loses no
+   meaning. Every NEW animation must keep that contract. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+/* Settings toggle — force reduced motion regardless of OS preference. */
+html[data-reduce-motion="1"] *, html[data-reduce-motion="1"] *::before, html[data-reduce-motion="1"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+/* Density toggle — compact scales the type ramp down a notch. */
+html[data-density="compact"] { font-size: 14px; }
+
+/* Honest focus ring for keyboard users (Radix-free a11y). */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: oklch(var(--ink-700-c)); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* Skeleton shimmer for loading states (NOT spinners). Colour-only; frozen
+   under reduced-motion, where the skeleton's shape still reads as "loading". */
+@keyframes hmx-shimmer { 100% { transform: translateX(100%); } }
+.hmx-skeleton {
+  position: relative; overflow: hidden;
+  background: oklch(var(--ink-800-c));
+}
+.hmx-skeleton::after {
+  content: ""; position: absolute; inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent,
+    oklch(var(--ink-700-c) / 0.6), transparent);
+  animation: hmx-shimmer 1.4s infinite;
+}
