@@ -1,50 +1,62 @@
 /** @type {import('tailwindcss').Config} */
-// PART II design system — the Vercel/Linear discipline applied as tokens. The
-// existing semantic names (ink/mist/accent/good/warn/bad) are remapped to the
-// directive's exact values so the whole UI adopts the premium palette without a
-// component rewrite; new tokens (bg-*, border-*, text-*, status-*) are added too.
+// PHASE 0 design system — now fully VAR-DRIVEN. Every colour resolves to
+// `oklch(var(--TOKEN-c) / <alpha-value>)`, so (a) re-tuning a CSS var in
+// index.css re-skins the whole UI, and (b) Tailwind opacity modifiers
+// (`bg-accent/30`, `border-good/40`, `bg-ink-950/40`) just work — they inject
+// the alpha into the OKLCH. The semantic names the components already use
+// (ink / mist / accent / good / warn / bad / status) are preserved; two NEW
+// identities — `conductor` (gold) and `executor` (slate) — carry the thesis.
+
+// oklch channel-var helper: a colour that honours Tailwind's alpha modifier.
+const c = (v) => `oklch(var(--${v}-c) / <alpha-value>)`;
+
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
       fontFamily: {
-        sans: ["Inter", "Geist", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
-        mono: ["Geist Mono", "JetBrains Mono", "ui-monospace", "SF Mono", "Menlo", "monospace"],
+        display: ["var(--font-display)"],
+        sans: ["var(--font-sans)"],
+        mono: ["var(--font-mono)"],
       },
       colors: {
         // Background layers (base → surface → overlay → recessed input).
         ink: {
-          950: "#0a0a0b",  // bg-base
-          900: "#131316",  // bg-surface (cards, panels)
-          850: "#1c1c21",  // bg-overlay (popovers, raised)
-          800: "#202027",  // hairline borders / badge fills
-          700: "#2a2a30",
-          600: "#3a3a42",
+          950: c("ink-950"), 900: c("ink-900"), 850: c("ink-850"),
+          800: c("ink-800"), 700: c("ink-700"), 600: c("ink-600"),
+          input: c("ink-input"),
         },
         // Semantic background aliases (the directive's names).
-        bg: { base: "#0a0a0b", surface: "#131316", overlay: "#1c1c21", input: "#0e0e10" },
-        // Text hierarchy (mist scale: 100 brightest → 400 dimmest).
+        bg: { base: c("ink-950"), surface: c("ink-900"), overlay: c("ink-850"), input: c("ink-input") },
+        // Text hierarchy (mist scale: 100 brightest → 600 dimmest).
         mist: {
-          100: "#ededef",  // primary (headings, key values)
-          200: "#cfcfd6",
-          300: "#a1a1aa",  // secondary (body, labels)
-          400: "#6b6b73",  // tertiary (captions, hints, cost)
-          500: "#52525a",  // quaternary (timestamps, faint meta)
-          600: "#3f3f46",  // faintest (gutter rules, disabled)
+          100: c("mist-100"), 200: c("mist-200"), 300: c("mist-300"),
+          400: c("mist-400"), 500: c("mist-500"), 600: c("mist-600"),
         },
-        text: { primary: "#ededef", secondary: "#a1a1aa", tertiary: "#6b6b73", disabled: "#3f3f46" },
-        // Accent — primary action + live/active state ONLY.
-        accent: { DEFAULT: "#4d8dff", hover: "#6fa3ff", soft: "rgba(77,141,255,0.12)" },
+        text: { primary: c("mist-100"), secondary: c("mist-300"), tertiary: c("mist-400"), disabled: c("mist-600") },
+        // Accent — primary action + live/active state ONLY. `soft` mirrors
+        // DEFAULT so `accent-soft/15` resolves to the intended low alpha.
+        accent: { DEFAULT: c("accent"), hover: c("accent-hover"), soft: c("accent") },
         // Status (always paired with icon + label in the UI; never colour-alone).
-        good: { DEFAULT: "#3fb950", soft: "rgba(63,185,80,0.15)" },
-        warn: { DEFAULT: "#d29922", soft: "rgba(210,153,34,0.15)" },
-        bad: { DEFAULT: "#f85149", soft: "rgba(248,81,73,0.15)" },
-        status: { success: "#3fb950", warning: "#d29922", error: "#f85149", info: "#58a6ff" },
-        code: { bg: "#0e0e10", text: "#c9d1d9" },
+        good: { DEFAULT: c("status-success"), soft: c("status-success") },
+        warn: { DEFAULT: c("status-warning"), soft: c("status-warning") },
+        bad:  { DEFAULT: c("status-error"),   soft: c("status-error") },
+        status: {
+          success: c("status-success"), warning: c("status-warning"),
+          error: c("status-error"), info: c("status-info"),
+        },
+        // The two thesis identities (NEW).
+        conductor: { DEFAULT: c("conductor"), hover: c("conductor-hover"), soft: c("conductor") },
+        executor:  { DEFAULT: c("executor"), soft: c("executor") },
+        code: { bg: c("ink-input"), text: c("code-text") },
       },
       borderRadius: {
-        // Sharp — never > 8px. Remap the keys components already use.
-        DEFAULT: "4px", sm: "2px", md: "4px", lg: "4px", xl: "4px", "2xl": "6px", full: "9999px",
+        // Sharp — never > 8px.
+        DEFAULT: "4px", sm: "2px", md: "4px", lg: "6px", xl: "8px", "2xl": "8px", full: "9999px",
+      },
+      spacing: {
+        // 4 / 8 px scale (mirrors --space-*); no arbitrary values anywhere.
+        1: "4px", 2: "8px", 3: "12px", 4: "16px", 5: "20px", 6: "24px", 8: "32px", 10: "40px",
       },
       letterSpacing: { tightish: "-0.01em", tight2: "-0.02em" },
       keyframes: {
@@ -52,18 +64,20 @@ export default {
         risein: { "0%": { opacity: "0", transform: "translateY(6px)" },
                   "100%": { opacity: "1", transform: "translateY(0)" } },
         flash: { "0%": { backgroundColor: "transparent" },
-                 "30%": { backgroundColor: "rgba(77,141,255,0.12)" },
+                 "30%": { backgroundColor: "oklch(var(--accent-c) / 0.12)" },
                  "100%": { backgroundColor: "transparent" } },
-        // marching-ants for the active flow edge (n8n/ComfyUI style): the dash
-        // pattern scrolls along the stroke. State is also conveyed by colour, so
-        // reduced-motion (which freezes this) loses nothing.
+        // marching-ants for the active flow edge (n8n/ComfyUI style).
         dash: { to: { strokeDashoffset: "-12" } },
+        // conductor intervention pin drop (Phase 3); colour also encodes it.
+        pindrop: { "0%": { opacity: "0", transform: "translateY(-8px)" },
+                   "100%": { opacity: "1", transform: "translateY(0)" } },
       },
       animation: {
         pulse2: "pulse2 2.4s ease-in-out infinite",
         risein: "risein 0.2s ease-out",
         flash: "flash 1.1s ease-out",
         dash: "dash 0.6s linear infinite",
+        pindrop: "pindrop 0.25s ease-out",
       },
     },
   },

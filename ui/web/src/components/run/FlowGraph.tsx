@@ -17,11 +17,13 @@ const STEP_X = 28;         // left of the step column
 const COND_X = STEP_X + NODE_W + 90;   // conductor column
 const COND_W = 184;
 
-const STEP_TONE: Record<StepStatus, { border: string; ring: string; glyph: string; label: string }> = {
-  pending:  { border: "border-ink-700",  ring: "#2a2a30", glyph: "○", label: "text-mist-400" },
-  active:   { border: "border-accent",   ring: "#4d8dff", glyph: "◐", label: "text-mist-100" },
-  complete: { border: "border-good",     ring: "#3fb950", glyph: "✓", label: "text-mist-200" },
-  failed:   { border: "border-bad",      ring: "#f85149", glyph: "✗", label: "text-mist-100" },
+// `cvar` is the OKLCH channel var so both the glyph colour and the translucent
+// active-step glow derive from one token (no hardcoded hex).
+const STEP_TONE: Record<StepStatus, { border: string; cvar: string; glyph: string; label: string }> = {
+  pending:  { border: "border-ink-700",  cvar: "--ink-700-c",        glyph: "○", label: "text-mist-400" },
+  active:   { border: "border-accent",   cvar: "--accent-c",         glyph: "◐", label: "text-mist-100" },
+  complete: { border: "border-good",     cvar: "--status-success-c", glyph: "✓", label: "text-mist-200" },
+  failed:   { border: "border-bad",      cvar: "--status-error-c",   glyph: "✗", label: "text-mist-100" },
 };
 
 function stepY(i: number): number { return TOP + i * (NODE_H + V_GAP); }
@@ -117,9 +119,9 @@ function StepNode({ step, y, live }: { step: FlowStep; y: number; live: boolean 
     <foreignObject x={STEP_X} y={y} width={NODE_W} height={NODE_H}>
       <div
         className={`flex h-full items-center gap-2 rounded-md border bg-ink-900 px-3 ${t.border}`}
-        style={pulsing ? { boxShadow: `0 0 0 3px ${t.ring}22` } : undefined}
+        style={pulsing ? { boxShadow: `0 0 0 3px oklch(var(${t.cvar}) / 0.14)` } : undefined}
       >
-        <span className={`text-sm ${t.label}`} style={{ color: t.ring }}>{t.glyph}</span>
+        <span className={`text-sm ${t.label}`} style={{ color: `oklch(var(${t.cvar}))` }}>{t.glyph}</span>
         <div className="min-w-0">
           <div className={`text-xs font-medium ${t.label}`}>Step {step.n}</div>
           <div className="truncate text-[10px] text-mist-400">
@@ -138,7 +140,7 @@ function Edge({ x1, y1, x2, y2, active, conductor }:
   const d = conductor
     ? `M${x1},${y1} C${x1 + 45},${y1} ${x2 - 45},${y2} ${x2},${y2}`
     : `M${x1},${y1} C${x1},${midY} ${x2},${midY} ${x2},${y2}`;
-  const color = conductor ? "#d29922" : active ? "#4d8dff" : "#2a2a30";
+  const color = conductor ? "var(--conductor)" : active ? "var(--accent)" : "var(--edge)";
   return (
     <path
       d={d} fill="none" stroke={color} strokeWidth={conductor ? 1.5 : 2}
