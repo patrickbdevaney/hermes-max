@@ -52,8 +52,17 @@ export const api = {
     get<{ runs: HistoryRun[] }>(`/api/history?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
   historyRun: (runId: string) =>
     get<HistoryDetail>(`/api/history/${encodeURIComponent(runId)}`),
-  run: (cwd: string, prompt: string, mode?: string | null) =>
-    post<RunHandle>("/api/run", { cwd, prompt, mode }),
+  // Phase 5: live control of a run's process + the editable PLAN.md.
+  signal: (runId: string, action: "interrupt" | "pause" | "resume") =>
+    post<{ ok: boolean; action?: string; error?: string }>(
+      `/api/run/${encodeURIComponent(runId)}/signal`, { action }),
+  readPlan: (cwd: string) =>
+    get<{ ok: boolean; path: string; exists: boolean; content: string; error?: string }>(
+      `/api/plan?cwd=${encodeURIComponent(cwd)}`),
+  writePlan: (cwd: string, content: string) =>
+    post<{ ok: boolean; path?: string; error?: string }>("/api/plan", { cwd, content }),
+  run: (cwd: string, prompt: string, mode?: string | null, approvalGate?: boolean) =>
+    post<RunHandle>("/api/run", { cwd, prompt, mode, approval_gate: !!approvalGate }),
   // Turn 2+ of a conversation: continue the same run (server reuses its cwd/session).
   continueRun: (runId: string, prompt: string) =>
     post<RunHandle>("/api/run", { run_id: runId, prompt }),

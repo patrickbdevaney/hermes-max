@@ -36,6 +36,14 @@ export default function App() {
   const [firstRun, setFirstRun] = useState(false);
   const [liveRuns, setLiveRuns] = useState(0);
   const autoRouted = useRef(false);
+  // Phase 5 control surface: a pending-message queue + pause + signal-busy.
+  const [pending, setPending] = useState<string[]>([]);
+  const [paused, setPaused] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
+
+  const lastTurn = view.turns[view.turns.length - 1];
+  const working = !!lastTurn && lastTurn.status === "working";
+  const prevWorking = useRef(working);
 
   const refreshStatus = useCallback(() => {
     api.status().then(setStatus).catch(() => void 0);
@@ -92,6 +100,7 @@ export default function App() {
     dispatch({ type: "reset", userText: meta?.prompt ?? null });
     feedDispatch({ type: "reset", userText: meta?.prompt ?? null });
     feedBuf.current = [];
+    setPending([]); setPaused(false);   // control state is per-run
     const stream = openStream(activeRunId, (t, d) => {
       dispatch({ type: "event", evt: t, data: d });
       feedBuf.current.push({ evt: t, data: d, now: Date.now() });
@@ -116,7 +125,8 @@ export default function App() {
   // ── actuation ──
   const launch = useCallback(async (cwd: string, prompt: string) => {
     try {
-      const run = await api.run(cwd, prompt, status?.mode);
+      const approvalGate = localStorage.getItem("hmx.approvalGate") === "1";
+      const run = await api.run(cwd, prompt, status?.mode, approvalGate);
       journal.add({ run_id: run.run_id, prompt, cwd, mode: run.mode ?? status?.mode ?? null, start_ts: Date.now() });
       setActiveRunId(run.run_id);
       navigate("run", run.run_id);
@@ -144,6 +154,32 @@ export default function App() {
     navigate("run");
   }, []);
 
+  // ── Phase 5 control handlers ──
+  const signal = useCallback((action: "interrupt" | "pause" | "resume") => {
+    if (!activeRunId) return;
+    setControlBusy(true);
+    api.signal(activeRunId, action)
+      .then((r) => { if (r.ok && action !== "interrupt") setPaused(action === "pause"); })
+      .catch(() => void 0)
+      .finally(() => setControlBusy(false));
+  }, [activeRunId]);
+  const steer = useCallback((t: string) => setPending((p) => [t, ...p]), []);      // front
+  const queuePending = useCallback((t: string) => setPending((p) => [...p, t]), []); // back
+  const removePending = useCallback((i: number) => setPending((p) => p.filter((_, k) => k !== i)), []);
+
+  // Drain the queue on handback: when the turn goes working→idle, send the next
+  // pending/steer message as a continue. One at a time, in order.
+  useEffect(() => {
+    if (prevWorking.current && !working && activeRunId && pending.length > 0) {
+      const [next, ...rest] = pending;
+      setPending(rest);
+      cont(next);
+    }
+    prevWorking.current = working;
+  }, [working, pending, activeRunId, cont]);
+
+  const cwd = activeRunId ? (journal.get(activeRunId)?.cwd ?? null) : null;
+
   const fillHeight = route.name === "run" || route.name === "runs" || route.name === "replay";
 
   return (
@@ -167,6 +203,16 @@ export default function App() {
                 feed={feed}
                 conn={conn}
                 status={status}
+                cwd={cwd}
+                control={{
+                  paused, pending, controlBusy,
+                  onInterrupt: () => signal("interrupt"),
+                  onPause: () => signal("pause"),
+                  onResume: () => signal("resume"),
+                  onSteer: steer,
+                  onPending: queuePending,
+                  onRemovePending: removePending,
+                }}
                 onLaunch={launch}
                 onContinue={cont}
                 onNewRun={newRun}

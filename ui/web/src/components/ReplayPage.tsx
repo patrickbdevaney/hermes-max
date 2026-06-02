@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { navigate } from "../lib/router";
+import { journal } from "../lib/runjournal";
 import { reduceFeed, initialFeed } from "../lib/feed";
 import { RunChrome } from "./run/RunChrome";
 import { VirtualFeed } from "./run/VirtualFeed";
@@ -63,6 +64,18 @@ export function ReplayPage({ runId }: { runId: string | null }) {
   const cur = detail.events[Math.max(0, pos - 1)];
   const permalink = `${location.origin}${location.pathname}#/replay/${encodeURIComponent(runId)}`;
 
+  // Phase 5.4 branch/fork — re-run this prompt in the SAME working directory as a
+  // fresh run (a practical fork from a past run's starting state).
+  async function fork() {
+    const s = detail!.summary;
+    if (!s.cwd || !s.prompt) return;
+    try {
+      const run = await api.run(s.cwd, s.prompt, s.mode);
+      journal.add({ run_id: run.run_id, prompt: s.prompt, cwd: s.cwd, mode: run.mode ?? s.mode ?? null, start_ts: Date.now() });
+      navigate("run", run.run_id);
+    } catch { /* surfaced on the run view */ }
+  }
+
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="flex items-center justify-between border-b border-ink-800 px-1 pb-3">
@@ -77,6 +90,13 @@ export function ReplayPage({ runId }: { runId: string | null }) {
             className="rounded-md border border-ink-700 px-2.5 py-1 text-xs text-mist-200 hover:bg-ink-850" title={permalink}>
             ⎘ copy link
           </button>
+          {detail.summary.cwd && detail.summary.prompt && (
+            <button type="button" onClick={fork}
+              className="rounded-md border border-accent/40 px-2.5 py-1 text-xs text-accent hover:bg-accent-soft/15"
+              title="re-run this prompt in the same directory (fork)">
+              ↗ fork
+            </button>
+          )}
           <button type="button" onClick={() => navigate("runs")}
             className="rounded-md border border-ink-700 px-2.5 py-1 text-xs text-mist-200 hover:bg-ink-850">← runs</button>
         </div>

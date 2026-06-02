@@ -119,6 +119,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"runs": runs.list_runs()})
         if path == "/api/keys/status":
             return self._send_json(config_api.keys_status())
+        if path == "/api/plan":
+            # Phase 5.4 — read PLAN.md for a working directory.
+            cwd = (query.get("cwd") or [os.getcwd()])[0]
+            return self._send_json(runs.read_plan(cwd))
         if path == "/api/history":
             # Searchable run history (Phase 4) — SQLite + FTS5 over the livelog.
             from . import history
@@ -169,7 +173,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(runs.continue_run(existing, prompt))
             cwd = body.get("cwd") or os.getcwd()
             mode = body.get("mode")
-            return self._send_json(runs.create_run(cwd, prompt, mode))
+            return self._send_json(runs.create_run(
+                cwd, prompt, mode, approval_gate=bool(body.get("approval_gate"))))
         if path.startswith("/api/keys/"):
             provider = unquote(path[len("/api/keys/"):]).strip("/")
             if not provider:
@@ -178,6 +183,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(config_api.store_key(provider, value))
         if path == "/api/config":
             return self._send_json(config_api.apply_config(body))
+        if path.startswith("/api/run/") and path.endswith("/signal"):
+            # Phase 5.2/5.4 — interrupt / pause / resume a live run.
+            run_id = unquote(path[len("/api/run/"):-len("/signal")]).strip("/")
+            return self._send_json(runs.signal_run(run_id, body.get("action") or ""))
+        if path == "/api/plan":
+            # Phase 5.4 — write an edited PLAN.md (mid-run edits trigger re-planning
+            # the next time the harness re-reads its living plan).
+            return self._send_json(runs.write_plan(body.get("cwd"), body.get("content") or ""))
         if path == "/api/test-connection":
             provider = body.get("provider") or ""
             if not provider:
