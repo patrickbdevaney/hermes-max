@@ -9,6 +9,7 @@ mod detect;
 mod keychain;
 mod config;
 mod projects;
+mod workshop;
 
 use tauri::Manager;
 
@@ -19,6 +20,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(sidecar::SidecarManager::default())
+        .manage(workshop::WorkshopTailer::default())
         .setup(|app| {
             // Start the Python sidecar (+ MCP servers) in the background and emit
             // `stack-ready` once /healthz answers; the loading screen waits on it.
@@ -43,6 +45,8 @@ fn main() {
             projects::delete_project,
             projects::open_path,
             projects::pick_directory,
+            workshop::start_workshop,
+            workshop::stop_workshop,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Hermes Studio")

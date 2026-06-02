@@ -160,6 +160,25 @@ pub fn delete_project(id: String) -> Result<(), String> {
     save_all(&list)
 }
 
+/// Update a project's last-run summary from a completed workshop run (matched by
+/// directory). Drives the project card status/cost (S2) and the cost total (S5).
+pub fn update_stats(dir: &str, step: i64, total: i64, cost: f64, tokens: i64) {
+    let mut list = load_all();
+    if let Some(p) = list.iter_mut().find(|p| p.dir == dir) {
+        p.last_run_ts = Some(now_ts());
+        p.last_status = Some("done".into());
+        if step > 0 {
+            p.last_step = Some(step);
+        }
+        if total > 0 {
+            p.last_total = Some(total);
+        }
+        p.lifetime_cost_usd += cost;
+        p.lifetime_tokens += tokens;
+        let _ = save_all(&list);
+    }
+}
+
 #[tauri::command]
 pub fn open_path(path: String) {
     #[cfg(target_os = "linux")]
