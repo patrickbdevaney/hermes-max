@@ -130,6 +130,14 @@ code, pre, .font-mono { font-variant-numeric: tabular-nums; }
     scroll-behavior: auto !important;
   }
 }
+/* Settings toggle — force reduced motion regardless of OS preference. */
+html[data-reduce-motion="1"] *, html[data-reduce-motion="1"] *::before, html[data-reduce-motion="1"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+/* Density toggle — compact scales the type ramp down a notch. */
+html[data-density="compact"] { font-size: 14px; }
 
 /* Honest focus ring for keyboard users (Radix-free a11y). */
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

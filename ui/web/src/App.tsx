@@ -20,7 +20,48 @@ import { ReplayPage } from "./components/ReplayPage";
 import { ActivityPage } from "./components/ActivityPage";
 import { ProvidersPage } from "./components/ProvidersPage";
 import { CostPage } from "./components/CostPage";
+import { ServicesPage } from "./components/ServicesPage";
+import { FabricPage } from "./components/FabricPage";
+import { SkillsPage } from "./components/SkillsPage";
+import { StatePage } from "./components/StatePage";
+import { SettingsPage } from "./components/SettingsPage";
+import { ConfigPage } from "./components/ConfigPage";
+import { PlanEditor } from "./components/run/PlanEditor";
 import { Wizard } from "./components/wizard/Wizard";
+import { Toaster } from "./components/Toaster";
+import { CommandPalette } from "./components/CommandPalette";
+import { pushToast, playCue } from "./lib/toast";
+import { getSettings } from "./lib/settings";
+
+// Phase 6.3 — turn high-signal SSE events into actionable toasts (+ optional
+// sound / desktop notification). Milestones only — never every token.
+function notifyEvent(type: string, d: any, runId: string | null) {
+  const jump = runId ? () => navigate("run", runId) : undefined;
+  const desktop = (title: string, body?: string) => {
+    if (getSettings().notify && typeof Notification !== "undefined"
+      && Notification.permission === "granted" && document.hidden) {
+      try { new Notification(title, { body }); } catch { /**/ }
+    }
+  };
+  if (type === "conductor") {
+    if (d?.event === "trigger") {
+      pushToast({ tone: "conductor", title: "Conductor intervened", detail: d.reason, actionLabel: "View", onAction: jump });
+      playCue("conductor"); desktop("Conductor intervened", d.reason);
+    } else if (d?.event === "verify_fail") {
+      pushToast({ tone: "bad", title: "Verify failed", detail: `step ${d.step ?? "?"}`, onAction: jump });
+      playCue("fail");
+    } else if (d?.event === "verify_pass") {
+      playCue("pass");
+    } else if (d?.event === "done_rejected") {
+      pushToast({ tone: "warn", title: "Done rejected — tests not yet green", onAction: jump });
+    } else if (d?.event === "run_complete") {
+      pushToast({ tone: "good", title: "Run complete — verified", onAction: jump });
+      playCue("complete"); desktop("Run complete", "verified");
+    }
+  } else if (type === "gate" && d?.status === "fail") {
+    pushToast({ tone: "bad", title: `Gate failed: ${d.kind ?? "verify"}`, onAction: jump });
+  }
+}
 
 export default function App() {
   const route = useRoute();
@@ -104,6 +145,7 @@ export default function App() {
     const stream = openStream(activeRunId, (t, d) => {
       dispatch({ type: "event", evt: t, data: d });
       feedBuf.current.push({ evt: t, data: d, now: Date.now() });
+      notifyEvent(t, d, activeRunId);
     }, setConn);
     // coalesce buffered frames into one feed reduction per BATCH_FLUSH_MS tick
     const flush = setInterval(() => {
@@ -184,6 +226,13 @@ export default function App() {
 
   return (
     <div className="flex h-screen overflow-hidden">
+      <Toaster />
+      <CommandPalette
+        activeRunId={activeRunId}
+        working={working}
+        onNewRun={newRun}
+        onInterrupt={() => signal("interrupt")}
+      />
       <SideNav active={route.name} status={status} liveRuns={liveRuns} />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopChrome
@@ -220,9 +269,16 @@ export default function App() {
             )}
             {route.name === "runs" && <HistoryPage />}
             {route.name === "replay" && <ReplayPage runId={route.runId} />}
+            {route.name === "plan" && <PlanEditor cwd={route.runId ? (journal.get(route.runId)?.cwd ?? null) : cwd} />}
             {route.name === "activity" && <ActivityPage />}
             {route.name === "providers" && <ProvidersPage status={status} refreshStatus={refreshStatus} />}
             {route.name === "cost" && <CostPage />}
+            {route.name === "services" && <ServicesPage />}
+            {route.name === "fabric" && <FabricPage status={status} />}
+            {route.name === "skills" && <SkillsPage />}
+            {route.name === "state" && <StatePage runId={route.runId} />}
+            {route.name === "config" && <ConfigPage refreshStatus={refreshStatus} />}
+            {route.name === "settings" && <SettingsPage />}
             {route.name === "setup" && (
               <Wizard
                 status={status}

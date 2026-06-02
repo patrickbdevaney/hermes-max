@@ -118,6 +118,15 @@ export interface HistoryRun {
 export interface HistoryEvent { event: string; data: any; seq: number; ts: number; hms: string }
 export interface HistoryDetail { summary: HistoryRun; events: HistoryEvent[] }
 
+// ── Phase 6: dashboards (services health + state-file inspection) ──
+export interface ServiceHealth { port: number; open: boolean; latency_ms: number | null }
+export interface ServicesPayload { services: ServiceHealth[]; up: number; total: number }
+export interface StateFile {
+  name: string; path: string; exists: boolean; size?: number;
+  json?: any; content?: string; error?: string;
+}
+export interface StateFilesPayload { cwd: string; files: StateFile[] }
+
 export interface RecentProject { path: string; last_used: number | null }
 export interface RunHandle {
   run_id: string; cwd: string; prompt: string | null; mode: string | null;

@@ -3,7 +3,7 @@
 import { launchToken } from "./token";
 import type {
   StatusPayload, RecentProject, RunHandle, KeysStatus, TestResult, ConfigResult,
-  CostReport, RunSummary, HistoryRun, HistoryDetail,
+  CostReport, RunSummary, HistoryRun, HistoryDetail, ServicesPayload, StateFilesPayload,
 } from "../types";
 
 // The CSRF cookie is set SameSite=Strict by the server on page load; we echo it
@@ -61,6 +61,9 @@ export const api = {
       `/api/plan?cwd=${encodeURIComponent(cwd)}`),
   writePlan: (cwd: string, content: string) =>
     post<{ ok: boolean; path?: string; error?: string }>("/api/plan", { cwd, content }),
+  // Phase 6 dashboards.
+  services: () => get<ServicesPayload>("/api/services"),
+  state: (cwd: string) => get<StateFilesPayload>(`/api/state?cwd=${encodeURIComponent(cwd)}`),
   run: (cwd: string, prompt: string, mode?: string | null, approvalGate?: boolean) =>
     post<RunHandle>("/api/run", { cwd, prompt, mode, approval_gate: !!approvalGate }),
   // Turn 2+ of a conversation: continue the same run (server reuses its cwd/session).

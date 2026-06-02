@@ -123,6 +123,15 @@ class Handler(BaseHTTPRequestHandler):
             # Phase 5.4 — read PLAN.md for a working directory.
             cwd = (query.get("cwd") or [os.getcwd()])[0]
             return self._send_json(runs.read_plan(cwd))
+        if path == "/api/services":
+            # Phase 6 — MCP service health (real loopback TCP probe).
+            from . import dashboards
+            return self._send_json(dashboards.services_health())
+        if path == "/api/state":
+            # Phase 6/7 — the run's on-disk state files (ground truth).
+            from . import dashboards
+            cwd = (query.get("cwd") or [os.getcwd()])[0]
+            return self._send_json(dashboards.read_state(cwd))
         if path == "/api/history":
             # Searchable run history (Phase 4) — SQLite + FTS5 over the livelog.
             from . import history
