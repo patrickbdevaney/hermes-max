@@ -17,8 +17,8 @@
 #   steer default: cheap-reliable-first — paid V4-Flash BEFORE the fragile free
 #                  tiers (corrected from the operator's own pricing).
 roles:
-  synth: [deepinfra, fireworks, together, deepseek, moonshot, anthropic]
-  steer: [deepinfra, cerebras, groq, gemini]
+  synth: [openrouter, deepinfra, fireworks, together, deepseek, moonshot, anthropic]
+  steer: [openrouter, deepinfra, cerebras, groq, gemini]
   escalate: [anthropic]
 
 # The parallel_draft POOL (UNORDERED; fanned out for cross-family diversity).

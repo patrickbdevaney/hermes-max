@@ -3,7 +3,7 @@
 import { launchToken } from "./token";
 import type {
   StatusPayload, RecentProject, RunHandle, KeysStatus, TestResult, ConfigResult,
-  CostReport,
+  CostReport, RunSummary,
 } from "../types";
 
 // The CSRF cookie is set SameSite=Strict by the server on page load; we echo it
@@ -45,6 +45,8 @@ export const api = {
   config: () => get<Record<string, unknown>>("/api/config"),
   cost: (window = "today") => get<CostReport>(`/api/cost?window=${encodeURIComponent(window)}`),
   recent: () => get<{ projects: RecentProject[] }>("/api/projects/recent"),
+  // All runs the server knows about — terminal / hm dev / UI-launched (Fix 4).
+  runs: () => get<{ runs: RunSummary[] }>("/api/runs"),
   run: (cwd: string, prompt: string, mode?: string | null) =>
     post<RunHandle>("/api/run", { cwd, prompt, mode }),
   // Turn 2+ of a conversation: continue the same run (server reuses its cwd/session).

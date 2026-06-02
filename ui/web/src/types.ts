@@ -88,6 +88,12 @@ export interface CostReport {
   free_budget_remaining: Record<string, number | null>;
 }
 
+// A run surfaced by the server registry (Fix 4) — terminal, hm dev, or UI-launched.
+export interface RunSummary {
+  run_id: string; cwd?: string | null; prompt?: string | null; mode?: string | null;
+  start_ts?: number | null; origin?: string; status?: string; active?: boolean;
+}
+
 export interface RecentProject { path: string; last_used: number | null }
 export interface RunHandle {
   run_id: string; cwd: string; prompt: string | null; mode: string | null;

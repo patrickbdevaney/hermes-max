@@ -113,6 +113,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(feeds.cost_payload(window))
         if path == "/api/projects/recent":
             return self._send_json({"projects": runs.recent_projects()})
+        if path == "/api/runs":
+            # All known runs (registry ∪ in-memory) so the UI shows ANY hermes run —
+            # terminal, hm dev, or launched here (Fix 4: universal SSE).
+            return self._send_json({"runs": runs.list_runs()})
         if path == "/api/keys/status":
             return self._send_json(config_api.keys_status())
         if path.startswith("/api/events/"):

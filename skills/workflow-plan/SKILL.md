@@ -16,23 +16,33 @@ metadata:
 
 # Plan — decompose before large changes
 
-Run this for any task spanning **more than ~5 files** or with non-trivial
-architecture. Don't free-solo large changes.
+## Task protocol — required, before any code or file action on a new task
 
-## Steps
+This is not optional. The verify gate will **not** pass a task with no `PLAN.md`
+(a task without a plan has no `DONE_CONDITION` and cannot be verified).
 
-1. **Ground first.** Make sure you've run `workflow-task-start` so the plan is
-   based on the actual codebase (real `search_code` hits and `recall_about`
-   history), not assumptions.
-2. **Write the plan.** Use Hermes's native `writing-plans` / `plan` skill to
-   produce a concrete, ordered plan: the files to touch, the order, the risky
-   steps, and how each step will be verified.
-3. **Decompose into tasks.** Lean on Hermes's native kanban decomposition
-   (`auto_decompose` is on) to break the plan into trackable units; use
-   subagent delegation (planner / coder / reviewer roles) for independent units
-   where it helps.
-4. **Define the done-gate up front.** State that each unit must pass `verify`
-   (`workflow-task-finish`) before it's considered complete.
+1. **Map the scope first.** Call `get_repo_map(cwd)` (the scopemap MCP) to see the
+   codebase structure — one line per file, fits the window even on a huge repo — or
+   to confirm it's a **greenfield** task with no existing code (empty map → proceed
+   straight to step 3).
+2. **Request only what you need.** Issue a `CONTEXT_REQUEST` via
+   `request_context(cwd, need_full=[...], need_signatures=[...], need_nothing=[...])`
+   so the window holds exactly the files you'll edit (full) and call (signatures),
+   nothing else — surgical context instead of ingesting everything or flying blind.
+3. **Produce the plan contract.** Use the conductor's synthesize/plan path (Kimi/
+   V4-Pro via the inference fabric) to write a concrete `PLAN.md`: the files to
+   touch, the order, the risky steps, how each is verified, and an explicit
+   `DONE_CONDITION` (e.g. "pytest green, N tests"). The plan is a CONTRACT — every
+   subsequent action executes against it.
+4. **Only then execute.** Begin file actions against the plan. Each unit must pass
+   `verify` (`workflow-task-finish`) before it's complete; the gate IS the
+   `DONE_CONDITION`.
+
+## When
+
+Always run the map+plan step on a new task. The full decompose (native kanban
+`auto_decompose`, planner/coder/reviewer delegation) is for tasks spanning **more
+than ~5 files** or with non-trivial architecture — don't free-solo large changes.
 
 ## Why
 

@@ -177,8 +177,19 @@ def _render_span(rec: dict, hms: str) -> list[str]:
         return [_line(hms, "◷", DIM if complete else YEL, "plan", "lint",
                       "complete" if complete else miss)]
     if "role_resolved" in name:
-        return [_line(hms, "·", DIM, "route", attr("role"),
-                      f'{attr("provider")}/{_trunc(attr("model"),18)}')]
+        # An LLM call resolved through the conductor — show it as such, with the
+        # thinking budget/tokens (Fix 3) when present (the planner's reasoning).
+        tb, tt = attr("thinking_budget"), attr("thinking_tok")
+        out = attr("out_tok")
+        bits = []
+        if out:
+            bits.append(f"{out} tok")
+        if tt:
+            bits.append(f"thinking {tt}")
+        elif tb:
+            bits.append(f"budget {tb}")
+        return [_line(hms, "✓", GRN, attr("provider"), f"LLM·{attr('role')}",
+                      _trunc(attr("model"), 30), " · ".join(bits))]
     # tier_routing / estimate / other internal spans → suppressed from the stream (L2).
     return []
 

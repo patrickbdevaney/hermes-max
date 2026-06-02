@@ -95,3 +95,24 @@ roles:
   free_uplift:                   # proactive Kimi-K2.6:free coherence checkpoint
     - openrouter.synth_free      # Kimi K2.6:free; absent → plugin won't register
 
+
+# ── thinking / reasoning budgets (Fix 3) ─────────────────────────────────────
+# Role → reasoning-token CEILING (not a floor — a simple task uses less). Applied
+# by lib/inference/router.run_role: OpenRouter gets a native `reasoning.max_tokens`
+# param, Anthropic a `thinking.budget_tokens`, everyone else a system instruction.
+# Generous for planning/synthesis (architectural decisions benefit from reasoning),
+# light for execution/verification. 0 / omitted = no extended thinking.
+thinking_budget:
+  plan:            8192     # high-level planning / spec writing
+  code_plan:       8192     # the incontrovertible PLAN.md — dominates code quality
+  research_plan:   4096
+  research_synth:  8192     # final synthesis over corroborated evidence
+  research_fanout: 1024     # high-volume rote: query-gen/filter/extract — light
+  synth:           8192     # conductor synthesize (planner-grade deliberation)
+  frontier:        8192
+  code_frontier:   8192
+  code_repair:     3072     # diagnosing a verify-fail benefits from reasoning
+  code_steer:      2048
+  steer:           2048
+  drive:           2048     # execution / code generation — moderate
+  code_execute:    2048

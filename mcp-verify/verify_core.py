@@ -228,12 +228,31 @@ def _verify_rust(path: str) -> list[dict[str, Any]]:
     return stages
 
 
+def _find_plan(start: str) -> str | None:
+    """Look for PLAN.md in the task dir and up to 3 parents (a file deep in a
+    project still finds the project's plan contract)."""
+    d = start if os.path.isdir(start) else os.path.dirname(start)
+    for _ in range(4):
+        cand = os.path.join(d, "PLAN.md")
+        if os.path.isfile(cand):
+            return cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
 def verify(path: str, language: str = "auto") -> dict[str, Any]:
     """Run the deterministic gate against `path`.
 
     Returns a structured result. `passed` is True only if at least one stage ran
     and no stage failed or errored. Missing tools are "skipped" and do not pass
     or fail the gate on their own.
+
+    PLANNING GATE (Fix 2): unless VERIFY_REQUIRE_PLAN is disabled, the gate refuses
+    to certify a task with no PLAN.md — a task without a plan has no DONE_CONDITION
+    and cannot be verified, so 'skip planning' can't complete successfully.
     """
     abspath = os.path.abspath(os.path.expanduser(path))
     if not os.path.exists(abspath):
@@ -243,6 +262,21 @@ def verify(path: str, language: str = "auto") -> dict[str, Any]:
             "passed": False,
             "stages": [],
             "summary": f"path does not exist: {abspath}",
+        }
+
+    require_plan = os.environ.get("VERIFY_REQUIRE_PLAN", "true").strip().lower() in (
+        "1", "true", "yes", "on")
+    if require_plan and _find_plan(abspath) is None:
+        return {
+            "path": abspath,
+            "language": language,
+            "passed": False,
+            "blocked": True,
+            "stages": [],
+            "summary": ("VERIFY BLOCKED: no PLAN.md found. The conductor plan step "
+                        "must be called before execution begins (a task without a plan "
+                        "has no DONE_CONDITION and cannot be verified). Re-run from the "
+                        "planning step — call get_repo_map() then produce a PLAN.md."),
         }
 
     lang = language if language and language != "auto" else detect_language(abspath)

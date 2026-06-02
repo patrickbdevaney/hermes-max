@@ -279,13 +279,37 @@ def _cap_messages(messages: list[dict], cap_tokens: int) -> list[dict]:
 
 
 # ── the single-call primitive (the seam the smoke test stubs) ─────────────────
+# Role-aware thinking/reasoning budgets (Fix 3) for the conductor's own roles. A
+# CEILING, not a floor; env-overridable. synth = the planner (generous), steer =
+# cheap nudge (light), escalate = frontier deliberation (generous).
+_THINKING_BUDGET = {
+    "synth": int(os.environ.get("CONDUCTOR_SYNTH_THINKING", "8192")),
+    "steer": int(os.environ.get("CONDUCTOR_STEER_THINKING", "2048")),
+    "escalate": int(os.environ.get("CONDUCTOR_ESCALATE_THINKING", "8192")),
+}
+
+
+def _reasoning_body(base_url: str, budget: int) -> dict[str, Any] | None:
+    """A provider-appropriate reasoning param, sent ONLY where it's known-safe so an
+    unknown field never 400s a provider. OpenRouter accepts `reasoning.max_tokens`."""
+    if budget <= 0:
+        return None
+    if "openrouter" in (base_url or ""):
+        return {"reasoning": {"max_tokens": budget}}
+    return None
+
+
 def _post_chat(base_url: str, api_key: str, model: str, messages: list[dict],
-               max_tokens: int) -> tuple[dict[str, Any], dict[str, str]]:
-    """Returns (json_body, response_headers). Headers feed the live TPM budget."""
+               max_tokens: int, extra_body: dict[str, Any] | None = None
+               ) -> tuple[dict[str, Any], dict[str, str]]:
+    """Returns (json_body, response_headers). Headers feed the live TPM budget.
+    `extra_body` carries the thinking/reasoning budget (Fix 3)."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     payload = {"model": model, "messages": messages, "max_tokens": max_tokens}
+    if extra_body:
+        payload.update(extra_body)
     with httpx.Client(timeout=TIMEOUT) as client:
         resp = client.post(f"{base_url.rstrip('/')}/chat/completions",
                            json=payload, headers=headers)
@@ -365,8 +389,10 @@ def run_role(role: str, messages: list[dict] | None = None, *, prompt: str | Non
             attempts.append({"provider": pid, "skipped": f"{why}_exhausted"})
             _trace("rung_fell", role=role, frm=pid, to="(next)", reason=f"{why} budget exhausted")
             continue
+        budget = _THINKING_BUDGET.get(role, 0)
+        extra_body = _reasoning_body(prov.get("base_url", ""), budget)
         try:
-            data, hdrs = _post_chat(prov["base_url"], key, model, msgs, mt_eff)
+            data, hdrs = _post_chat(prov["base_url"], key, model, msgs, mt_eff, extra_body)
             _update_budget_from_headers(pid, model, hdrs)
             content = data.get("choices", [{}])[0].get("message", {}).get("content")
             usage = data.get("usage", {}) or {}
@@ -380,10 +406,16 @@ def run_role(role: str, messages: list[dict] | None = None, *, prompt: str | Non
         cost = 0.0 if free else _cost(prov, role, usage)
         if not free:
             _record_cost(pid, role, cost)
-        _trace("role_resolved", role=role, provider=pid, model=model, fell=len(attempts))
+        # Surface the actual thinking tokens spent (role-aware budget, Fix 3) so the
+        # planner's reasoning is visible in the cockpit / cost view.
+        _details = usage.get("completion_tokens_details") or {}
+        thinking_tok = int(_details.get("reasoning_tokens") or usage.get("reasoning_tokens") or 0)
+        _trace("role_resolved", role=role, provider=pid, model=model, fell=len(attempts),
+               thinking_budget=budget, thinking_tok=thinking_tok,
+               out_tok=int(usage.get("completion_tokens", 0) or 0))
         return {"ok": True, "role": role, "role_active": True, "provider": pid, "model": model,
                 "content": content, "usage": usage, "cost_usd": round(cost, 6),
-                "free": free, "fell": attempts}
+                "free": free, "thinking_tok": thinking_tok, "fell": attempts}
 
     return {"ok": False, "proceed_local": True, "role": role, "role_active": True,
             "attempts": attempts,

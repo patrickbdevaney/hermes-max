@@ -27,6 +27,7 @@ export default function App() {
   const [view, dispatch] = useReducer(reduce, initialView);
   const [alive, setAlive] = useState(false);
   const [firstRun, setFirstRun] = useState(false);
+  const [liveRuns, setLiveRuns] = useState(0);
   const autoRouted = useRef(false);
 
   const refreshStatus = useCallback(() => {
@@ -39,6 +40,18 @@ export default function App() {
     const tick = () => api.status().then((s) => { if (!stop) setStatus(s); }).catch(() => void 0);
     tick();
     const id = setInterval(tick, 10_000);
+    return () => { stop = true; clearInterval(id); };
+  }, []);
+
+  // Discover runs from any origin (terminal / hm dev / UI) for the nav live-dot —
+  // a fast poll so a terminal-launched run shows up within ~1s (Fix 4).
+  useEffect(() => {
+    let stop = false;
+    const tick = () => api.runs()
+      .then((r) => { if (!stop) setLiveRuns(r.runs.filter((x) => x.active).length); })
+      .catch(() => void 0);
+    tick();
+    const id = setInterval(tick, 2000);
     return () => { stop = true; clearInterval(id); };
   }, []);
 
@@ -114,7 +127,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen overflow-hidden">
-      <SideNav active={route.name} status={status} />
+      <SideNav active={route.name} status={status} liveRuns={liveRuns} />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopChrome
           view={view}

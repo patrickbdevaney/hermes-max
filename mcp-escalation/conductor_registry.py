@@ -141,6 +141,24 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         # mode $10/$50 is intentionally NOT used — cost, not latency, is the bound.)
         "price": {"escalate": {"in": 5.0, "out": 25.0}},
     },
+    # ── free, US — OpenRouter Kimi-K2.6:free: the $0 PLANNER (synth) rung ──────
+    # The conductor's synth chain was all paid, so in `free` posture the planner
+    # never fired (the agent planned locally on the executor). This is the free,
+    # present-key rung that makes "Kimi plans, the local model executes" actually
+    # happen at $0. Kimi K2.6 is a strong reasoner with a 262K window — no chunking.
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "env_key_name": "OPENROUTER_API_KEY",
+        "openai_compatible": True,
+        "models": {"steer": "moonshotai/kimi-k2.6:free",
+                   "synth": "moonshotai/kimi-k2.6:free",
+                   "draft": "moonshotai/kimi-k2.6:free"},
+        "max_ctx": 262_144, "rpm": None, "rpd": 1_000, "tpd": None,
+        "billing_region": "US", "trains_on_data": False,
+        "price": {"steer": {"in": 0.0, "out": 0.0},
+                  "synth": {"in": 0.0, "out": 0.0},
+                  "draft": {"in": 0.0, "out": 0.0}},
+    },
 }
 
 # ── spend-TIER tags (for CONDUCTOR_MODE) — free-tier vs paid providers ────────
@@ -149,7 +167,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
 # Independent of which keys are present (a present DeepInfra key is IGNORED in
 # `free` mode). Derived once in load_config() so adding a provider needs only its
 # id here if it's free; everything else defaults to "paid".
-FREE_TIER_PROVIDERS: set[str] = {"cerebras", "groq", "gemini"}
+FREE_TIER_PROVIDERS: set[str] = {"cerebras", "groq", "gemini", "openrouter"}
 # FRONTIER-tier providers are eligible ONLY in CONDUCTOR_MODE=frontier (never in
 # `full`). Opus 4.8 (anthropic) is the only one: this is what keeps the expensive
 # rung opt-in by `--frontier` and never reachable via `--full` or a synth fallthrough.
@@ -164,8 +182,8 @@ FRONTIER_TIER_PROVIDERS: set[str] = {"anthropic"}
 DEFAULT_ROLE_CHAINS: dict[str, list[str]] = {
     # synth deliberately does NOT include anthropic — Opus is escalation-only, via
     # the three-gated frontier flow, never a synth fallthrough.
-    "synth": ["deepinfra", "fireworks", "together", "deepseek", "moonshot"],
-    "steer": ["deepinfra", "cerebras", "groq", "gemini"],
+    "synth": ["openrouter", "deepinfra", "fireworks", "together", "deepseek", "moonshot"],
+    "steer": ["openrouter", "deepinfra", "cerebras", "groq", "gemini"],
     "escalate": ["anthropic"],
 }
 

@@ -152,3 +152,12 @@ servers:
     profiles: [gpu_local, lean_cloud]
     requires: []
     degrades_to: pure Python-ast graph (SQLite); structural search degrades without ast-grep
+  - name: scopemap
+    dir: mcp-scopemap
+    port: 9115
+    port_env: MCP_SCOPEMAP_PORT
+    health: /health
+    register_as: hermes-max-scopemap
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: pure static analysis (ast + regex); no model/network; greenfield returns an empty map
