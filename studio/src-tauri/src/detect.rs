@@ -92,9 +92,15 @@ pub fn probe_capabilities() -> DetectResult {
         None => (None, None),
     };
 
+    // A provider counts as configured if its key is in this process's env OR in
+    // the OS keychain (where Studio stores keys; the sidecar injects them).
+    let stored = crate::keychain::configured();
     let keys_configured: Vec<String> = PROVIDER_KEYS
         .iter()
-        .filter(|(_, env)| std::env::var(env).map(|v| !v.trim().is_empty()).unwrap_or(false))
+        .filter(|(_, env)| {
+            std::env::var(env).map(|v| !v.trim().is_empty()).unwrap_or(false)
+                || stored.iter().any(|s| s == env)
+        })
         .map(|(name, _)| name.to_string())
         .collect();
 

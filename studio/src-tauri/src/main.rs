@@ -6,6 +6,8 @@
 
 mod sidecar;
 mod detect;
+mod keychain;
+mod config;
 
 use tauri::Manager;
 
@@ -28,6 +30,12 @@ fn main() {
             sidecar::stack_health,
             detect::probe_capabilities,
             detect::probe_endpoint,
+            config::load_studio_config,
+            config::save_studio_settings,
+            config::configure_endpoint,
+            config::save_provider_key,
+            config::restart_stack,
+            config::open_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Hermes Studio")

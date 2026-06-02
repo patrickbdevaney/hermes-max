@@ -128,7 +128,10 @@ impl SidecarManager {
                     Command::new("python3")
                         .args(["-m", "ui.server", "--no-open", "--port", &PORT.to_string()])
                         .current_dir(&root)
-                        .env("PYTHONPATH", &root),
+                        .env("PYTHONPATH", &root)
+                        // inject the configured endpoint + stored provider keys so the
+                        // backend (and the agent it spawns) can reach the AI
+                        .envs(crate::config::agent_env()),
                     "python-server.log",
                 ) {
                     self.children.lock().unwrap().push(child);
@@ -160,6 +163,13 @@ impl SidecarManager {
             hermes_present: self.hermes_present(),
             active_run: None,
         }
+    }
+
+    /// Stop then start — used after the AI source changes so the backend reloads
+    /// its environment (endpoint / keys).
+    pub fn restart(&self) -> StackStatus {
+        self.stop_all();
+        self.start()
     }
 
     pub fn stop_all(&self) {
