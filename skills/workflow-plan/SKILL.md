@@ -49,6 +49,33 @@ call `conductor_plan` and start over against its output.
 Then **execute**: each unit must pass `verify` (`workflow-task-finish`) before it's
 complete; the gate IS the `DONE_CONDITION`.
 
+## While executing — think briefly, then ask or act
+
+You have a **thinking budget of ~1024 tokens** per step: enough to read the relevant
+PLAN.md step, decide which file to write, and write it. It is **not** enough to redesign
+architecture, derive a novel concurrency invariant, or invent a property-test strategy
+from scratch — and you should not try. When you hit a question you can't resolve
+confidently within that budget, **do not keep reasoning** — call `reasoning_escalation`
+with the specific question and act on the precise answer it returns. Ask and act.
+
+Three times to escalate (all return a `## Frontier guidance` block — put it at the top
+of your next step):
+
+- **You're unsure** (`trigger="self_declared"`): an architectural/algorithmic question
+  you can't resolve in budget. `reasoning_escalation(question="…", context="<code>",
+  trigger="self_declared", budget="standard")`.
+- **A plan step is marked `complexity: HIGH`**: call `reasoning_escalation` with the step
+  description + its `note:` **before** attempting the implementation
+  (`trigger="complex_step"`). The planner already flagged which steps are hard — use that
+  foresight proactively.
+- **verify failed twice on the same file**: if a `verify` result includes an `escalate`
+  recommendation, call `reasoning_escalation` with it (`trigger="verify_double_fail",
+  budget="deep"`) and re-implement against the guidance. Two failures means the approach
+  is wrong, not just buggy — a third attempt at the same approach wastes effort.
+
+Escalation is capped per run (standard×5, deep×2) so it can't burn the credit; past the
+cap, proceed with what you have.
+
 ## When
 
 Always run the map+plan step on a new task. The full decompose (native kanban

@@ -315,6 +315,39 @@ def verify(path: str, language: str = "auto") -> dict[str, Any]:
     return _finalize(abspath, lang, stages)
 
 
+def _fail_state_path() -> str:
+    import json  # noqa: F401  (kept local; module already imports os)
+    d = os.path.expanduser(os.environ.get("HERMES_MAX_STATE_DIR", "~/.hermes-max")) + "/conductor"
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(d, "verify_fails.json")
+
+
+def _note_consecutive_fail(abspath: str, passed: bool) -> int:
+    """Track consecutive verify failures per path. Returns the running fail count
+    (0 after a pass). Two in a row means the executor's APPROACH is wrong, not just
+    buggy — a frontier diagnosis beats a third attempt at the same flawed approach."""
+    import json
+    p = _fail_state_path()
+    try:
+        state = json.load(open(p))
+    except (OSError, ValueError):
+        state = {}
+    if passed:
+        state.pop(abspath, None)
+        count = 0
+    else:
+        count = int(state.get(abspath, 0)) + 1
+        state[abspath] = count
+    try:
+        json.dump(state, open(p, "w"))
+    except OSError:
+        pass
+    return count
+
+
 def _finalize(abspath: str, lang: str, stages: list[dict[str, Any]]) -> dict[str, Any]:
     ran = [s for s in stages if s["status"] in ("passed", "failed", "error")]
     bad = [s for s in stages if s["status"] in ("failed", "error")]
@@ -327,13 +360,34 @@ def _finalize(abspath: str, lang: str, stages: list[dict[str, Any]]) -> dict[str
     else:
         summary = "FAIL: " + ", ".join(f"{s['name']} {s['status']}" for s in bad)
 
-    return {
+    result: dict[str, Any] = {
         "path": abspath,
         "language": lang,
         "passed": passed,
         "stages": stages,
         "summary": summary,
     }
+
+    # Trigger B (mid-loop uplift): on the SECOND consecutive failure of the same path,
+    # recommend a deep reasoning_escalation. (Returned as a recommendation the executor
+    # acts on — verify runs in its own venv without the conductor's HTTP client; the
+    # workflow skill calls reasoning_escalation with this payload.)
+    fail_count = _note_consecutive_fail(abspath, passed)
+    if not passed and fail_count >= 2:
+        failing = next((s for s in bad), {})
+        out = _truncate(str(failing.get("output", "")))[:1500]
+        result["escalate"] = {
+            "trigger": "verify_double_fail", "budget": "deep",
+            "question": (f"This implementation has failed verify {fail_count} times on the "
+                         f"same approach. Diagnose WHY it fails this and propose a corrected "
+                         f"approach:\n{out}"),
+            "context_path": abspath,
+            "note": (f"verify failed {fail_count}× on {os.path.basename(abspath)} — the "
+                     "approach is likely wrong. Call reasoning_escalation(trigger="
+                     "'verify_double_fail', budget='deep') with the failing output, then "
+                     "re-implement against its guidance."),
+        }
+    return result
 
 
 def quick_check(path: str, language: str = "auto") -> dict[str, Any]:

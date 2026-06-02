@@ -115,4 +115,4 @@ thinking_budget:
   code_steer:      2048
   steer:           2048
   drive:           2048     # execution / code generation — moderate
-  code_execute:    2048
+  code_execute:    1024     # HARD cap — enough to read PLAN.md + write code; over this → reasoning_escalation

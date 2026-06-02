@@ -336,6 +336,7 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
     import os as _os
     cwd = _os.path.abspath(_os.path.expanduser(cwd or _os.getcwd()))
     plan_path = _os.path.join(cwd, "PLAN.md")
+    reset_escalation_budget()   # new task = new run: zero the mid-loop escalation counters
     # idempotent: a validly-signed plan already present → return it
     try:
         if _os.path.isfile(plan_path):
@@ -360,7 +361,12 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
         "The plan MUST contain: a one-paragraph approach; a '## Files' list with a FILE "
         "SPEC (key functions/classes + signatures) per file; a '## Steps' ordered list; "
         "and a 'DONE_CONDITION:' line with the exact verifiable gate (e.g. 'pytest "
-        "green, N tests pass').")
+        "green, N tests pass').\n"
+        "Mark EACH step with a complexity flag: 'complexity: standard' or "
+        "'complexity: HIGH'. For HIGH steps (novel concurrency invariants, atomicity "
+        "guarantees, non-obvious property-test strategies, anything a small local model "
+        "shouldn't design alone) add a one-line 'note:' with the key consideration — the "
+        "executor will call reasoning_escalation BEFORE attempting those steps.")
     # synth chain already carries thinking_budget 8192 (see _THINKING_BUDGET["synth"]).
     res = run_role("synth", prompt=prompt, max_tokens=4096)
     if not (res.get("ok") and res.get("content")):
@@ -381,32 +387,135 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
             "thinking_tok": res.get("thinking_tok", 0)}
 
 
-def reasoning_escalation(question: str, context: str = "", budget: str = "standard") -> dict[str, Any]:
-    """A targeted second opinion from a larger reasoning model (Mode 3). The executor
-    calls this when it's unsure about a design decision, an invariant, or a test
-    strategy — frontier reasoning on demand, without the full planner/executor split.
+# ── escalation economic guard (per-run call budget) ───────────────────────────
+def _esc_budget_path() -> str:
+    d = os.path.expanduser(os.environ.get("HERMES_MAX_STATE_DIR", "~/.hermes-max")) + "/conductor"
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "escalation_budget.json")
 
-      budget=standard → fast, $0 (the free synth cascade, modest token cap)
+
+def _esc_caps() -> dict[str, int]:
+    return {"standard": int(os.environ.get("CONDUCTOR_MAX_ESC_STANDARD", "5")),
+            "deep": int(os.environ.get("CONDUCTOR_MAX_ESC_DEEP", "2"))}
+
+
+def reset_escalation_budget() -> None:
+    """Start-of-run reset (called by conductor_plan): zero the per-run call counters."""
+    try:
+        with open(_esc_budget_path(), "w") as f:
+            json.dump({"standard": 0, "deep": 0, "paid": 0, "cost_usd": 0.0}, f)
+    except OSError:
+        pass
+
+
+def _esc_counts() -> dict[str, Any]:
+    try:
+        with open(_esc_budget_path()) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"standard": 0, "deep": 0, "paid": 0, "cost_usd": 0.0}
+
+
+def _esc_account(budget: str, paid: bool, cost: float) -> dict[str, Any]:
+    c = _esc_counts()
+    c[budget] = int(c.get(budget, 0)) + 1
+    if paid:
+        c["paid"] = int(c.get("paid", 0)) + 1
+        c["cost_usd"] = round(float(c.get("cost_usd", 0.0)) + cost, 6)
+    try:
+        with open(_esc_budget_path(), "w") as f:
+            json.dump(c, f)
+    except OSError:
+        pass
+    return c
+
+
+def escalation_summary() -> dict[str, Any]:
+    """End-of-run summary: total escalations, free vs paid, $ spent."""
+    c = _esc_counts()
+    total = int(c.get("standard", 0)) + int(c.get("deep", 0))
+    paid = int(c.get("paid", 0))
+    return {"calls": total, "free": total - paid, "paid": paid,
+            "cost_usd": round(float(c.get("cost_usd", 0.0)), 6)}
+
+
+_TRIGGER_TOOL = {
+    "self_declared": "uplift·ask", "verify_double_fail": "uplift·stuck",
+    "complex_step": "uplift·step",
+}
+
+
+def reasoning_escalation(question: str, context: str = "", budget: str = "standard",
+                         trigger: str = "self_declared") -> dict[str, Any]:
+    """A targeted second opinion from a larger reasoning model (mid-loop frontier uplift).
+    The executor's escape hatch from its CoT budget: instead of spinning on a hard
+    architectural/algorithmic question, ask it directly and act on a precise answer.
+
+    Triggers: self_declared (executor unsure) | verify_double_fail (stuck, 2× fail) |
+              complex_step (a plan step marked complexity:HIGH).
+      budget=standard → fast, $0 (free synth cascade, modest cap)
       budget=deep     → thorough (free cascade → V4-Pro paid fallback, larger cap)
 
-    Returns {ok, answer, model, provider, tier, tokens, thinking_tok}. Never raises;
-    walks the same free-first synth cascade so it stays $0 whenever the free tier has
-    capacity, paying only when every free rung is rate-limited."""
+    Economic guard: capped per run (CONDUCTOR_MAX_ESC_STANDARD=5, _DEEP=2). Past the
+    deep cap, further deep asks are logged and refused (the executor proceeds with what
+    it has) so one pathological run can't burn the credit. The answer is returned as a
+    structured '## Frontier guidance' block ready to inject into the executor's context.
+    Never raises."""
+    caps = _esc_caps()
+    counts = _esc_counts()
+    tool = _TRIGGER_TOOL.get(trigger, "uplift·deep")
+    if int(counts.get(budget, 0)) >= caps.get(budget, 99):
+        _emit_livelog(tool, ok=False,
+                      reason=f"{budget} escalation budget exhausted ({caps[budget]}) — proceed with current context")
+        return {"ok": False, "refused": True, "budget": budget, "trigger": trigger,
+                "answer": "", "reason": f"{budget} escalation cap ({caps[budget]}) reached this run"}
+
     mt = 1024 if budget != "deep" else 4096
     prompt = ("You are a senior engineer giving a targeted second opinion. Answer "
-              "concisely and concretely.\n\n"
+              "concisely and concretely (no preamble).\n\n"
               f"QUESTION:\n{question}\n\nRELEVANT CONTEXT:\n{(context or '')[:8000]}")
+    t0 = time.time()
     r = run_role("synth", prompt=prompt, max_tokens=mt)
+    secs = time.time() - t0
     prov = r.get("provider")
     tier = (reg.load_config()["providers"].get(prov, {}) or {}).get("tier", "?") if prov else "?"
+    out_tok = int((r.get("usage") or {}).get("completion_tokens", 0) or 0)
+    cost = float(r.get("cost_usd", 0.0) or 0.0)
+    ans = r.get("content") or r.get("reason") or ""
+    if r.get("ok"):
+        _esc_account(budget, paid=(tier != "free"), cost=cost)
+        _emit_livelog(tool, ok=True, secs=secs,
+                      ret={"q": question[:50], "model": r.get("model"), "tier": tier,
+                           "tokens": out_tok, "thinking_tok": r.get("thinking_tok", 0)})
+    else:
+        _emit_livelog(tool, ok=False, reason=str(ans)[:80], secs=secs)
+    # structured guidance block — ready to PREPEND to the executor's next prompt
+    ts = time.strftime("%H:%M:%S", time.localtime())
+    guidance = (f"## Frontier guidance (from {r.get('model','?')}, {ts})\n"
+                f"Question: {question}\nAnswer: {ans}\n---\n")
     return {
-        "ok": bool(r.get("ok")),
-        "answer": r.get("content") or r.get("reason") or "",
+        "ok": bool(r.get("ok")), "trigger": trigger, "budget": budget,
+        "answer": ans, "guidance": guidance,
         "model": r.get("model"), "provider": prov, "tier": tier,
-        "tokens": int((r.get("usage") or {}).get("completion_tokens", 0) or 0),
-        "thinking_tok": int(r.get("thinking_tok", 0) or 0),
-        "budget": budget,
+        "tokens": out_tok, "thinking_tok": int(r.get("thinking_tok", 0) or 0),
+        "cost_usd": cost, "run_escalations": _esc_counts(),
     }
+
+
+def _emit_livelog(tool: str, ok: bool, ret: dict | None = None,
+                  reason: str | None = None, secs: float | None = None) -> None:
+    """Best-effort livelog emit (repo root on path lazily). Never raises."""
+    try:
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if repo not in sys.path:
+            sys.path.insert(0, repo)
+        from lib import livelog
+        if ok:
+            livelog.tool_ok(tool, secs=secs, ret=ret)
+        else:
+            livelog.tool_fail(tool, reason=reason, secs=secs)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _reasoning_body(base_url: str, budget: int) -> dict[str, Any] | None:

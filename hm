@@ -527,18 +527,27 @@ case "${cmd}" in
     # Raw hermes flags (e.g. `hm run --continue …`) pass straight through.
     case "${1:-}" in -*) exec hermes "$@" ;; esac
     _hm_prompt="$*"
-    # ── conductor plans FIRST — the guaranteed first step ─────────────────────
-    # The CONDUCTOR (strong cloud reasoner: kimi:free → V4-Pro, 8192-token thinking)
-    # authors a SIGNED PLAN.md before the executor runs, so the local model
-    # transcribes against the contract instead of doing its own long CoT planning.
-    # The verify gate rejects any PLAN.md without the conductor signature. Skip with
-    # HM_NO_PREPLAN=1. .env is sourced so the planner has its provider keys.
-    if [ -z "${HM_NO_PREPLAN:-}" ] && [ -f "${SCRIPTS}/preplan.py" ]; then
+    _hm_plan="${PWD}/PLAN.md"
+    # Escape hatch: HM_NO_PREPLAN=1 runs the legacy raw-prompt path (no enforced split).
+    if [ -n "${HM_NO_PREPLAN:-}" ]; then exec hermes --yolo -z "${_hm_prompt}"; fi
+    # ── the MANDATORY split: conductor plans, executor executes ───────────────
+    # (a) the CONDUCTOR plans first (kimi:free → V4-Pro, 8192-token thinking) and
+    #     writes a SIGNED PLAN.md.
+    if [ -f "${SCRIPTS}/preplan.py" ]; then
       ( set -a; [ -f "${HMX_ENV_FILE}" ] && . "${HMX_ENV_FILE}" 2>/dev/null; set +a
-        python3 "${SCRIPTS}/preplan.py" "${PWD}" "${_hm_prompt}" ) \
-        || echo "  ⚠ conductor_plan produced no plan — verify will block until it does"
+        python3 "${SCRIPTS}/preplan.py" "${PWD}" "${_hm_prompt}" ) || true
     fi
-    exec hermes --yolo -z "${_hm_prompt}"
+    # (b) require the conductor signature — refuse to execute without a real plan.
+    if ! grep -qiE '^##[[:space:]]*Plan authored by:.*via conductor' "${_hm_plan}" 2>/dev/null; then
+      echo "✗ no conductor-signed PLAN.md in ${PWD} — refusing to execute."
+      echo "  the conductor planner was unavailable. Try: hm mode full-local (funded V4-Pro),"
+      echo "  check OPENROUTER_API_KEY, or bypass the split with HM_NO_PREPLAN=1."
+      exit 1
+    fi
+    # (c) hermes receives an EXECUTION instruction — NEVER the raw design brief. This is
+    #     what removes its opportunity to plan independently: the cognitive division is
+    #     enforced by the prompt it sees, not by which tools we ask it to call.
+    exec hermes --yolo -z "Read PLAN.md in ${PWD} first, then execute it. Do NOT replan or redesign — the architecture is already decided in PLAN.md. Execute each step. For any step marked 'complexity: HIGH', call the reasoning_escalation MCP tool with the step text and its note BEFORE implementing it, and follow the guidance it returns. If you get stuck or hit an architectural/algorithmic question you can't resolve in a few hundred tokens of thinking, call reasoning_escalation rather than over-reasoning — ask and act. Verify with pytest; you are done when the plan's DONE_CONDITION is met."
     ;;
   setup)   _dispatch "${SCRIPTS}/setup.sh" "$@" ;;
   ui)
