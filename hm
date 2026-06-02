@@ -108,6 +108,7 @@ _start_serves() {
 # system always resolves to the highest tier whose keys are actually present. The
 # mode is the CEILING; the conductor's per-subtask gating decides actual use.
 HMX_ENV_FILE="${HMX_ENV_FILE:-${REPO_ROOT}/.env}"
+HMX_RUN_DIR="${HMX_RUN_DIR:-${HOME}/.hermes-max/run}"   # pidfiles (MCP servers + web UI)
 HMX_MODE_FILE="${HERMES_MAX_STATE_DIR:-${HOME}/.hermes-max}/conductor/mode"
 HMX_MODE_FILE="${HMX_MODE_FILE/#\~/$HOME}"
 
@@ -342,6 +343,51 @@ _attach() {
   exec tmux attach -t "${TMUX_SESSION}"
 }
 
+# Resolve the sticky web-UI port (ui.conf, else default 7080).
+_ui_port() {
+  local conf="${HERMES_MAX_CONFIG_DIR:-${HOME}/.hermes-max}/ui.conf"
+  if [ -f "${conf}" ]; then
+    local p; p="$(grep -oE '[0-9]{2,5}' "${conf}" 2>/dev/null | head -1)"
+    [ -n "${p}" ] && { echo "${p}"; return; }
+  fi
+  echo "7080"
+}
+
+# Stop the backgrounded web UI started by `hm dev` (by pidfile).
+_stop_ui() {
+  local f="${HMX_RUN_DIR}/ui.pid"
+  if [ -f "${f}" ]; then
+    kill "$(cat "${f}" 2>/dev/null)" 2>/dev/null || true
+    rm -f "${f}"
+    echo "  • web UI stopped"
+  fi
+}
+
+# `hm dev` — daemonize the stack: background MCP servers (start-all, pidfiled) + the
+# web UI (backgrounded, pidfile), then RETURN to the shell. No tmux, no blocking.
+# Native execution is `hm run` (exec into hermes); the tmux cockpit is `hm cockpit`.
+_dev_daemon() {
+  if [ -n "${HM_PRINT:-}" ]; then echo "${SCRIPTS}/start-all.sh + ui.server (daemon)"; exit 0; fi
+  # 1. MCP stack up (idempotent; start-all backgrounds each server with a pidfile)
+  "${SCRIPTS}/healthcheck.sh" >/dev/null 2>&1 || "${SCRIPTS}/start-all.sh" || true
+  _start_serves 2>/dev/null || true
+  # 2. web UI backgrounded with a pidfile (skip if already up)
+  mkdir -p "${HMX_RUN_DIR}"
+  local uipid="${HMX_RUN_DIR}/ui.pid" port; port="$(_ui_port)"
+  if [ -f "${uipid}" ] && kill -0 "$(cat "${uipid}" 2>/dev/null)" 2>/dev/null; then
+    echo "  • web UI already running (pid $(cat "${uipid}"))"
+  else
+    # nohup exec-replaces itself with python, so $! is python's real pid (PYTHONPATH
+    # makes `ui`/`lib` importable without changing hm's cwd).
+    HMX_UI_NO_OPEN=1 PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}" \
+      nohup python3 -m ui.server --no-open --port "${port}" >"${LOG_DIR}/ui.log" 2>&1 &
+    echo $! > "${uipid}"
+  fi
+  # 3. report + return (no blocking)
+  echo "✓ Stack ready.  Web UI: http://localhost:${port}"
+  echo "  next:  hm run \"<task>\"  ·  hm status  ·  hm stop  ·  hm cockpit (tmux view)"
+}
+
 # The one-command tmux cockpit: hermes pane + live-watch pane + status pane.
 # Detachable, reattach-from-anywhere (hm attach), 24/7. If the session already
 # exists, just attach. tmux absent → clear manual instructions (never a hard fail).
@@ -492,7 +538,9 @@ case "${cmd}" in
         ;;
     esac
     ;;
-  down)        _dispatch "${SCRIPTS}/stop-all.sh" "$@" ;;
+  down)        _stop_ui; _dispatch "${SCRIPTS}/stop-all.sh" "$@" ;;
+  stop)        if [ -n "${HM_PRINT:-}" ]; then echo "stop ui + ${SCRIPTS}/stop-all.sh"; exit 0; fi
+               _stop_ui; "${SCRIPTS}/stop-all.sh" "$@" ;;
   restart)     _dispatch "${SCRIPTS}/restart.sh" "$@" ;;
   status)      _dispatch "${SCRIPTS}/status.sh" "$@" ;;
   watch)       _dispatch "${SCRIPTS}/watch.sh" "$@" ;;
@@ -549,29 +597,29 @@ case "${cmd}" in
     fi
     # The EXECUTION instruction hermes receives — NEVER the raw design brief (this is what
     # enforces the split). Names the mid-loop tools: reasoning_escalation (stuck/HIGH) and
-    # review_and_adapt (a step is impossible as written). Passed via a temp file to dodge
-    # tmux env/quoting issues.
+    # review_and_adapt (a step is impossible as written).
     _hm_exec="Read PLAN.md in ${PWD} first, then execute it. Do NOT replan or redesign — the architecture is already decided in PLAN.md. Execute each step. For any step marked 'complexity: HIGH', call reasoning_escalation BEFORE implementing it and follow the guidance. If a step proves IMPOSSIBLE as written, call review_and_adapt with the issue and step number — do not attempt impossible implementations and do not spin. If you get stuck, call reasoning_escalation rather than over-reasoning — ask and act. Verify with pytest; done when the plan's DONE_CONDITION is met."
+    # ── interactive default: exec into native hermes, which OWNS the terminal ──
+    # `exec` replaces this process with hermes — no subprocess, no pipe, no blank
+    # screen. Hermes streams natively (tokens, tool_progress, banner). The registered
+    # run keeps the SAME pid (exec), so the UI's pid-liveness marks it done on exit.
+    # (Native one-shot; the run is autonomous + the conductor plugin orchestrates. For
+    # the interactive REPL with slash-commands, run `hermes chat` in this dir directly.)
+    if [ "${HM_HEADLESS:-0}" = "0" ]; then
+      exec hermes --yolo -z "${_hm_exec}"
+    fi
+    # ── headless (CI/cron): tmux window so a non-interactive caller doesn't block ──
     _hm_pf="$(mktemp 2>/dev/null || echo /tmp/hmx_exec.$$)"; printf '%s' "${_hm_exec}" > "${_hm_pf}"
     _hm_done="python3 '${SCRIPTS}/complete_run.py' '${_hm_run_id}' 2>/dev/null"
-    # Fix 2: launch hermes in tmux so the NATIVE token stream is always visible, with the
-    # structured cockpit (hm watch) beside it. Falls back to inline exec if tmux is absent.
-    if command -v tmux >/dev/null 2>&1 && [ -z "${HM_NO_TMUX:-}" ]; then
+    if command -v tmux >/dev/null 2>&1; then
       _win="run-$(basename "${PWD}")-$(date +%H%M%S 2>/dev/null || echo run)"
-      _cmd="cd '${PWD}' && hermes --yolo -z \"\$(cat '${_hm_pf}')\"; rm -f '${_hm_pf}'; ${_hm_done}; echo '--- done (press a key to close) ---'; read _"
-      if tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
-        tmux new-window -t "${TMUX_SESSION}" -n "${_win}" "${_cmd}"
-        tmux select-window -t "${TMUX_SESSION}:${_win}" 2>/dev/null || true
-      else
-        tmux new-session -d -s "${TMUX_SESSION}" -n "${_win}" "${_cmd}"
-        tmux split-window -h -t "${TMUX_SESSION}:${_win}" "cd '${REPO_ROOT}' && '${HM_SELF}' watch" 2>/dev/null || true
-        tmux select-pane -t "${TMUX_SESSION}:${_win}".0 2>/dev/null || true
-      fi
-      if [ -t 1 ] && [ -z "${HM_NO_ATTACH:-}" ]; then exec tmux attach -t "${TMUX_SESSION}"; fi
-      echo "✓ run launched in tmux '${TMUX_SESSION}:${_win}' (run_id ${_hm_run_id:-?}) — hm attach to watch."
+      _cmd="cd '${PWD}' && hermes --yolo -z \"\$(cat '${_hm_pf}')\"; rm -f '${_hm_pf}'; ${_hm_done}; echo '--- done ---'; read _"
+      tmux new-window -t "${TMUX_SESSION}" -n "${_win}" "${_cmd}" 2>/dev/null \
+        || tmux new-session -d -s "${TMUX_SESSION}" -n "${_win}" "${_cmd}"
+      echo "✓ headless run in tmux '${TMUX_SESSION}:${_win}' — attach: tmux attach -t ${TMUX_SESSION}"
       exit 0
     fi
-    # No tmux: run inline (native stream still shows; no side cockpit).
+    # headless, no tmux: run inline to completion.
     hermes --yolo -z "${_hm_exec}"; _rc=$?
     rm -f "${_hm_pf}"; [ -n "${_hm_run_id}" ] && python3 "${SCRIPTS}/complete_run.py" "${_hm_run_id}" 2>/dev/null
     exit ${_rc}
@@ -591,7 +639,8 @@ case "${cmd}" in
     fi
     cd "${REPO_ROOT}" && exec python3 -m ui.server "$@"
     ;;
-  dev)     _dev "$@" ;;
+  dev)     _dev_daemon "$@" ;;
+  cockpit) _dev "$@" ;;
   attach)  _attach ;;
   install) _install ;;
   ""|-h|--help|help) usage "$@" ;;
