@@ -307,6 +307,7 @@ _verb_help() {
     run)        echo "hm run \"task\" — launch the Hermes agent on a task (exec's 'hermes'). Equivalent to running 'hermes' directly." ;;
     ui-test)    echo "hm ui-test — PART V actuation equivalence test: drives a real bounded agent turn through the web UI's own API headlessly and asserts every action surfaced in the SSE visual-flow, real artifacts landed on disk, verify went green, the handback fired, a follow-up turn actuated, and zero secrets leaked. Proves the UI ACTUATES the agent (a complete replacement for hm dev + hermes), not just visualizes it. Runs in --mode free; needs the stack up (hm up)." ;;
     ui)         echo "hm ui [--port N] [--no-open] [--token [T]] — open the localhost web view: L0 ambient + L1 timeline + L2 span tree + live cost, fed by the existing livelog/ledger/OTLP over SSE. Auto-opens your browser and prints one line (http://localhost:7080). Port is sticky (~/.hermes-max/ui.conf; next free port if taken). No token needed on localhost — hardened by 127.0.0.1 bind + Origin/Host checks + a SameSite CSRF cookie. --token adds a bearer for remote/Tailscale exposure. Read-only. Ctrl-C to stop." ;;
+    studio)     echo "hm studio [build] — Hermes Studio, the Tauri desktop appliance (studio/). No arg = run the dev build (opens the native window, sidecars the Python server). 'hm studio build' (or 'hm studio:build') produces the Linux .deb. Sets HERMES_MAX_ROOT to this repo so the app finds ui/server." ;;
     cost)       echo "hm cost [today|week|month] — spend breakdown at \$0.000000 precision: by provider/model/role, the free-vs-paid split, and remaining daily free budget per model." ;;
     health)     echo "hm health — pass/fail healthcheck for scripting: endpoints reachable, providers present, and the full model-roster confirmation (warns on a deprecated/missing id; never gates)." ;;
     preflight)  echo "hm preflight — validate the whole stack before a task (PASS/FAIL/WARN); auto-fixes the common killers; exit 1 on a BLOCKING failure." ;;
@@ -625,6 +626,18 @@ case "${cmd}" in
     exit ${_rc}
     ;;
   setup)   _dispatch "${SCRIPTS}/setup.sh" "$@" ;;
+  studio|studio:build)
+    # Hermes Studio — the Tauri desktop appliance (studio/). `hm studio` runs the
+    # dev build; `hm studio build` (or `hm studio:build`) produces the .deb.
+    command -v npm >/dev/null 2>&1 || { echo "✗ npm not found — required for Hermes Studio."; exit 127; }
+    [ -d "${REPO_ROOT}/studio/node_modules" ] || \
+      ( echo "  • installing Studio deps (one-time)…"; cd "${REPO_ROOT}/studio" && npm install --no-fund --no-audit )
+    export HERMES_MAX_ROOT="${REPO_ROOT}"   # the app sidecars the Python server from here
+    if [ "${cmd}" = "studio:build" ] || [ "${1:-}" = "build" ]; then
+      cd "${REPO_ROOT}/studio" && exec npm run tauri build
+    fi
+    cd "${REPO_ROOT}/studio" && exec npm run tauri dev
+    ;;
   ui)
     if [ -n "${HM_PRINT:-}" ]; then echo "python3 -m ui.server $*"; exit 0; fi
     command -v python3 >/dev/null 2>&1 || { echo "✗ python3 not found — required for 'hm ui'."; exit 127; }
