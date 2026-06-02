@@ -8,6 +8,7 @@ import { api } from "./lib/api";
 import { openStream } from "./lib/events";
 import type { ConnState } from "./lib/events";
 import { reduce, initialView } from "./state";
+import { reduceFeed, initialFeed, BATCH_FLUSH_MS } from "./lib/feed";
 import { useRoute, navigate } from "./lib/router";
 import { journal } from "./lib/runjournal";
 import type { StatusPayload } from "./types";
@@ -25,6 +26,10 @@ export default function App() {
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [conn, setConn] = useState<ConnState>("connecting");
   const [view, dispatch] = useReducer(reduce, initialView);
+  // Part-2 feed/flow/chrome state — fed by the SAME SSE stream but ingested in
+  // batches (Fix D) so a fast run can't thrash React or grow the heap unbounded.
+  const [feed, feedDispatch] = useReducer(reduceFeed, initialFeed);
+  const feedBuf = useRef<{ evt: any; data: any; now: number }[]>([]);
   const [alive, setAlive] = useState(false);
   const [firstRun, setFirstRun] = useState(false);
   const [liveRuns, setLiveRuns] = useState(0);
@@ -83,8 +88,21 @@ export default function App() {
     if (!activeRunId) { setConn("connecting"); return; }
     const meta = journal.get(activeRunId);
     dispatch({ type: "reset", userText: meta?.prompt ?? null });
-    const stream = openStream(activeRunId, (t, d) => dispatch({ type: "event", evt: t, data: d }), setConn);
-    return () => stream.close();
+    feedDispatch({ type: "reset", userText: meta?.prompt ?? null });
+    feedBuf.current = [];
+    const stream = openStream(activeRunId, (t, d) => {
+      dispatch({ type: "event", evt: t, data: d });
+      feedBuf.current.push({ evt: t, data: d, now: Date.now() });
+    }, setConn);
+    // coalesce buffered frames into one feed reduction per BATCH_FLUSH_MS tick
+    const flush = setInterval(() => {
+      if (feedBuf.current.length) {
+        const events = feedBuf.current;
+        feedBuf.current = [];
+        feedDispatch({ type: "batch", events });
+      }
+    }, BATCH_FLUSH_MS);
+    return () => { stream.close(); clearInterval(flush); };
   }, [activeRunId]);
 
   // Calm "alive" pulse: true while events have arrived recently.
@@ -110,6 +128,7 @@ export default function App() {
   const cont = useCallback(async (prompt: string) => {
     if (!activeRunId) return;
     dispatch({ type: "user_message", text: prompt });
+    feedDispatch({ type: "user", text: prompt, now: Date.now() });
     journal.bumpTurn(activeRunId);
     try {
       await api.continueRun(activeRunId, prompt);
@@ -143,6 +162,7 @@ export default function App() {
               <RunPage
                 runId={activeRunId}
                 view={view}
+                feed={feed}
                 conn={conn}
                 status={status}
                 onLaunch={launch}

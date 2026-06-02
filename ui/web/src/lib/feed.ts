@@ -1,0 +1,342 @@
+// The Part-2 feed/flow/chrome model: a SINGLE pure reducer that folds the SSE event
+// stream into three memory-bounded view states the world-class Run UI renders:
+//   • items[]  — a flat, typed, virtualizable event feed (Fix A)
+//   • flow     — a derived step/conductor graph (Fix B)
+//   • chrome   — the persistent run HUD: step/turn/cost/tok-s (Fix C)
+//
+// Everything here is hard-capped (Fix D): the feed is a circular buffer of at most
+// MAX_FEED_ITEMS, the flow keeps at most MAX_GRAPH_NODES nodes, and ingestion is
+// applied in batches (App buffers raw SSE frames and flushes every BATCH_FLUSH_MS) so
+// a fast run never thrashes React or grows the heap without bound. Pure + framework-
+// agnostic (no React import) so it is trivially testable and reusable in Tauri.
+import type {
+  EventType, ToolCallEvt, FileOpEvt, GateEvt, CheckpointEvt, EscalationEvt,
+  CostEvt, NarrationEvt, ShellEvt, PhaseEvt, ConductorEvt,
+} from "../types";
+
+// ── memory limits (Fix D) ──────────────────────────────────────────────────
+export const MAX_FEED_ITEMS = 500;     // circular buffer; oldest dropped
+export const MAX_GRAPH_NODES = 200;    // flow steps + conductor nodes ceiling
+export const BATCH_FLUSH_MS = 100;     // SSE coalescing window (App-side)
+
+// ── the typed feed item (Fix A) ─────────────────────────────────────────────
+export type FeedKind =
+  | "user" | "llm" | "tool" | "file" | "verify" | "conductor" | "guidance"
+  | "step" | "complete" | "narration" | "gate" | "checkpoint" | "escalation"
+  | "cost" | "shell" | "phase";
+
+export type Tone = "info" | "good" | "warn" | "bad" | "accent" | "muted";
+
+export interface FeedItem {
+  id: number;            // monotonic, stable React key
+  kind: FeedKind;
+  tone: Tone;
+  icon: string;          // single glyph rendered in the gutter
+  title: string;
+  detail?: string;
+  meta?: string;         // right-aligned secondary (timing / model / tokens)
+  step?: number;
+  ts: number;            // ms
+  hms?: string;
+  repeat: number;        // collapsed consecutive-identical count (1 = unique)
+}
+
+// ── the derived flow graph (Fix B) ──────────────────────────────────────────
+export type StepStatus = "pending" | "active" | "complete" | "failed";
+export interface FlowStep { n: number; status: StepStatus; turns: number; lastVerify?: string }
+export interface ConductorNode {
+  id: string; step: number; reason: string; tier?: string; model?: string;
+  resolved: boolean; tokens?: number;
+}
+export interface FlowState {
+  total: number;          // best-known step count (0 until first llm_call)
+  current: number;        // current step
+  steps: FlowStep[];
+  conductors: ConductorNode[];
+  done: boolean;
+}
+
+// ── the run chrome HUD (Fix C) ──────────────────────────────────────────────
+export interface ChromeMetrics {
+  step: number; total: number; turns: number;
+  cost_usd: number; tokps: number | null;
+  model?: string; tier?: string;
+  running: boolean;
+}
+
+export interface FeedState {
+  items: FeedItem[];
+  flow: FlowState;
+  chrome: ChromeMetrics;
+  // internal accumulators (not rendered directly)
+  _nextId: number;
+  _costEventTotal: number;     // last cumulative total from `cost` events
+  _guidanceTotal: number;      // summed conductor guidance cost
+  _lastRespTs: number;         // ms of last llm_response (for tok/s fallback)
+  _ewmaTokps: number | null;
+}
+
+export const initialFeed: FeedState = {
+  items: [],
+  flow: { total: 0, current: 1, steps: [], conductors: [], done: false },
+  chrome: { step: 1, total: 0, turns: 0, cost_usd: 0, tokps: null, running: true },
+  _nextId: 1,
+  _costEventTotal: 0,
+  _guidanceTotal: 0,
+  _lastRespTs: 0,
+  _ewmaTokps: null,
+};
+
+export type FeedAction =
+  | { type: "batch"; events: { evt: EventType; data: any; now: number }[] }
+  | { type: "user"; text: string; now: number }
+  | { type: "reset"; userText?: string | null };
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+function trunc(s: unknown, n: number): string {
+  const str = String(s ?? "").replace(/\s+/g, " ").trim();
+  return str.length <= n ? str : str.slice(0, n - 1) + "…";
+}
+
+function ensureSteps(flow: FlowState, total: number): FlowStep[] {
+  const steps = flow.steps.slice();
+  const want = Math.min(Math.max(total, flow.current), MAX_GRAPH_NODES);
+  while (steps.length < want) steps.push({ n: steps.length + 1, status: "pending", turns: 0 });
+  return steps;
+}
+
+function setStep(steps: FlowStep[], n: number, patch: Partial<FlowStep>): FlowStep[] {
+  return steps.map((s) => (s.n === n ? { ...s, ...patch } : s));
+}
+
+// push with circular-buffer cap + consecutive-duplicate collapsing
+function push(items: FeedItem[], it: Omit<FeedItem, "id" | "repeat">, nextId: number): {
+  items: FeedItem[]; nextId: number;
+} {
+  const last = items[items.length - 1];
+  if (last && last.kind === it.kind && last.title === it.title && last.detail === it.detail) {
+    const merged = { ...last, repeat: last.repeat + 1, ts: it.ts, hms: it.hms, meta: it.meta };
+    return { items: [...items.slice(0, -1), merged], nextId };
+  }
+  const next = [...items, { ...it, id: nextId, repeat: 1 }];
+  const capped = next.length > MAX_FEED_ITEMS ? next.slice(next.length - MAX_FEED_ITEMS) : next;
+  return { items: capped, nextId: nextId + 1 };
+}
+
+// ── the reducer ──────────────────────────────────────────────────────────────
+export function reduceFeed(state: FeedState, action: FeedAction): FeedState {
+  if (action.type === "reset") {
+    const s: FeedState = { ...initialFeed, items: [], flow: { ...initialFeed.flow, steps: [], conductors: [] } };
+    if (action.userText) {
+      const r = push(s.items, { kind: "user", tone: "accent", icon: "›", title: action.userText, ts: 0 }, s._nextId);
+      s.items = r.items; s._nextId = r.nextId;
+    }
+    return s;
+  }
+  if (action.type === "user") {
+    const r = push(state.items, { kind: "user", tone: "accent", icon: "›", title: action.text, ts: action.now }, state._nextId);
+    return { ...state, items: r.items, _nextId: r.nextId };
+  }
+  // batch: apply each event in order against a single working copy
+  let s: FeedState = state;
+  for (const { evt, data, now } of action.events) s = applyOne(s, evt, data, now);
+  return s;
+}
+
+function applyOne(state: FeedState, evt: EventType, data: any, now: number): FeedState {
+  let s = { ...state };
+  const add = (it: Omit<FeedItem, "id" | "repeat">) => {
+    const r = push(s.items, it, s._nextId);
+    s.items = r.items; s._nextId = r.nextId;
+  };
+
+  switch (evt) {
+    case "conductor":
+      return applyConductor(s, data as ConductorEvt, now, add);
+
+    case "tool_call": {
+      const d = data as ToolCallEvt;
+      if (d.status === "running") return s; // collapse: only surface terminal tool rows in the feed
+      const ok = d.status === "ok";
+      add({
+        kind: "tool", tone: ok ? "info" : d.status === "fail" ? "bad" : "muted",
+        icon: ok ? "•" : d.status === "fail" ? "✗" : "·",
+        title: d.tool, detail: trunc(d.result_summary || d.input_summary || d.server || "", 120),
+        meta: d.latency_ms != null ? `${(d.latency_ms / 1000).toFixed(1)}s` : undefined,
+        ts: now, hms: d.hms,
+      });
+      return s;
+    }
+    case "file_op": {
+      const d = data as FileOpEvt;
+      add({ kind: "file", tone: "accent", icon: "✎", title: trunc(d.path, 80),
+            detail: trunc(d.diff_summary || d.op, 80), meta: d.op, ts: now, hms: d.hms });
+      return s;
+    }
+    case "shell": {
+      const d = data as ShellEvt;
+      const bad = d.exit_code != null && d.exit_code !== 0;
+      add({ kind: "shell", tone: bad ? "bad" : "muted", icon: "$", title: trunc(d.cmd, 100),
+            detail: trunc(d.stream_chunk || "", 80), ts: now, hms: d.hms });
+      return s;
+    }
+    case "gate": {
+      const d = data as GateEvt;
+      const pass = d.status === "pass";
+      add({ kind: "gate", tone: pass ? "good" : "bad", icon: pass ? "✓" : "✗",
+            title: `gate: ${d.kind}`, detail: trunc(d.detail, 100), ts: now, hms: d.hms });
+      return s;
+    }
+    case "checkpoint": {
+      const d = data as CheckpointEvt;
+      add({ kind: "checkpoint", tone: "good", icon: "◆", title: d.label || "checkpoint",
+            detail: trunc(d.commit, 80), ts: now, hms: d.hms });
+      return s;
+    }
+    case "escalation": {
+      const d = data as EscalationEvt;
+      add({ kind: "escalation", tone: "warn", icon: "↳",
+            title: `${d.from_rung || "rung"} → ${d.to_rung || "next"}`,
+            detail: trunc(d.reason, 100), ts: now, hms: d.hms });
+      return s;
+    }
+    case "narration": {
+      const d = data as NarrationEvt;
+      add({ kind: "narration", tone: d.level === "warn" ? "warn" : "muted", icon: "…",
+            title: trunc(d.plain_text, 160), ts: now, hms: d.hms });
+      return s;
+    }
+    case "phase": {
+      const d = data as PhaseEvt;
+      if (d.phase === "done") {
+        s.chrome = { ...s.chrome, running: false };
+      }
+      return s;
+    }
+    case "cost": {
+      const d = data as CostEvt;
+      s._costEventTotal = d.total_usd;
+      s.chrome = { ...s.chrome, cost_usd: Math.max(s._costEventTotal, s._guidanceTotal) };
+      return s;
+    }
+    default:
+      return s;
+  }
+}
+
+function applyConductor(
+  state: FeedState, d: ConductorEvt, now: number,
+  add: (it: Omit<FeedItem, "id" | "repeat">) => void,
+): FeedState {
+  const s = state;
+  const step = d.step ?? s.flow.current;
+  let flow = s.flow;
+  let chrome = { ...s.chrome };
+
+  switch (d.event) {
+    case "llm_call": {
+      const total = d.total ?? flow.total;
+      const steps = setStep(ensureSteps({ ...flow, current: step, total }, total), step, { status: "active", turns: d.turns_on_step ?? 0 });
+      flow = { ...flow, current: step, total: Math.max(total, flow.total), steps };
+      chrome = { ...chrome, step, total: Math.max(total, chrome.total), turns: chrome.turns + 1, running: true };
+      break;
+    }
+    case "llm_response": {
+      const out = d.output_tokens ?? d.tokens ?? 0;
+      let tokps = chrome.tokps;
+      if (out > 0) {
+        let inst: number | null = null;
+        if (d.elapsed_s && d.elapsed_s > 0) inst = out / d.elapsed_s;
+        else if (s._lastRespTs > 0 && now > s._lastRespTs) inst = out / ((now - s._lastRespTs) / 1000);
+        if (inst != null && isFinite(inst)) {
+          const ewma = s._ewmaTokps == null ? inst : 0.6 * s._ewmaTokps + 0.4 * inst;
+          s._ewmaTokps = ewma;
+          tokps = ewma;
+        }
+      }
+      s._lastRespTs = now;
+      chrome = { ...chrome, tokps };
+      break;
+    }
+    case "tool":
+    case "file_write": {
+      add({ kind: "file", tone: "accent", icon: "✎", title: trunc(d.file || "wrote file", 80),
+            detail: `step ${step}`, ts: now, hms: d.hms, step });
+      return { ...s, flow, chrome };
+    }
+    case "verify_pass": {
+      add({ kind: "verify", tone: "good", icon: "✓", title: "verify passed",
+            detail: trunc(d.result, 100), meta: `step ${step}`, ts: now, hms: d.hms, step });
+      flow = { ...flow, steps: setStep(ensureSteps(flow, flow.total), step, { status: "complete", lastVerify: "pass" }) };
+      break;
+    }
+    case "verify_fail": {
+      add({ kind: "verify", tone: "bad", icon: "✗",
+            title: `verify failed (×${d.failures ?? 1})`, meta: `step ${step}`, ts: now, hms: d.hms, step });
+      flow = { ...flow, steps: setStep(ensureSteps(flow, flow.total), step, { status: "failed", lastVerify: "fail" }) };
+      break;
+    }
+    case "trigger": {
+      const id = `c${s._nextId}`;
+      add({ kind: "conductor", tone: "warn", icon: "⚡",
+            title: `conductor: ${trunc(d.reason, 40)}`, meta: `${d.tier ?? ""} · step ${step}`.trim(),
+            ts: now, hms: d.hms, step });
+      const conductors = [...flow.conductors, { id, step, reason: d.reason || "?", tier: d.tier, resolved: false }]
+        .slice(-MAX_GRAPH_NODES);
+      flow = { ...flow, conductors };
+      break;
+    }
+    case "guidance": {
+      const cost = typeof d.cost === "number" ? d.cost : 0;
+      s._guidanceTotal += cost;
+      add({ kind: "guidance", tone: "accent", icon: "✦", title: "frontier guidance ready",
+            detail: trunc(d.model, 40),
+            meta: [d.tokens ? `${d.tokens} tok` : "", cost ? `$${cost.toFixed(4)}` : "free"].filter(Boolean).join(" · "),
+            ts: now, hms: d.hms, step });
+      // resolve the most recent unresolved conductor node for this step
+      let resolved = false;
+      const conductors = flow.conductors.map((c) => {
+        if (!resolved && !c.resolved && c.step === step) { resolved = true; return { ...c, resolved: true, model: d.model, tokens: d.tokens }; }
+        return c;
+      });
+      flow = { ...flow, conductors };
+      chrome = { ...chrome, cost_usd: Math.max(s._costEventTotal, s._guidanceTotal), model: d.model || chrome.model, tier: d.tier || chrome.tier };
+      break;
+    }
+    case "step_advance": {
+      const to = d.to_step ?? d.step ?? (flow.current + 1);
+      const steps = setStep(ensureSteps({ ...flow, current: to }, Math.max(to, flow.total)), flow.current,
+        flow.steps.find((x) => x.n === flow.current)?.status === "complete" ? {} : { status: "complete" });
+      add({ kind: "step", tone: "info", icon: "→", title: `step ${flow.current} → ${to}`, ts: now, hms: d.hms, step: to });
+      flow = { ...flow, current: to, steps: setStep(steps, to, { status: "active" }) };
+      chrome = { ...chrome, step: to };
+      break;
+    }
+    case "run_complete":
+    case "session_end": {
+      const done = d.event === "run_complete" || !!d.done;
+      add({ kind: "complete", tone: done ? "good" : "muted", icon: done ? "◆" : "◇",
+            title: done ? "run complete — verified" : "session ended",
+            detail: d.total_turns != null ? `${d.total_turns} turns` : undefined, ts: now, hms: d.hms });
+      flow = { ...flow, done };
+      chrome = { ...chrome, running: false };
+      break;
+    }
+    case "guidance_applied": {
+      add({ kind: "guidance", tone: "accent", icon: "✦", title: "guidance applied", meta: `step ${step}`, ts: now, hms: d.hms, step });
+      break;
+    }
+    case "budget_exhausted": {
+      add({ kind: "conductor", tone: "warn", icon: "⚠", title: `escalation budget exhausted (${d.tier ?? ""})`, ts: now, hms: d.hms });
+      break;
+    }
+    default:
+      return s;
+  }
+  return { ...s, flow, chrome };
+}
+
+// ── selectors ─────────────────────────────────────────────────────────────
+export function conductorsForStep(flow: FlowState, n: number): ConductorNode[] {
+  return flow.conductors.filter((c) => c.step === n);
+}

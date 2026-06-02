@@ -176,6 +176,20 @@ def _render_span(rec: dict, hms: str) -> list[str]:
         miss = _trunc(attr("missing"), 30)
         return [_line(hms, "◷", DIM if complete else YEL, "plan", "lint",
                       "complete" if complete else miss)]
+    if name.startswith("conductor."):
+        # the conductor plugin's in-harness event feed (Fix: lifecycle-hook plugin).
+        ev = name.split(".", 1)[1]
+        glyph, col = {"trigger": ("⚡", YEL), "guidance": ("✓", GRN),
+                      "verify_fail": ("✗", RED), "verify_pass": ("✓", GRN),
+                      "run_complete": ("◆", GRN), "step_advance": ("→", CYN),
+                      "file_write": ("✎", BLU)}.get(ev, ("·", DIM))
+        right = ""
+        for k in ("model", "tier", "tokens", "result", "failures", "step", "file"):
+            v = attr(k)
+            if v not in ("", None):
+                right += f" {k}={_trunc(v, 24)}"
+        return [_line(hms, glyph, col, "conductor", ev, _trunc(attr("file") or attr("result") or "", 30),
+                      right.strip())]
     if "run_cost_summary" in name:
         calls, free, paid = attr("calls"), attr("free"), attr("paid")
         cost = attr("cost_usd")

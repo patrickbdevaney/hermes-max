@@ -62,6 +62,37 @@ def _plan_prompt(task: str, repo_map: str, greenfield: bool) -> str:
     )
 
 
+_HERMES_MD = """# Execution Contract
+
+You are executing a plan. The conductor plugin injects your current state every turn.
+Each turn: read the injected ## Execution State, do the work for the CURRENT step, then
+update EXECUTION_STATE.json in this directory:
+  {"current_step": N, "step_status": "complete"|"in_progress",
+   "last_verify_result": "<pytest summary>", "conductor_requested": false,
+   "conductor_request_reason": "", "done_condition_met": false}
+
+Rules:
+- done_condition_met=true ONLY when pytest exits 0 AND all steps complete.
+- Stuck after 2 turns on a step: set conductor_requested=true with a specific reason.
+- HIGH-complexity steps: call reasoning_escalation before writing code.
+- A step impossible as written: call review_and_adapt — do not spin.
+- Do not replan or re-architect. Execute the plan.
+"""
+
+
+def _write_hermes_md(cwd: str) -> None:
+    """Write .hermes.md (the execution contract) — Hermes auto-discovers it in the cwd.
+    Don't clobber a user's existing .hermes.md."""
+    p = os.path.join(cwd, ".hermes.md")
+    if os.path.exists(p):
+        return
+    try:
+        with open(p, "w") as f:
+            f.write(_HERMES_MD)
+    except OSError:
+        pass
+
+
 def main() -> int:
     if len(sys.argv) < 3:
         print("usage: preplan.py <cwd> <prompt>")
@@ -69,6 +100,7 @@ def main() -> int:
     cwd = os.path.abspath(os.path.expanduser(sys.argv[1]))
     task = sys.argv[2]
     plan_path = os.path.join(cwd, "PLAN.md")
+    _write_hermes_md(cwd)   # the execution contract Hermes auto-discovers (.hermes.md)
 
     if livelog is not None:
         try:

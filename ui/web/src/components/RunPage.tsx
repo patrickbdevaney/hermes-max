@@ -11,23 +11,33 @@ import { GraphLens } from "./run/GraphLens";
 import { L0Ambient } from "./L0Ambient";
 import { Timeline } from "./Timeline";
 import { ResearchFanOut, FullTrace } from "./L2Panels";
+import { VirtualFeed } from "./run/VirtualFeed";
+import { FlowGraph } from "./run/FlowGraph";
+import { RunChrome } from "./run/RunChrome";
 import type { RunView, Turn } from "../state";
+import type { FeedState } from "../lib/feed";
 import type { ConnState } from "../lib/events";
 import type { StatusPayload, RecentProject } from "../types";
 
-type ViewMode = "timeline" | "graph";
+type Tab = "feed" | "flow" | "turns";
+type TurnLens = "timeline" | "graph";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "feed", label: "Feed" }, { id: "flow", label: "Flow" }, { id: "turns", label: "Turns" },
+];
 
-export function RunPage({ runId, view, conn, status, onLaunch, onContinue, onNewRun }:
+export function RunPage({ runId, view, feed, conn, status, onLaunch, onContinue, onNewRun }:
   {
     runId: string | null;
     view: RunView;
+    feed: FeedState;
     conn: ConnState;
     status: StatusPayload | null;
     onLaunch: (cwd: string, prompt: string) => void;
     onContinue: (prompt: string) => void;
     onNewRun: () => void;
   }) {
-  const [mode, setMode] = useState<ViewMode>("timeline");
+  const [tab, setTab] = useState<Tab>("feed");
+  const [lens, setLens] = useState<TurnLens>("timeline");
 
   if (!runId) {
     return <EmptyState status={status} onLaunch={onLaunch} />;
@@ -35,13 +45,14 @@ export function RunPage({ runId, view, conn, status, onLaunch, onContinue, onNew
 
   const lastTurn = view.turns[view.turns.length - 1];
   const working = !!lastTurn && lastTurn.status === "working";
+  const live = conn === "live";
   // Deep-linked to a run the server no longer has: the stream can't open and nothing
   // streams. Tell the truth rather than spin forever.
   const replayLost = conn === "reconnecting" && view.lastEventTs === 0 && view.turns.every((t) => t.entries.length === 0);
 
   return (
     <div className="flex h-full flex-col">
-      {/* run header: identity + view-mode lens toggle + new-run */}
+      {/* run header: identity + tabs + (turns-only) lens toggle + new-run */}
       <div className="flex items-center justify-between border-b border-ink-800 px-1 pb-3">
         <div className="flex items-center gap-2 text-xs text-mist-400">
           <span>run</span>
@@ -50,24 +61,28 @@ export function RunPage({ runId, view, conn, status, onLaunch, onContinue, onNew
           <span>{view.turns.length} turn{view.turns.length === 1 ? "" : "s"}</span>
         </div>
         <div className="flex items-center gap-2">
+          {tab === "turns" && (
+            <div className="flex rounded-md border border-ink-700 p-0.5 text-xs">
+              {(["timeline", "graph"] as TurnLens[]).map((m) => (
+                <button key={m} type="button" onClick={() => setLens(m)}
+                  className={`rounded px-2 py-1 capitalize transition-colors ${
+                    lens === m ? "bg-accent-soft/30 text-accent" : "text-mist-400 hover:text-mist-200"}`}>
+                  {m}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex rounded-md border border-ink-700 p-0.5 text-xs">
-            {(["timeline", "graph"] as ViewMode[]).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                className={`rounded px-2 py-1 capitalize transition-colors ${
-                  mode === m ? "bg-accent-soft/30 text-accent" : "text-mist-400 hover:text-mist-200"}`}
-              >
-                {m}
+            {TABS.map((t) => (
+              <button key={t.id} type="button" onClick={() => setTab(t.id)}
+                className={`rounded px-2.5 py-1 transition-colors ${
+                  tab === t.id ? "bg-accent-soft/30 text-accent" : "text-mist-400 hover:text-mist-200"}`}>
+                {t.label}
               </button>
             ))}
           </div>
-          <button
-            type="button"
-            onClick={onNewRun}
-            className="rounded-md border border-ink-700 px-2.5 py-1 text-xs text-mist-200 transition-colors hover:bg-ink-850"
-          >
+          <button type="button" onClick={onNewRun}
+            className="rounded-md border border-ink-700 px-2.5 py-1 text-xs text-mist-200 transition-colors hover:bg-ink-850">
             + new run
           </button>
         </div>
@@ -80,12 +95,23 @@ export function RunPage({ runId, view, conn, status, onLaunch, onContinue, onNew
         </div>
       )}
 
-      {/* the conversation */}
-      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto py-4 pr-1">
-        {view.turns.map((turn) => (
-          <TurnBlock key={turn.id} turn={turn} view={view} mode={mode} />
-        ))}
-        <FullTrace view={view} />
+      {/* persistent run chrome: step / turns / cost / tok-s — visible in every tab */}
+      <div className="pt-3">
+        <RunChrome chrome={feed.chrome} live={live} />
+      </div>
+
+      {/* the active view */}
+      <div className="min-h-0 flex-1 py-3">
+        {tab === "feed" && <VirtualFeed items={feed.items} live={live} />}
+        {tab === "flow" && <FlowGraph flow={feed.flow} live={live} />}
+        {tab === "turns" && (
+          <div className="h-full space-y-5 overflow-y-auto pr-1">
+            {view.turns.map((turn) => (
+              <TurnBlock key={turn.id} turn={turn} view={view} mode={lens} />
+            ))}
+            <FullTrace view={view} />
+          </div>
+        )}
       </div>
 
       {/* the composer — actuates the agent */}
@@ -101,7 +127,7 @@ export function RunPage({ runId, view, conn, status, onLaunch, onContinue, onNew
   );
 }
 
-function TurnBlock({ turn, view, mode }: { turn: Turn; view: RunView; mode: ViewMode }) {
+function TurnBlock({ turn, view, mode }: { turn: Turn; view: RunView; mode: TurnLens }) {
   const working = turn.status === "working";
   return (
     <div className="space-y-2">

@@ -45,9 +45,11 @@ replacements.txt
 *.db-wal
 *.db-shm
 
-# vllm / model serving
+# vllm / model serving — the runtime pidfile dir is ~/.hermes-max/run (outside the
+# repo). Anchor to the repo root so a bare `run/` rule can't silently swallow source
+# dirs named run/ (e.g. ui/web/src/components/run/, the Run-view components).
 *.pid
-run/
+/run/
 
 # local scratch / one-off artifacts (machine-specific)
 restore_products.txt

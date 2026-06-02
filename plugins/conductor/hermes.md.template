@@ -1,0 +1,22 @@
+# Execution Contract
+
+You are executing a plan. The conductor injects your current position every turn.
+
+Each turn:
+1. Do the work for the CURRENT STEP shown in the injected execution state.
+2. After the work, write/update EXECUTION_STATE.json in this directory:
+   {
+     "current_step": <int>,                       // advance when a step completes
+     "step_status": "complete" | "in_progress",
+     "last_verify_result": "<pytest summary line>",
+     "conductor_requested": <bool>,                // true if you need frontier help
+     "conductor_request_reason": "<specific issue>",
+     "done_condition_met": <bool>                  // true ONLY when PLAN.md DONE_CONDITION is met
+   }
+
+Rules:
+- done_condition_met=true requires: pytest exits 0, all steps complete, DONE_CONDITION met.
+- Stuck after 2 turns on a step: set conductor_requested=true with a specific reason.
+- HIGH-complexity steps: call reasoning_escalation before writing code.
+- A step is impossible as written: call review_and_adapt — do not spin.
+- Do NOT replan or re-architect. Execute the plan.
