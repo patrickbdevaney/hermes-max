@@ -12,11 +12,12 @@ import { RunChrome } from "./run/RunChrome";
 import { VirtualFeed } from "./run/VirtualFeed";
 import { ConductorSwimlane } from "./run/ConductorSwimlane";
 import { FlowGraph } from "./run/FlowGraph";
+import { MemoryView } from "./run/MemoryView";
 import { RunReceipt } from "./run/RunReceipt";
 import { SkeletonRows, ErrorState, EmptyMoment } from "./ui";
 import type { HistoryDetail } from "../types";
 
-type Tab = "feed" | "conductor" | "flow";
+type Tab = "feed" | "conductor" | "flow" | "memory";
 const SPEEDS = [1, 2, 4, 8];
 
 export function ReplayPage({ runId }: { runId: string | null }) {
@@ -107,7 +108,7 @@ export function ReplayPage({ runId }: { runId: string | null }) {
 
       <div className="flex items-center gap-2">
         <div className="flex rounded-md border border-ink-700 p-0.5 text-xs">
-          {(["feed", "conductor", "flow"] as Tab[]).map((t) => (
+          {(["feed", "conductor", "flow", "memory"] as Tab[]).map((t) => (
             <button key={t} type="button" onClick={() => setTab(t)}
               className={`rounded px-2.5 py-1 capitalize transition-colors ${tab === t ? "bg-accent-soft/30 text-accent" : "text-mist-400 hover:text-mist-200"}`}>
               {t}
@@ -120,6 +121,7 @@ export function ReplayPage({ runId }: { runId: string | null }) {
         {tab === "feed" && <VirtualFeed items={feed.items} live={false} flow={feed.flow} activeStep={feed.flow.current} />}
         {tab === "conductor" && <ConductorSwimlane flow={feed.flow} live={false} />}
         {tab === "flow" && <FlowGraph flow={feed.flow} live={false} />}
+        {tab === "memory" && <MemoryView flow={feed.flow} turns={feed.chrome.turns} />}
       </div>
 
       {/* the scrubber — scrub a past run like a video */}

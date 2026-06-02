@@ -45,11 +45,16 @@ export function ConductorSwimlane({ flow, live }: { flow: FlowState; live: boole
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
-      {/* lane legend */}
-      <div className="flex items-center gap-4 px-1 text-[11px]">
-        <span className="flex items-center gap-1.5 text-conductor"><span aria-hidden>⚡</span>conductor (cloud planner)</span>
-        <span className="flex items-center gap-1.5" style={{ color: "var(--executor)" }}><span aria-hidden>▦</span>executor (local worker)</span>
-        <span className="ml-auto text-mist-500">{interventions.length} intervention{interventions.length === 1 ? "" : "s"} · {steps.length} steps</span>
+      {/* lane legend + the stochastic↔deterministic contrast (7.4) */}
+      <div className="space-y-0.5 px-1 text-[11px]">
+        <div className="flex items-center gap-4">
+          <span className="flex items-center gap-1.5 text-conductor"><span aria-hidden>⚡</span>conductor (cloud planner)</span>
+          <span className="flex items-center gap-1.5" style={{ color: "var(--executor)" }}><span aria-hidden>▦</span>executor (local worker)</span>
+          <span className="ml-auto text-mist-500">{interventions.length} intervention{interventions.length === 1 ? "" : "s"} · {steps.length} steps</span>
+        </div>
+        <div className="text-[10px] text-mist-600">
+          executor <span className="text-mist-400">wanders</span> (stochastic, the organic trail) · conductor <span className="text-conductor">corrects</span> (deterministic, the sharp pins)
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-ink-800 bg-ink-950/40">
@@ -57,6 +62,14 @@ export function ConductorSwimlane({ flow, live }: { flow: FlowState; live: boole
           {/* lane backdrops */}
           <rect x={0} y={COND_Y - 6} width={width} height={COND_H + 12} fill="oklch(var(--conductor-c) / 0.04)" />
           <rect x={0} y={EXEC_Y - 6} width={width} height={EXEC_H + 12} fill="oklch(var(--executor-c) / 0.05)" />
+          {/* the executor's stochastic WANDER (7.4) — an organic trail under the
+              lane, deterministic jitter so it's stable across renders. Contrasts
+              with the sharp gold conductor pins above. */}
+          {lay.length > 1 && (
+            <polyline
+              points={lay.map(({ s, cx }) => `${cx},${EXEC_Y + EXEC_H + 8 + (((s.n * 37) % 13) - 6)}`).join(" ")}
+              fill="none" stroke="var(--executor)" strokeWidth={1} opacity={0.4} strokeLinejoin="round" />
+          )}
           {/* verify spine baseline */}
           <line x1={PAD_X} y1={SPINE_Y} x2={width - PAD_X} y2={SPINE_Y} stroke="var(--edge)" strokeWidth={1.5} />
 
@@ -158,13 +171,15 @@ function InterventionCard({ node, open, onToggle }:
       {open && (
         <div className="space-y-2 border-t border-ink-800 px-3 py-2.5 text-xs">
           <Row k="why it fired" v={node.reason + (node.failures ? ` (after ${node.failures} verify failure${node.failures === 1 ? "" : "s"})` : "")} />
-          <Row k="planner" v={node.resolved ? (node.model ?? "guidance applied") : "awaiting guidance…"} tone="text-conductor" />
+          {/* counterfactual: what the executor was about to do vs the redirect (7.3) */}
+          <Row k="executor was about to" v={node.failures
+            ? `repeat the approach that failed verify ×${node.failures}`
+            : "continue unsupervised on this step"} />
+          <Row k="conductor redirected to" tone="text-conductor"
+            v={node.resolved ? `${node.model ?? "frontier"} guidance, re-injected next turn` : "awaiting guidance…"} />
           {node.resolved && (
             <Row k="what it cost" v={`${node.tokens ?? 0} tokens · ${node.cost != null ? fmtMoney(node.cost) : "free"}`} />
           )}
-          <Row k="what changed" v={node.resolved
-            ? "Guidance was injected into the executor's next turn on this step."
-            : "The executor is paused on this step until guidance returns."} />
         </div>
       )}
     </div>

@@ -45,6 +45,9 @@ export interface ConductorEvt extends Base {
   tokens?: number; thinking_tokens?: number; output_tokens?: number; elapsed_s?: number;
   cost?: number; failures?: number; result?: string; file?: string;
   from_step?: number; to_step?: number; done?: boolean; final_step?: number; total_turns?: number;
+  // Phase 7 — the pre_llm_call re-injection / compaction-survival surface. These
+  // pass through verbatim from the conductor livelog span (note/basis/contract).
+  note?: string; basis?: string; contract?: string;
 }
 export type HeartbeatEvt = Base & { tool?: string; done?: number | null; total?: number | null;
   eta_s?: number | null; elapsed_s?: number | null; item?: string | null; note?: string | null };

@@ -51,12 +51,22 @@ export interface ConductorNode {
   resolved: boolean; tokens?: number; cost?: number; failures?: number;
   ts: number;            // ms — for ordering the swimlane
 }
+// Phase 7 — the memory/compaction surface. pre_llm_call re-injects the execution
+// contract every turn (the anchor that survives context compaction); we count
+// re-injections + compaction events and keep the latest contract text.
+export interface MemoryState {
+  anchors: number;        // pre_llm_call re-injections (one per turn)
+  compactions: number;    // observed context-compaction events
+  lastContract?: string;  // the re-injected execution contract (what survives)
+}
+
 export interface FlowState {
   total: number;          // best-known step count (0 until first llm_call)
   current: number;        // current step
   steps: FlowStep[];
   conductors: ConductorNode[];
   done: boolean;
+  memory: MemoryState;
 }
 
 // ── the run chrome HUD (Fix C) ──────────────────────────────────────────────
@@ -88,7 +98,7 @@ export interface FeedState {
 
 export const initialFeed: FeedState = {
   items: [],
-  flow: { total: 0, current: 1, steps: [], conductors: [], done: false },
+  flow: { total: 0, current: 1, steps: [], conductors: [], done: false, memory: { anchors: 0, compactions: 0 } },
   chrome: {
     step: 1, total: 0, turns: 0, cost_usd: 0, tokps: null, running: true,
     plannerTokens: 0, plannerCost: 0, execFreeTok: 0, execPaidTok: 0,
@@ -382,6 +392,22 @@ function applyConductor(
       add({ kind: "verify", tone: "warn", icon: "⊘", title: "done rejected — tests not yet green",
             meta: `step ${step}`, ts: now, hms: d.hms, step });
       flow = { ...flow, steps: setStep(ensureSteps(flow, flow.total), step, { lastVerify: "rejected" }) };
+      break;
+    }
+    case "pre_llm_call": {
+      // Phase 7.2 — the execution contract is re-injected every turn; this is the
+      // anchor that survives context compaction (why the agent doesn't drift).
+      const contract = d.contract || d.basis || d.note || flow.memory.lastContract;
+      flow = { ...flow, memory: { ...flow.memory, anchors: flow.memory.anchors + 1, lastContract: contract } };
+      break;
+    }
+    case "compaction":
+    case "context_compacted":
+    case "compact": {
+      // Phase 7.1 — make the (usually invisible) compaction event legible.
+      add({ kind: "narration", tone: "muted", icon: "♻", title: "context compacted — anchors survived",
+            detail: trunc(flow.memory.lastContract, 80), ts: now, hms: d.hms, step });
+      flow = { ...flow, memory: { ...flow.memory, compactions: flow.memory.compactions + 1 } };
       break;
     }
     default:

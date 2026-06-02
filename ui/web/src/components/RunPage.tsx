@@ -19,16 +19,18 @@ import { RunReceipt } from "./run/RunReceipt";
 import { ConductorSwimlane } from "./run/ConductorSwimlane";
 import { RunControls } from "./run/RunControls";
 import { PlanEditor } from "./run/PlanEditor";
+import { MemoryView } from "./run/MemoryView";
 import type { RunView, Turn } from "../state";
 import type { FeedState } from "../lib/feed";
 import type { ConnState } from "../lib/events";
 import type { StatusPayload, RecentProject } from "../types";
 
-type Tab = "feed" | "conductor" | "flow" | "turns" | "plan";
+type Tab = "feed" | "conductor" | "flow" | "memory" | "turns" | "plan";
 type TurnLens = "timeline" | "graph";
 const TABS: { id: Tab; label: string }[] = [
   { id: "feed", label: "Feed" }, { id: "conductor", label: "Conductor" },
-  { id: "flow", label: "Flow" }, { id: "turns", label: "Turns" }, { id: "plan", label: "Plan" },
+  { id: "flow", label: "Flow" }, { id: "memory", label: "Memory" },
+  { id: "turns", label: "Turns" }, { id: "plan", label: "Plan" },
 ];
 
 export interface RunControlProps {
@@ -134,6 +136,7 @@ export function RunPage({ runId, view, feed, conn, status, cwd, control, onLaunc
         {tab === "feed" && <VirtualFeed items={feed.items} live={live} flow={feed.flow} activeStep={feed.flow.current} />}
         {tab === "conductor" && <ConductorSwimlane flow={feed.flow} live={live} />}
         {tab === "flow" && <FlowGraph flow={feed.flow} live={live} />}
+        {tab === "memory" && <MemoryView flow={feed.flow} turns={feed.chrome.turns} />}
         {tab === "plan" && <PlanEditor cwd={cwd} />}
         {tab === "turns" && (
           <div className="h-full space-y-5 overflow-y-auto pr-1">
