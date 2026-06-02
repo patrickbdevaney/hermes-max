@@ -85,18 +85,25 @@ def _event_text(event: str, data: dict[str, Any]) -> str:
     return " ".join(bits)[:600]
 
 
-def _read_slice(offset_start: int) -> tuple[list[dict[str, Any]], int]:
-    """Read livelog records from `offset_start` to current EOF."""
+def _read_slice(offset_start: int, offset_end: int | None = None) -> tuple[list[dict[str, Any]], int]:
+    """Read livelog records from `offset_start` to `offset_end` (or current EOF).
+    Bounding lets backfill scope each run to its own slice of the shared log."""
     path = feeds.livelog_path()
     recs: list[dict[str, Any]] = []
     try:
-        end = os.path.getsize(path)
+        eof = os.path.getsize(path)
     except OSError:
         return recs, offset_start
+    end = eof if offset_end is None else min(offset_end, eof)
     try:
         with open(path, "r") as f:
             f.seek(offset_start)
-            for line in f:
+            while True:
+                if f.tell() >= end:
+                    break
+                line = f.readline()
+                if not line:
+                    break
                 line = line.strip()
                 if not line:
                     continue
@@ -109,15 +116,16 @@ def _read_slice(offset_start: int) -> tuple[list[dict[str, Any]], int]:
     return recs, end
 
 
-def ingest_run(run: dict[str, Any]) -> bool:
+def ingest_run(run: dict[str, Any], offset_end: int | None = None) -> bool:
     """Ingest a (completed) run's livelog slice into SQLite. Idempotent — re-ingest
-    replaces prior rows. Best-effort: never raises into the caller."""
+    replaces prior rows. Best-effort: never raises into the caller. `offset_end`
+    bounds the slice (used by backfill to separate interleaved runs)."""
     try:
         run_id = run["run_id"]
         if run_id == "live":
             return False  # the synthetic attach run isn't a real, indexable run
         offset_start = int(run.get("start_offset", 0))
-        recs, offset_end = _read_slice(offset_start)
+        recs, offset_end = _read_slice(offset_start, offset_end)
         if not recs:
             return False
 
@@ -186,9 +194,58 @@ def ingest_run(run: dict[str, Any]) -> bool:
         return False
 
 
+_backfilled = False
+
+
+def backfill() -> int:
+    """Index any registered runs not yet in SQLite (terminal / hm dev / past UI
+    runs that predate this feature, or completed while the server was down). Each
+    run is scoped to its own slice of the shared livelog by bounding at the next
+    run's start offset. Returns the number ingested."""
+    from . import runs as _runs
+    try:
+        descs = []
+        for run_id in {r["run_id"] for r in _runs.list_runs(limit=500)}:
+            d = _runs.get_run(run_id)
+            if d and run_id != "live":
+                descs.append(d)
+    except Exception:  # noqa: BLE001
+        return 0
+    descs.sort(key=lambda r: int(r.get("start_offset", 0)))
+    starts = [int(d.get("start_offset", 0)) for d in descs]
+    n = 0
+    for i, d in enumerate(descs):
+        # bound this run at the next run's start (or EOF for the last)
+        end = starts[i + 1] if i + 1 < len(descs) and starts[i + 1] > starts[i] else None
+        if ingest_run(d, offset_end=end):
+            n += 1
+    return n
+
+
+def _maybe_backfill() -> None:
+    """Once per process: if the index is empty, populate it from the registry so
+    history isn't blank on first view (ingestion otherwise happens on completion)."""
+    global _backfilled
+    if _backfilled:
+        return
+    _backfilled = True
+    try:
+        with _lock:
+            conn = _connect()
+            try:
+                empty = conn.execute("SELECT COUNT(*) AS c FROM runs").fetchone()["c"] == 0
+            finally:
+                conn.close()
+        if empty:
+            backfill()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def list_history(q: str = "", status: str = "", limit: int = 200) -> list[dict[str, Any]]:
     """Run summaries, newest first. `q` does a full-text search (FTS5 when
     available, LIKE fallback) across event text + prompt."""
+    _maybe_backfill()
     with _lock:
         conn = _connect()
         try:
