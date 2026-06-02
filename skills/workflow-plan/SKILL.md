@@ -14,29 +14,40 @@ metadata:
 
 <!-- TRIGGERS WHEN: "For tasks over ~5 files, plan and decompose before coding using native plan + kanban." version: 1.0.0 author: Hermes Max license: MIT platforms: [linux, macos, -->
 
-# Plan — decompose before large changes
+# Plan — the conductor plans, you execute
 
-## Task protocol — required, before any code or file action on a new task
+## Your FIRST action on any new task
 
-This is not optional. The verify gate will **not** pass a task with no `PLAN.md`
-(a task without a plan has no `DONE_CONDITION` and cannot be verified).
+Before any file write, before any reasoning, **before you think through the
+architecture at all** — call the `conductor_plan` MCP tool:
 
-1. **Map the scope first.** Call `get_repo_map(cwd)` (the scopemap MCP) to see the
-   codebase structure — one line per file, fits the window even on a huge repo — or
-   to confirm it's a **greenfield** task with no existing code (empty map → proceed
-   straight to step 3).
-2. **Request only what you need.** Issue a `CONTEXT_REQUEST` via
-   `request_context(cwd, need_full=[...], need_signatures=[...], need_nothing=[...])`
-   so the window holds exactly the files you'll edit (full) and call (signatures),
-   nothing else — surgical context instead of ingesting everything or flying blind.
-3. **Produce the plan contract.** Use the conductor's synthesize/plan path (Kimi/
-   V4-Pro via the inference fabric) to write a concrete `PLAN.md`: the files to
-   touch, the order, the risky steps, how each is verified, and an explicit
-   `DONE_CONDITION` (e.g. "pytest green, N tests"). The plan is a CONTRACT — every
-   subsequent action executes against it.
-4. **Only then execute.** Begin file actions against the plan. Each unit must pass
-   `verify` (`workflow-task-finish`) before it's complete; the gate IS the
-   `DONE_CONDITION`.
+```
+conductor_plan(task="<the task>", cwd="<the working directory>")
+```
+
+**Do not plan internally. Do not reason through the design yourself.** The conductor
+routes the plan through a strong cloud reasoner (Kimi-K2.6:free → DeepSeek-V4-Pro) with
+an 8192-token thinking budget and writes a signed `PLAN.md` to the working directory.
+Your job is to **execute against what it returns** — transcribe the FILE SPEC, follow
+the Steps, satisfy the `DONE_CONDITION`. The architectural thinking is the conductor's;
+the implementation is yours.
+
+`conductor_plan` auto-fetches the repo map (`get_repo_map`) first, so the planner has
+full structural context. On a greenfield task it plans from the prompt.
+
+**This is enforced, not advisory.** The verify gate rejects any `PLAN.md` that lacks the
+conductor signature —
+
+```
+## Plan authored by: <model> via conductor
+```
+
+— so a plan you wrote yourself **cannot pass verify**. Only `conductor_plan` produces a
+valid plan. If verify reports `PLAN.md is not conductor-authored`, you skipped this step:
+call `conductor_plan` and start over against its output.
+
+Then **execute**: each unit must pass `verify` (`workflow-task-finish`) before it's
+complete; the gate IS the `DONE_CONDITION`.
 
 ## When
 

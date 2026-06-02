@@ -524,7 +524,21 @@ case "${cmd}" in
   run)
     if [ -n "${HM_PRINT:-}" ]; then echo "hermes $*"; exit 0; fi
     command -v hermes >/dev/null 2>&1 || { echo "✗ 'hermes' not on PATH — install/activate Hermes first."; exit 127; }
-    exec hermes "$@"
+    # Raw hermes flags (e.g. `hm run --continue …`) pass straight through.
+    case "${1:-}" in -*) exec hermes "$@" ;; esac
+    _hm_prompt="$*"
+    # ── conductor plans FIRST — the guaranteed first step ─────────────────────
+    # The CONDUCTOR (strong cloud reasoner: kimi:free → V4-Pro, 8192-token thinking)
+    # authors a SIGNED PLAN.md before the executor runs, so the local model
+    # transcribes against the contract instead of doing its own long CoT planning.
+    # The verify gate rejects any PLAN.md without the conductor signature. Skip with
+    # HM_NO_PREPLAN=1. .env is sourced so the planner has its provider keys.
+    if [ -z "${HM_NO_PREPLAN:-}" ] && [ -f "${SCRIPTS}/preplan.py" ]; then
+      ( set -a; [ -f "${HMX_ENV_FILE}" ] && . "${HMX_ENV_FILE}" 2>/dev/null; set +a
+        python3 "${SCRIPTS}/preplan.py" "${PWD}" "${_hm_prompt}" ) \
+        || echo "  ⚠ conductor_plan produced no plan — verify will block until it does"
+    fi
+    exec hermes --yolo -z "${_hm_prompt}"
     ;;
   setup)   _dispatch "${SCRIPTS}/setup.sh" "$@" ;;
   ui)

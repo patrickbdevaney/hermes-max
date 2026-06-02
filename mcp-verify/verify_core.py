@@ -266,18 +266,32 @@ def verify(path: str, language: str = "auto") -> dict[str, Any]:
 
     require_plan = os.environ.get("VERIFY_REQUIRE_PLAN", "true").strip().lower() in (
         "1", "true", "yes", "on")
-    if require_plan and _find_plan(abspath) is None:
-        return {
-            "path": abspath,
-            "language": language,
-            "passed": False,
-            "blocked": True,
-            "stages": [],
-            "summary": ("VERIFY BLOCKED: no PLAN.md found. The conductor plan step "
-                        "must be called before execution begins (a task without a plan "
-                        "has no DONE_CONDITION and cannot be verified). Re-run from the "
-                        "planning step — call get_repo_map() then produce a PLAN.md."),
-        }
+    if require_plan:
+        plan_path = _find_plan(abspath)
+        if plan_path is None:
+            return {
+                "path": abspath, "language": language, "passed": False, "blocked": True,
+                "stages": [],
+                "summary": ("VERIFY BLOCKED: no PLAN.md found. Call the conductor_plan "
+                            "MCP tool FIRST — it authors a signed PLAN.md with a "
+                            "DONE_CONDITION. Execution cannot be certified without it."),
+            }
+        # The plan MUST be authored by the conductor, not by the executor's own internal
+        # planner — a plan the executor wrote itself has no conductor signature and fails.
+        try:
+            plan_text = open(plan_path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            plan_text = ""
+        if not re.search(r"(?mi)^##\s*Plan authored by:.*\bvia conductor\b", plan_text):
+            return {
+                "path": abspath, "language": language, "passed": False, "blocked": True,
+                "stages": [],
+                "summary": ("VERIFY BLOCKED: PLAN.md is not conductor-authored (missing "
+                            "the '## Plan authored by: <model> via conductor' signature). "
+                            "Do NOT plan internally — call the conductor_plan MCP tool so "
+                            "the strong cloud reasoner authors the plan; then execute "
+                            "against it. A self-written plan cannot pass the gate."),
+            }
 
     lang = language if language and language != "auto" else detect_language(abspath)
     if lang in ("js", "javascript", "typescript"):

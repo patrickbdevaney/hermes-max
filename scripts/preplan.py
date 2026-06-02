@@ -69,57 +69,48 @@ def main() -> int:
     cwd = os.path.abspath(os.path.expanduser(sys.argv[1]))
     task = sys.argv[2]
     plan_path = os.path.join(cwd, "PLAN.md")
-    if os.path.isfile(plan_path):
-        print(f"preplan: PLAN.md already present at {plan_path} — skipping")
-        return 0
-
-    repo_map, greenfield = _repo_map(cwd)
-    prompt = _plan_prompt(task, repo_map, greenfield)
 
     if livelog is not None:
         try:
-            livelog.tool_start("LLM·plan", server="conductor",
-                               inp={"phase": "plan", "greenfield": greenfield})
+            livelog.tool_start("conductor_plan", server="conductor",
+                               inp={"phase": "plan", "task": task[:80]})
         except Exception:  # noqa: BLE001
             pass
 
     t0 = time.time()
     try:
         import conductor_core
-        res = conductor_core.run_role("synth", prompt=prompt, max_tokens=4096)
+        # The single planner entrypoint: maps the repo, routes through the synth chain
+        # (kimi:free → V4-Pro, thinking 8192), writes a SIGNED PLAN.md. Idempotent.
+        res = conductor_core.conductor_plan(task, cwd=cwd)
     except Exception as e:  # noqa: BLE001
         res = {"ok": False, "reason": f"{type(e).__name__}: {e}"}
     secs = time.time() - t0
 
-    if res.get("ok") and res.get("content"):
-        try:
-            with open(plan_path, "w") as f:
-                f.write(res["content"].strip() + "\n")
-        except OSError as e:
-            print(f"preplan: could not write PLAN.md: {e}")
-            return 0
+    if res.get("ok"):
         if livelog is not None:
             try:
-                livelog.tool_ok("LLM·plan", secs=secs,
-                                ret={"model": res.get("model"),
-                                     "provider": res.get("provider"),
+                livelog.tool_ok("conductor_plan", secs=secs,
+                                ret={"model": res.get("model"), "provider": res.get("provider"),
                                      "thinking_tok": res.get("thinking_tok", 0),
-                                     "wrote": "PLAN.md"})
+                                     "signed": res.get("signed"), "wrote": res.get("wrote")})
             except Exception:  # noqa: BLE001
                 pass
-        print(f"preplan: PLAN.md written by {res.get('provider')}/{res.get('model')} "
+        verb = "reused existing" if not res.get("wrote") else "written by"
+        print(f"preplan: PLAN.md {verb} {res.get('provider')}/{res.get('model')} "
               f"in {secs:.1f}s (thinking {res.get('thinking_tok', 0)} tok) → {plan_path}")
         return 0
 
     # Planner unavailable (all synth rungs failed/gated) — be honest, don't fabricate.
     if livelog is not None:
         try:
-            livelog.tool_fail("LLM·plan", reason=str(res.get("reason", "no planner"))[:80], secs=secs)
+            livelog.tool_fail("conductor_plan", reason=str(res.get("reason", "no planner"))[:80], secs=secs)
         except Exception:  # noqa: BLE001
             pass
     print(f"preplan: conductor planner unavailable ({res.get('reason', 'no rung')}). "
-          "The executor will plan locally; set CONDUCTOR_MODE=full for the funded V4-Pro rung.")
-    return 0
+          "Set CONDUCTOR_MODE=full for the funded V4-Pro rung; verify will block until "
+          "a conductor-signed PLAN.md exists.")
+    return 1
 
 
 if __name__ == "__main__":

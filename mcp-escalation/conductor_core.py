@@ -26,6 +26,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import sys
 import threading
 import time
 from datetime import date
@@ -299,6 +300,85 @@ def _fabric_mode() -> str:
             return fh.read().strip()
     except OSError:
         return ""
+
+
+_PLAN_SIGNATURE = "## Plan authored by:"   # must be followed by "<model> via conductor"
+
+
+def _scopemap_repo_map(cwd: str) -> str:
+    """Best-effort structural map via the scopemap core (added to path lazily)."""
+    try:
+        import os as _os
+        repo = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        sm = _os.path.join(repo, "mcp-scopemap")
+        if sm not in sys.path:
+            sys.path.insert(0, sm)
+        import scopemap_core
+        return scopemap_core.get_repo_map(cwd)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, Any]:
+    """THE planner entrypoint (the guaranteed first step on any new task). The CONDUCTOR
+    authors PLAN.md — not the executor's internal chain-of-thought. It maps the repo
+    (scopemap), routes the plan through the synth chain (kimi-k2.6:free → V4-Pro on 429)
+    with the full 8192-token thinking budget, and writes a SIGNED PLAN.md to `cwd`:
+
+        ## Plan authored by: <model> via conductor
+
+    The verify gate refuses any PLAN.md without that signature, so a plan the executor
+    wrote itself can never pass — the architectural thinking is done by the strong
+    cloud reasoner, the local model only executes against the contract.
+
+    Idempotent: if a validly-signed PLAN.md already exists in `cwd`, it is returned
+    unchanged. Returns {ok, plan, model, provider, signed, wrote, path}."""
+    import os as _os
+    cwd = _os.path.abspath(_os.path.expanduser(cwd or _os.getcwd()))
+    plan_path = _os.path.join(cwd, "PLAN.md")
+    # idempotent: a validly-signed plan already present → return it
+    try:
+        if _os.path.isfile(plan_path):
+            existing = open(plan_path).read()
+            if _PLAN_SIGNATURE in existing and "via conductor" in existing:
+                return {"ok": True, "plan": existing, "signed": True,
+                        "wrote": False, "path": plan_path,
+                        "model": "(existing)", "provider": "(existing)"}
+    except OSError:
+        pass
+
+    if not repo_map and cwd:
+        repo_map = _scopemap_repo_map(cwd)        # auto get_repo_map (spec point 4)
+    greenfield = (not repo_map) or "greenfield" in repo_map.lower()
+    ctx = ("GREENFIELD — no existing code to map." if greenfield
+           else f"Repository structure (one line per file):\n{repo_map[:8000]}")
+    prompt = (
+        "You are the PLANNER. Produce a PLAN.md for the task. Output ONLY the markdown "
+        "plan (no preamble). It is a contract the executor follows literally — concrete "
+        "and gap-free.\n\n"
+        f"{ctx}\n\nTASK:\n{task}\n\n"
+        "The plan MUST contain: a one-paragraph approach; a '## Files' list with a FILE "
+        "SPEC (key functions/classes + signatures) per file; a '## Steps' ordered list; "
+        "and a 'DONE_CONDITION:' line with the exact verifiable gate (e.g. 'pytest "
+        "green, N tests pass').")
+    # synth chain already carries thinking_budget 8192 (see _THINKING_BUDGET["synth"]).
+    res = run_role("synth", prompt=prompt, max_tokens=4096)
+    if not (res.get("ok") and res.get("content")):
+        return {"ok": False, "plan": "", "signed": False, "wrote": False,
+                "path": plan_path, "reason": res.get("reason", "no synth rung available")}
+    model = res.get("model", "unknown")
+    body = res["content"].strip()
+    # strip any header the model emitted, then prepend the canonical signature
+    signed = f"## Plan authored by: {model} via conductor\n\n{body}\n"
+    try:
+        with open(plan_path, "w") as f:
+            f.write(signed)
+    except OSError as e:
+        return {"ok": False, "plan": signed, "signed": True, "wrote": False,
+                "path": plan_path, "reason": f"write failed: {e}"}
+    return {"ok": True, "plan": signed, "signed": True, "wrote": True, "path": plan_path,
+            "model": model, "provider": res.get("provider"),
+            "thinking_tok": res.get("thinking_tok", 0)}
 
 
 def reasoning_escalation(question: str, context: str = "", budget: str = "standard") -> dict[str, Any]:

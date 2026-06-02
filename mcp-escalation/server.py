@@ -151,6 +151,22 @@ def conductor_synthesize(prompt: str, max_tokens: int | None = None) -> dict:
 
 @mcp.tool()
 @_threaded
+def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict:
+    """Your FIRST action on any new task — BEFORE any file write, before any internal
+    reasoning. The CONDUCTOR authors the plan, not you: it maps the repo, routes a
+    PLAN.md through the strong synth chain (kimi-k2.6:free → V4-Pro) with the full
+    8192-token thinking budget, and writes a SIGNED PLAN.md to `cwd`. Pass the task
+    description and the working directory; repo_map is auto-fetched if omitted.
+
+    Do NOT plan internally or reason through the architecture yourself — call this and
+    execute against what it returns. The verify gate REJECTS any PLAN.md that lacks the
+    conductor signature ('## Plan authored by: <model> via conductor'), so a plan you
+    wrote yourself cannot pass. Returns {ok, plan, model, provider, path, signed}."""
+    return conductor_core.conductor_plan(task, cwd, repo_map)
+
+
+@mcp.tool()
+@_threaded
 def reasoning_escalation(question: str, context: str = "", budget: str = "standard") -> dict:
     """Ask a LARGER reasoning model a TARGETED question — frontier reasoning on demand
     for the local executor when it's unsure about a design decision, an invariant, or a
