@@ -76,6 +76,13 @@ of your next step):
 Escalation is capped per run (standard×5, deep×2) so it can't burn the credit; past the
 cap, proceed with what you have.
 
+**A plan step is impossible as written** — call `review_and_adapt`, not `reasoning_escalation`:
+a referenced API doesn't exist, the planned approach can't work, or `verify` has failed 3+
+times on the same step. `review_and_adapt(issue="…", current_step=N, completed_steps=[…],
+cwd="…")` asks the conductor to REVISE PLAN.md from step N onward (your completed steps are
+preserved). **Do not attempt impossible implementations and do not spin** — ask the
+conductor to revise, then execute the revision (re-read PLAN.md).
+
 ## When
 
 Always run the map+plan step on a new task. The full decompose (native kanban

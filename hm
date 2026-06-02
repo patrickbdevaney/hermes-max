@@ -530,24 +530,51 @@ case "${cmd}" in
     _hm_plan="${PWD}/PLAN.md"
     # Escape hatch: HM_NO_PREPLAN=1 runs the legacy raw-prompt path (no enforced split).
     if [ -n "${HM_NO_PREPLAN:-}" ]; then exec hermes --yolo -z "${_hm_prompt}"; fi
-    # ── the MANDATORY split: conductor plans, executor executes ───────────────
-    # (a) the CONDUCTOR plans first (kimi:free → V4-Pro, 8192-token thinking) and
-    #     writes a SIGNED PLAN.md.
+    # Fix 5: register the run so the web UI discovers it within ~1s (works without the
+    # shell wrapper; .env sourced so the registry has the mode).
+    _hm_run_id=""
+    if [ -f "${SCRIPTS}/register_run.py" ]; then
+      _hm_run_id="$( ( set -a; [ -f "${HMX_ENV_FILE}" ] && . "${HMX_ENV_FILE}" 2>/dev/null; set +a
+                       python3 "${SCRIPTS}/register_run.py" "${PWD}" -z "${_hm_prompt}" ) 2>/dev/null )"
+      export HM_CURRENT_RUN_ID="${_hm_run_id}"
+    fi
+    # Fix 3: conductor plans FIRST; preplan ALWAYS leaves a PLAN.md (signed, or a minimal
+    # local-fallback if every rung 429'd after retries) so the run never dead-ends.
     if [ -f "${SCRIPTS}/preplan.py" ]; then
       ( set -a; [ -f "${HMX_ENV_FILE}" ] && . "${HMX_ENV_FILE}" 2>/dev/null; set +a
         python3 "${SCRIPTS}/preplan.py" "${PWD}" "${_hm_prompt}" ) || true
     fi
-    # (b) require the conductor signature — refuse to execute without a real plan.
     if ! grep -qiE '^##[[:space:]]*Plan authored by:.*via conductor' "${_hm_plan}" 2>/dev/null; then
-      echo "✗ no conductor-signed PLAN.md in ${PWD} — refusing to execute."
-      echo "  the conductor planner was unavailable. Try: hm mode full-local (funded V4-Pro),"
-      echo "  check OPENROUTER_API_KEY, or bypass the split with HM_NO_PREPLAN=1."
-      exit 1
+      echo "  ⚠ PLAN.md not conductor-signed (conductor unavailable) — proceeding; verify warns, not blocks."
     fi
-    # (c) hermes receives an EXECUTION instruction — NEVER the raw design brief. This is
-    #     what removes its opportunity to plan independently: the cognitive division is
-    #     enforced by the prompt it sees, not by which tools we ask it to call.
-    exec hermes --yolo -z "Read PLAN.md in ${PWD} first, then execute it. Do NOT replan or redesign — the architecture is already decided in PLAN.md. Execute each step. For any step marked 'complexity: HIGH', call the reasoning_escalation MCP tool with the step text and its note BEFORE implementing it, and follow the guidance it returns. If you get stuck or hit an architectural/algorithmic question you can't resolve in a few hundred tokens of thinking, call reasoning_escalation rather than over-reasoning — ask and act. Verify with pytest; you are done when the plan's DONE_CONDITION is met."
+    # The EXECUTION instruction hermes receives — NEVER the raw design brief (this is what
+    # enforces the split). Names the mid-loop tools: reasoning_escalation (stuck/HIGH) and
+    # review_and_adapt (a step is impossible as written). Passed via a temp file to dodge
+    # tmux env/quoting issues.
+    _hm_exec="Read PLAN.md in ${PWD} first, then execute it. Do NOT replan or redesign — the architecture is already decided in PLAN.md. Execute each step. For any step marked 'complexity: HIGH', call reasoning_escalation BEFORE implementing it and follow the guidance. If a step proves IMPOSSIBLE as written, call review_and_adapt with the issue and step number — do not attempt impossible implementations and do not spin. If you get stuck, call reasoning_escalation rather than over-reasoning — ask and act. Verify with pytest; done when the plan's DONE_CONDITION is met."
+    _hm_pf="$(mktemp 2>/dev/null || echo /tmp/hmx_exec.$$)"; printf '%s' "${_hm_exec}" > "${_hm_pf}"
+    _hm_done="python3 '${SCRIPTS}/complete_run.py' '${_hm_run_id}' 2>/dev/null"
+    # Fix 2: launch hermes in tmux so the NATIVE token stream is always visible, with the
+    # structured cockpit (hm watch) beside it. Falls back to inline exec if tmux is absent.
+    if command -v tmux >/dev/null 2>&1 && [ -z "${HM_NO_TMUX:-}" ]; then
+      _win="run-$(basename "${PWD}")-$(date +%H%M%S 2>/dev/null || echo run)"
+      _cmd="cd '${PWD}' && hermes --yolo -z \"\$(cat '${_hm_pf}')\"; rm -f '${_hm_pf}'; ${_hm_done}; echo '--- done (press a key to close) ---'; read _"
+      if tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
+        tmux new-window -t "${TMUX_SESSION}" -n "${_win}" "${_cmd}"
+        tmux select-window -t "${TMUX_SESSION}:${_win}" 2>/dev/null || true
+      else
+        tmux new-session -d -s "${TMUX_SESSION}" -n "${_win}" "${_cmd}"
+        tmux split-window -h -t "${TMUX_SESSION}:${_win}" "cd '${REPO_ROOT}' && '${HM_SELF}' watch" 2>/dev/null || true
+        tmux select-pane -t "${TMUX_SESSION}:${_win}".0 2>/dev/null || true
+      fi
+      if [ -t 1 ] && [ -z "${HM_NO_ATTACH:-}" ]; then exec tmux attach -t "${TMUX_SESSION}"; fi
+      echo "✓ run launched in tmux '${TMUX_SESSION}:${_win}' (run_id ${_hm_run_id:-?}) — hm attach to watch."
+      exit 0
+    fi
+    # No tmux: run inline (native stream still shows; no side cockpit).
+    hermes --yolo -z "${_hm_exec}"; _rc=$?
+    rm -f "${_hm_pf}"; [ -n "${_hm_run_id}" ] && python3 "${SCRIPTS}/complete_run.py" "${_hm_run_id}" 2>/dev/null
+    exit ${_rc}
     ;;
   setup)   _dispatch "${SCRIPTS}/setup.sh" "$@" ;;
   ui)

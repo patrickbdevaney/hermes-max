@@ -167,6 +167,19 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict:
 
 @mcp.tool()
 @_threaded
+def review_and_adapt(issue: str, current_step: int, completed_steps: list | None = None,
+                     context: str = "", cwd: str = "", budget: str = "standard") -> dict:
+    """The living plan: when a PLAN.md step proves IMPOSSIBLE as written (a referenced API
+    doesn't exist, an approach can't work), call this — do NOT attempt impossible
+    implementations and do NOT spin. The conductor revises PLAN.md from `current_step`
+    onward; your completed_steps are preserved verbatim. Pass the specific issue, the
+    step number, the list of completed step descriptions, and the cwd. Returns the revised
+    plan; re-read PLAN.md and continue. Counts against the deep budget (max 2/run)."""
+    return conductor_core.review_and_adapt(issue, current_step, completed_steps, context, cwd, budget)
+
+
+@mcp.tool()
+@_threaded
 def reasoning_escalation(question: str, context: str = "", budget: str = "standard",
                          trigger: str = "self_declared") -> dict:
     """Ask a LARGER reasoning model a TARGETED question — frontier reasoning on demand.

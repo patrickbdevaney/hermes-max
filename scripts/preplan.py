@@ -101,16 +101,31 @@ def main() -> int:
               f"in {secs:.1f}s (thinking {res.get('thinking_tok', 0)} tok) → {plan_path}")
         return 0
 
-    # Planner unavailable (all synth rungs failed/gated) — be honest, don't fabricate.
+    # Planner unavailable (every rung 429'd/gated even after retries). NEVER block the
+    # run (Fix 3): write a minimal LOCAL-FALLBACK plan and proceed local-only. It is
+    # unsigned on purpose — the verify gate WARNS (not blocks) on an unsigned plan, so
+    # the executor still runs and can call reasoning_escalation if it gets stuck.
     if livelog is not None:
         try:
             livelog.tool_fail("conductor_plan", reason=str(res.get("reason", "no planner"))[:80], secs=secs)
         except Exception:  # noqa: BLE001
             pass
-    print(f"preplan: conductor planner unavailable ({res.get('reason', 'no rung')}). "
-          "Set CONDUCTOR_MODE=full for the funded V4-Pro rung; verify will block until "
-          "a conductor-signed PLAN.md exists.")
-    return 1
+    minimal = (
+        "## Plan authored by: local-fallback (conductor unavailable)\n\n"
+        "# PLAN.md\n\n"
+        f"## Task\n{task}\n\n"
+        "## Approach\nExecute the task directly. Call reasoning_escalation if you hit an "
+        "architectural/algorithmic question you can't resolve quickly.\n\n"
+        "## DONE_CONDITION\nTask complete and its tests pass. (Verify warns, not blocks, "
+        "on this unsigned fallback plan — the conductor was unavailable.)\n")
+    try:
+        with open(plan_path, "w") as f:
+            f.write(minimal)
+        print(f"preplan: conductor unavailable ({res.get('reason', 'all rungs 429')}) — "
+              f"wrote minimal local-fallback PLAN.md, proceeding local-only → {plan_path}")
+    except OSError as e:
+        print(f"preplan: conductor unavailable and could not write fallback plan: {e}")
+    return 0   # DO NOT block hm run
 
 
 if __name__ == "__main__":

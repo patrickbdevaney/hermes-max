@@ -25,6 +25,27 @@ def main() -> int:
             json.dump(d, f, indent=2)
     except (OSError, ValueError):
         pass
+
+    # End-of-run cost summary (Fix 6): escalation calls / free vs paid / $ spent this
+    # run — surfaced in the cockpit and printed. Best-effort.
+    try:
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sys.path.insert(0, os.path.join(repo, "mcp-escalation"))
+        import conductor_core
+        s = conductor_core.escalation_summary()
+        line = (f"cost summary: {s['calls']} escalation call(s) / {s['free']} free ($0) / "
+                f"{s['paid']} paid (${s['cost_usd']:.4f}) / total ${s['cost_usd']:.4f}")
+        print("  " + line)
+        try:
+            sys.path.insert(0, repo)
+            from lib import livelog
+            livelog.forward("run_cost_summary", {
+                "calls": s["calls"], "free": s["free"], "paid": s["paid"],
+                "cost_usd": s["cost_usd"]}, status="ok")
+        except Exception:
+            pass
+    except Exception:
+        pass
     return 0
 
 

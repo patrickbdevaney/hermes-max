@@ -176,6 +176,12 @@ def _render_span(rec: dict, hms: str) -> list[str]:
         miss = _trunc(attr("missing"), 30)
         return [_line(hms, "◷", DIM if complete else YEL, "plan", "lint",
                       "complete" if complete else miss)]
+    if "run_cost_summary" in name:
+        calls, free, paid = attr("calls"), attr("free"), attr("paid")
+        cost = attr("cost_usd")
+        return [_line(hms, "Σ", GRN, "run", "cost summary",
+                      f"{calls} call(s) · {free} free · {paid} paid",
+                      f"${cost}" if cost not in ("", None) else "$0")]
     if "rung_fell" in name:
         # a cascade fall-through (free rung 429'd / over budget → next rung)
         model = attr("model") or attr("frm")

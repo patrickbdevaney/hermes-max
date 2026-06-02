@@ -289,6 +289,11 @@ _THINKING_BUDGET = {
     "escalate": int(os.environ.get("CONDUCTOR_ESCALATE_THINKING", "8192")),
 }
 
+# Per-rung retry on a transient 429/5xx before falling to the next rung (Fix 3) —
+# a brief retry keeps the run on the $0 free rung instead of cascading to paid.
+_RUNG_RETRIES = int(os.environ.get("CONDUCTOR_RUNG_RETRIES", "2"))
+_RUNG_BACKOFF_S = float(os.environ.get("CONDUCTOR_RUNG_BACKOFF_S", "5"))
+
 
 def _fabric_mode() -> str:
     """The active FABRIC mode name (free / free-full-local / full-local / …), read
@@ -443,6 +448,68 @@ _TRIGGER_TOOL = {
     "self_declared": "uplift·ask", "verify_double_fail": "uplift·stuck",
     "complex_step": "uplift·step",
 }
+
+
+def review_and_adapt(issue: str, current_step: int, completed_steps: list | None = None,
+                     context: str = "", cwd: str = "", budget: str = "standard") -> dict[str, Any]:
+    """The living plan (Fix 4): when the executor discovers a plan step is impossible as
+    written, the conductor REVISES PLAN.md from `current_step` onward — completed steps
+    are preserved verbatim, so prior work isn't thrown away. Counts against the deep
+    escalation budget (max 2 paid/run). Logs `plan.adapt step N <model> <tok>`. Returns
+    {ok, revised, model, provider, path}."""
+    import os as _os
+    completed_steps = completed_steps or []
+    # budget guard (shared with deep escalations)
+    caps = _esc_caps()
+    if int(_esc_counts().get("deep", 0)) >= caps.get("deep", 2):
+        _emit_livelog("plan·adapt", ok=False, reason="deep budget exhausted — proceed with current plan")
+        return {"ok": False, "refused": True, "reason": f"deep budget ({caps['deep']}) reached this run"}
+
+    done = "\n".join(f"- [x] step {i + 1}: {s}" for i, s in enumerate(completed_steps)) or "(none)"
+    prompt = (
+        f"The executor hit an issue at step {current_step} of the plan.\n\n"
+        f"Issue: {issue}\n\n"
+        f"Completed steps (preserve these EXACTLY — do not redo them):\n{done}\n\n"
+        f"Context:\n{(context or '')[:6000]}\n\n"
+        f"Revise the plan FROM step {current_step} onward to address this issue. Output the "
+        "revised steps as a markdown '## Steps' list (use real, verified APIs). Keep the "
+        "DONE_CONDITION intact unless the issue requires changing it. Mark "
+        "'complexity: HIGH' on any revised step that needs frontier reasoning.")
+    t0 = time.time()
+    r = run_role("synth", prompt=prompt, max_tokens=2048 if budget != "deep" else 4096)
+    secs = time.time() - t0
+    if not (r.get("ok") and r.get("content")):
+        _emit_livelog("plan·adapt", ok=False, reason=str(r.get("reason", "no rung"))[:80], secs=secs)
+        return {"ok": False, "reason": r.get("reason", "synth unavailable")}
+    prov = r.get("provider")
+    tier = (reg.load_config()["providers"].get(prov, {}) or {}).get("tier", "?") if prov else "?"
+    _esc_account("deep", paid=(tier != "free"), cost=float(r.get("cost_usd", 0.0) or 0.0))
+    # Rewrite PLAN.md: keep the conductor signature + the completed steps verbatim, append
+    # the revision. Staying signed means verify still treats it as conductor-authored.
+    cwd = _os.path.abspath(_os.path.expanduser(cwd or _os.getcwd()))
+    plan_path = _os.path.join(cwd, "PLAN.md")
+    ts = time.strftime("%H:%M:%S", time.localtime())
+    try:
+        old = open(plan_path).read() if _os.path.isfile(plan_path) else ""
+    except OSError:
+        old = ""
+    sig = old.splitlines()[0] if old.startswith("## Plan authored by:") else \
+        f"## Plan authored by: {r.get('model')} via conductor"
+    revised = (f"{sig} (adapted at step {current_step} by {r.get('model')} via conductor, {ts})\n\n"
+               f"{old.split(chr(10), 1)[1] if (chr(10) in old) else ''}\n"
+               f"## Plan adaptation — revised from step {current_step} ({ts})\n"
+               f"Issue: {issue}\n\n"
+               f"Completed (preserved):\n{done}\n\n{r['content'].strip()}\n")
+    try:
+        with open(plan_path, "w") as f:
+            f.write(revised)
+    except OSError as e:
+        return {"ok": False, "reason": f"write failed: {e}", "revised": r["content"]}
+    out_tok = int((r.get("usage") or {}).get("completion_tokens", 0) or 0)
+    _emit_livelog("plan·adapt", ok=True, secs=secs,
+                  ret={"step": current_step, "model": r.get("model"), "tier": tier, "tokens": out_tok})
+    return {"ok": True, "revised": r["content"], "model": r.get("model"), "provider": prov,
+            "tier": tier, "tokens": out_tok, "path": plan_path}
 
 
 def reasoning_escalation(question: str, context: str = "", budget: str = "standard",
@@ -625,18 +692,34 @@ def run_role(role: str, messages: list[dict] | None = None, *, prompt: str | Non
             continue
         budget = _THINKING_BUDGET.get(role, 0)
         extra_body = _reasoning_body(prov.get("base_url", ""), budget)
-        try:
-            data, hdrs = _post_chat(prov["base_url"], key, model, msgs, mt_eff, extra_body)
-            _update_budget_from_headers(pid, model, hdrs)
-            content = data.get("choices", [{}])[0].get("message", {}).get("content")
-            usage = data.get("usage", {}) or {}
-            if content is None:  # reasoning models can return empty content if budget burned
-                raise ValueError("empty content (reasoning budget exhausted?)")
-        except Exception as e:  # noqa: BLE001 - any failure -> silently fall to next rung
-            reason = f"{type(e).__name__}: {str(e)[:80]}"
+        # Two attempts per rung with a short backoff before falling through — a free-tier
+        # 429 is often transient, so a brief retry keeps the run on the $0 rung instead of
+        # cascading straight to paid (Fix 3). Non-429 errors fall through immediately.
+        data = hdrs = None
+        reason = ""
+        for _attempt in range(_RUNG_RETRIES):
+            try:
+                data, hdrs = _post_chat(prov["base_url"], key, model, msgs, mt_eff, extra_body)
+                _update_budget_from_headers(pid, model, hdrs)
+                content = data.get("choices", [{}])[0].get("message", {}).get("content")
+                usage = data.get("usage", {}) or {}
+                if content is None:  # reasoning models can return empty content if budget burned
+                    raise ValueError("empty content (reasoning budget exhausted?)")
+                reason = ""
+                break
+            except Exception as e:  # noqa: BLE001
+                reason = f"{type(e).__name__}: {str(e)[:80]}"
+                status = getattr(getattr(e, "response", None), "status_code", 0) or 0
+                transient = status in (429, 500, 502, 503, 529) or "429" in reason or "529" in reason
+                if transient and _attempt + 1 < _RUNG_RETRIES:
+                    time.sleep(_RUNG_BACKOFF_S)
+                    continue
+                break
+        if reason:
             attempts.append({"provider": pid, "failed": reason})
-            # model + reason so the cascade is legible in the cockpit (e.g. 429 → next).
-            _trace("rung_fell", role=role, frm=pid, model=model, to="(next)", reason=reason)
+            # model + reason so the cascade is legible in the cockpit (e.g. 429x2 → next).
+            _trace("rung_fell", role=role, frm=pid, model=model, to="(next)",
+                   reason=(f"429x{_RUNG_RETRIES} → next" if "429" in reason else reason))
             continue
         cost = 0.0 if free else _cost(prov, role, usage)
         if not free:

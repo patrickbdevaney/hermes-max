@@ -264,34 +264,39 @@ def verify(path: str, language: str = "auto") -> dict[str, Any]:
             "summary": f"path does not exist: {abspath}",
         }
 
+    # Planning gate. By default (Fix 3) an unsigned/absent plan WARNS but never blocks —
+    # so a transient conductor 429 (which leaves a minimal local-fallback plan) can't
+    # dead-end the run; the gate still certifies on the actual tests. Set
+    # VERIFY_HARD_BLOCK_PLAN=1 to restore the old hard block (refuse without a
+    # conductor-signed plan). VERIFY_REQUIRE_PLAN=0 disables the check entirely.
+    plan_warnings: list[str] = []
     require_plan = os.environ.get("VERIFY_REQUIRE_PLAN", "true").strip().lower() in (
+        "1", "true", "yes", "on")
+    hard_block = os.environ.get("VERIFY_HARD_BLOCK_PLAN", "").strip().lower() in (
         "1", "true", "yes", "on")
     if require_plan:
         plan_path = _find_plan(abspath)
-        if plan_path is None:
-            return {
-                "path": abspath, "language": language, "passed": False, "blocked": True,
-                "stages": [],
-                "summary": ("VERIFY BLOCKED: no PLAN.md found. Call the conductor_plan "
-                            "MCP tool FIRST — it authors a signed PLAN.md with a "
-                            "DONE_CONDITION. Execution cannot be certified without it."),
-            }
-        # The plan MUST be authored by the conductor, not by the executor's own internal
-        # planner — a plan the executor wrote itself has no conductor signature and fails.
-        try:
-            plan_text = open(plan_path, encoding="utf-8", errors="replace").read()
-        except OSError:
-            plan_text = ""
-        if not re.search(r"(?mi)^##\s*Plan authored by:.*\bvia conductor\b", plan_text):
-            return {
-                "path": abspath, "language": language, "passed": False, "blocked": True,
-                "stages": [],
-                "summary": ("VERIFY BLOCKED: PLAN.md is not conductor-authored (missing "
-                            "the '## Plan authored by: <model> via conductor' signature). "
-                            "Do NOT plan internally — call the conductor_plan MCP tool so "
-                            "the strong cloud reasoner authors the plan; then execute "
-                            "against it. A self-written plan cannot pass the gate."),
-            }
+        signed = False
+        if plan_path is not None:
+            try:
+                plan_text = open(plan_path, encoding="utf-8", errors="replace").read()
+            except OSError:
+                plan_text = ""
+            signed = bool(re.search(r"(?mi)^##\s*Plan authored by:.*\bvia conductor\b", plan_text))
+        if not signed:
+            why = ("no PLAN.md found" if plan_path is None
+                   else "PLAN.md is not conductor-signed (conductor unavailable / self-written)")
+            if hard_block:
+                return {
+                    "path": abspath, "language": language, "passed": False, "blocked": True,
+                    "stages": [],
+                    "summary": (f"VERIFY BLOCKED: {why}. Call the conductor_plan MCP tool so "
+                                "the strong cloud reasoner authors a signed PLAN.md, then "
+                                "execute against it."),
+                }
+            warn = (f"VERIFY WARNING: {why} — proceeding with verify; output quality may be "
+                    "lower. (conductor_plan produces a signed plan when the conductor is up.)")
+            plan_warnings.append(warn)
 
     lang = language if language and language != "auto" else detect_language(abspath)
     if lang in ("js", "javascript", "typescript"):
@@ -310,9 +315,13 @@ def verify(path: str, language: str = "auto") -> dict[str, Any]:
             "passed": False,
             "stages": [],
             "summary": f"unsupported or undetected language: {lang}",
+            "plan_warnings": plan_warnings,
         }
 
-    return _finalize(abspath, lang, stages)
+    result = _finalize(abspath, lang, stages)
+    if plan_warnings:
+        result["plan_warnings"] = plan_warnings
+    return result
 
 
 def _fail_state_path() -> str:
@@ -376,17 +385,31 @@ def _finalize(abspath: str, lang: str, stages: list[dict[str, Any]]) -> dict[str
     if not passed and fail_count >= 2:
         failing = next((s for s in bad), {})
         out = _truncate(str(failing.get("output", "")))[:1500]
-        result["escalate"] = {
-            "trigger": "verify_double_fail", "budget": "deep",
-            "question": (f"This implementation has failed verify {fail_count} times on the "
-                         f"same approach. Diagnose WHY it fails this and propose a corrected "
-                         f"approach:\n{out}"),
-            "context_path": abspath,
-            "note": (f"verify failed {fail_count}× on {os.path.basename(abspath)} — the "
-                     "approach is likely wrong. Call reasoning_escalation(trigger="
-                     "'verify_double_fail', budget='deep') with the failing output, then "
-                     "re-implement against its guidance."),
-        }
+        base = os.path.basename(abspath)
+        if fail_count >= 3:
+            # 3+ fails on the same approach → the PLAN is wrong, not just the code.
+            # Recommend review_and_adapt (revise the plan), not another patch attempt.
+            result["escalate"] = {
+                "trigger": "plan_adapt", "tool": "review_and_adapt", "budget": "deep",
+                "issue": (f"Step implementation in {base} has failed verify {fail_count}× — "
+                          f"the planned approach appears unworkable:\n{out}"),
+                "context_path": abspath,
+                "note": (f"verify failed {fail_count}× on {base}. The approach is likely "
+                         "unworkable as planned — call review_and_adapt with the issue and "
+                         "step number to revise the plan, then execute the revision (do NOT "
+                         "keep patching the same approach)."),
+            }
+        else:
+            result["escalate"] = {
+                "trigger": "verify_double_fail", "tool": "reasoning_escalation", "budget": "deep",
+                "question": (f"This implementation has failed verify {fail_count} times on the "
+                             f"same approach. Diagnose WHY it fails and propose a corrected "
+                             f"approach:\n{out}"),
+                "context_path": abspath,
+                "note": (f"verify failed {fail_count}× on {base} — the approach is likely "
+                         "wrong. Call reasoning_escalation(trigger='verify_double_fail', "
+                         "budget='deep') with the failing output, then re-implement."),
+            }
     return result
 
 
