@@ -7,15 +7,46 @@ import { api } from "../lib/api";
 import { navigate } from "../lib/router";
 import { Dot, fmtInt, EmptyMoment, SkeletonRows, ErrorState } from "./ui";
 import { computeShadow, fmtMoney, fmtMultiple } from "../lib/shadow";
-import type { HistoryRun } from "../types";
+import type { HistoryRun, RunSummary } from "../types";
 
 const ROW_PX = 44;
 const OVERSCAN = 6;
 type Sort = "recent" | "cost" | "savings" | "fires";
 
-function tokensOf(r: HistoryRun): number { return (r.free_tok ?? 0) + (r.paid_tok ?? 0); }
-function savingsOf(r: HistoryRun) { return computeShadow(r.cost_usd ?? 0, tokensOf(r)); }
-function durOf(r: HistoryRun): string {
+// A unified row: indexed history (rich metrics) merged with the live registry
+// (so running + incomplete runs appear). `active` drives live-vs-replay routing.
+type Row = HistoryRun & { active?: boolean };
+
+// Merge indexed history with the live registry. Live/incomplete runs that aren't
+// indexed yet still show; a run present in both keeps its rich metrics but takes
+// the registry's live status.
+function mergeRows(history: HistoryRun[], registry: RunSummary[], q: string): Row[] {
+  const byId = new Map<string, Row>();
+  for (const h of history) byId.set(h.run_id, { ...h, active: h.status === "running" });
+  const ql = q.trim().toLowerCase();
+  for (const s of registry) {
+    if (s.run_id === "live") continue; // synthetic attach run — not a history entry
+    const ex = byId.get(s.run_id);
+    if (ex) {
+      ex.active = ex.active || !!s.active;
+      if (s.active) ex.status = "running";
+      ex.prompt = ex.prompt || s.prompt;
+    } else {
+      // registry-only (not yet indexed): respect the search by matching the prompt
+      if (ql && !(s.prompt || "").toLowerCase().includes(ql)) continue;
+      byId.set(s.run_id, {
+        run_id: s.run_id, prompt: s.prompt, cwd: s.cwd, mode: s.mode, origin: s.origin,
+        start_ts: s.start_ts ?? null, active: !!s.active,
+        status: s.active ? "running" : (s.status || "exited"),
+      });
+    }
+  }
+  return [...byId.values()];
+}
+
+function tokensOf(r: Row): number { return (r.free_tok ?? 0) + (r.paid_tok ?? 0); }
+function savingsOf(r: Row) { return computeShadow(r.cost_usd ?? 0, tokensOf(r)); }
+function durOf(r: Row): string {
   if (!r.start_ts || !r.end_ts) return "—";
   const s = Math.max(0, r.end_ts - r.start_ts);
   return s < 60 ? `${s.toFixed(0)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
@@ -25,30 +56,46 @@ export function HistoryPage() {
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("");
   const [sort, setSort] = useState<Sort>("recent");
-  const [rows, setRows] = useState<HistoryRun[] | null>(null);
+  const [rows, setRows] = useState<Row[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [sel, setSel] = useState<string[]>([]);
 
-  // debounce the FTS query
+  // debounce the FTS query; fetch indexed history AND the live registry, merge.
   useEffect(() => {
     let stop = false;
     const t = setTimeout(() => {
       setRows(null); setErr(null);
-      api.history(q, status)
-        .then((r) => { if (!stop) setRows(r.runs); })
+      Promise.all([
+        api.history(q).catch(() => ({ runs: [] as HistoryRun[] })),
+        api.runs().catch(() => ({ runs: [] as RunSummary[] })),
+      ])
+        .then(([h, reg]) => { if (!stop) setRows(mergeRows(h.runs, reg.runs, q)); })
         .catch((e) => { if (!stop) setErr((e as Error).message); });
     }, 250);
     return () => { stop = true; clearTimeout(t); };
-  }, [q, status]);
+  }, [q]);
+
+  // poll the live registry so a running run appears / updates without a refresh
+  useEffect(() => {
+    const id = setInterval(() => {
+      Promise.all([
+        api.history(q).catch(() => ({ runs: [] as HistoryRun[] })),
+        api.runs().catch(() => ({ runs: [] as RunSummary[] })),
+      ]).then(([h, reg]) => setRows(mergeRows(h.runs, reg.runs, q))).catch(() => void 0);
+    }, 4000);
+    return () => clearInterval(id);
+  }, [q]);
 
   const sorted = useMemo(() => {
-    const rs = [...(rows ?? [])];
+    let rs = [...(rows ?? [])];
+    if (status === "running") rs = rs.filter((r) => r.active);
+    else if (status === "exited") rs = rs.filter((r) => !r.active);
     if (sort === "cost") rs.sort((a, b) => (b.cost_usd ?? 0) - (a.cost_usd ?? 0));
     else if (sort === "fires") rs.sort((a, b) => (b.conductor_fires ?? 0) - (a.conductor_fires ?? 0));
     else if (sort === "savings") rs.sort((a, b) => savingsOf(b).savedUsd - savingsOf(a).savedUsd);
     else rs.sort((a, b) => (b.start_ts ?? 0) - (a.start_ts ?? 0));
     return rs;
-  }, [rows, sort]);
+  }, [rows, sort, status]);
 
   const toggleSel = (id: string) =>
     setSel((p) => p.includes(id) ? p.filter((x) => x !== id) : [...p, id].slice(-2));
@@ -91,7 +138,8 @@ export function HistoryPage() {
           : sorted.length === 0
             ? <EmptyMoment icon="◇" title={q ? "No runs match" : "No runs indexed yet"}
                 hint={q ? "Try a different search." : "Completed runs are indexed automatically and appear here for search and replay."} />
-            : <RunTable rows={sorted} sel={sel} onToggle={toggleSel} onOpen={(id) => navigate("replay", id)} />}
+            : <RunTable rows={sorted} sel={sel} onToggle={toggleSel}
+                onOpen={(r) => navigate(r.active ? "run" : "replay", r.run_id)} />}
       </div>
     </div>
   );
@@ -113,7 +161,7 @@ function SortToggle({ sort, setSort }: { sort: Sort; setSort: (s: Sort) => void 
 
 // Windowed table — O(visible) DOM rows (virtualize > ~50, perf budget).
 function RunTable({ rows, sel, onToggle, onOpen }:
-  { rows: HistoryRun[]; sel: string[]; onToggle: (id: string) => void; onOpen: (id: string) => void }) {
+  { rows: Row[]; sel: string[]; onToggle: (id: string) => void; onOpen: (r: Row) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [height, setHeight] = useState(500);
@@ -141,7 +189,7 @@ function RunTable({ rows, sel, onToggle, onOpen }:
               className={`flex items-center gap-3 border-b border-ink-800 px-3 text-xs hover:bg-ink-850 ${sel.includes(r.run_id) ? "bg-ink-850" : ""}`}>
               <input type="checkbox" checked={sel.includes(r.run_id)} onChange={() => onToggle(r.run_id)}
                 aria-label="select for compare" className="accent-current text-accent" onClick={(e) => e.stopPropagation()} />
-              <button type="button" onClick={() => onOpen(r.run_id)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+              <button type="button" onClick={() => onOpen(r)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
                 <span className="flex w-20 shrink-0 items-center gap-1.5">
                   <Dot tone={running ? "accent" : r.verify_fail ? "warn" : "good"} pulse={running} />
                   <span className="text-mist-400">{running ? "live" : "done"}</span>
@@ -151,7 +199,7 @@ function RunTable({ rows, sel, onToggle, onOpen }:
                 <span className="w-14 shrink-0 text-right font-mono tabular-nums text-conductor" title="conductor fires">{fmtInt(r.conductor_fires)}⚡</span>
                 <span className="w-20 shrink-0 text-right font-mono tabular-nums text-mist-300">{durOf(r)}</span>
                 <span className={`w-20 shrink-0 text-right font-mono tabular-nums ${(r.cost_usd ?? 0) > 0 ? "text-warn" : "text-good"}`}>{fmtMoney(r.cost_usd ?? 0)}</span>
-                <span className="w-16 shrink-0 text-right font-mono tabular-nums text-conductor" title="savings vs frontier">{fmtMultiple(sv.multiple)}</span>
+                <span className="w-16 shrink-0 text-right font-mono tabular-nums text-conductor" title="savings vs frontier">{tokensOf(r) > 0 ? fmtMultiple(sv.multiple) : "—"}</span>
               </button>
             </div>
           );

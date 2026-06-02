@@ -159,7 +159,9 @@ def ingest_run(run: dict[str, Any], offset_end: int | None = None) -> bool:
                     elif ce == "verify_fail":
                         vfail += 1
 
-        status = "exited"
+        # Carry the registry's status (running / exited / attached) so an
+        # incomplete run is labelled honestly, not as a clean completion.
+        status = str(run.get("status") or "exited")
         end_ts = time.time()
         summary = (
             run_id, run.get("prompt"), run.get("cwd"), run.get("mode"),
@@ -194,58 +196,64 @@ def ingest_run(run: dict[str, Any], offset_end: int | None = None) -> bool:
         return False
 
 
-_backfilled = False
+def _indexed_ids() -> set[str]:
+    with _lock:
+        conn = _connect()
+        try:
+            return {r["run_id"] for r in conn.execute("SELECT run_id FROM runs")}
+        finally:
+            conn.close()
 
 
-def backfill() -> int:
-    """Index any registered runs not yet in SQLite (terminal / hm dev / past UI
-    runs that predate this feature, or completed while the server was down). Each
-    run is scoped to its own slice of the shared livelog by bounding at the next
-    run's start offset. Returns the number ingested."""
+def sync_registry(reindex: bool = False) -> int:
+    """Index registered runs into SQLite so history is never blank or stale:
+    terminal / hm dev / past UI runs, and runs that EXITED without a clean
+    completion (interrupted, crashed, server-down). Each run is scoped to its own
+    slice of the shared livelog by bounding at the next run's start offset.
+
+    Currently-ACTIVE runs are skipped — they're surfaced live from the registry
+    and re-ingested on completion (so the index never holds a half-written run).
+    With reindex=True, already-indexed inactive runs are refreshed too. Returns
+    the number ingested."""
     from . import runs as _runs
     try:
-        descs = []
-        for run_id in {r["run_id"] for r in _runs.list_runs(limit=500)}:
-            d = _runs.get_run(run_id)
-            if d and run_id != "live":
-                descs.append(d)
+        summaries = _runs.list_runs(limit=500)
     except Exception:  # noqa: BLE001
         return 0
-    descs.sort(key=lambda r: int(r.get("start_offset", 0)))
-    starts = [int(d.get("start_offset", 0)) for d in descs]
+    indexed = _indexed_ids()
+    rows: list[tuple[dict[str, Any], bool]] = []
+    for s in summaries:
+        rid = s.get("run_id")
+        if not rid or rid == "live":
+            continue
+        d = _runs.get_run(rid)
+        if d:
+            d = {**d, "status": s.get("status"), "prompt": d.get("prompt") or s.get("prompt")}
+            rows.append((d, bool(s.get("active"))))
+    rows.sort(key=lambda t: int(t[0].get("start_offset", 0)))
+    starts = [int(d.get("start_offset", 0)) for d, _ in rows]
     n = 0
-    for i, d in enumerate(descs):
-        # bound this run at the next run's start (or EOF for the last)
-        end = starts[i + 1] if i + 1 < len(descs) and starts[i + 1] > starts[i] else None
+    for i, (d, active) in enumerate(rows):
+        if active:
+            continue                              # live run → shown live, not indexed
+        if d["run_id"] in indexed and not reindex:
+            continue                              # already indexed
+        end = starts[i + 1] if i + 1 < len(starts) and starts[i + 1] > starts[i] else None
         if ingest_run(d, offset_end=end):
             n += 1
     return n
 
 
-def _maybe_backfill() -> None:
-    """Once per process: if the index is empty, populate it from the registry so
-    history isn't blank on first view (ingestion otherwise happens on completion)."""
-    global _backfilled
-    if _backfilled:
-        return
-    _backfilled = True
-    try:
-        with _lock:
-            conn = _connect()
-            try:
-                empty = conn.execute("SELECT COUNT(*) AS c FROM runs").fetchone()["c"] == 0
-            finally:
-                conn.close()
-        if empty:
-            backfill()
-    except Exception:  # noqa: BLE001
-        pass
+# Back-compat alias for the earlier name.
+def backfill() -> int:
+    return sync_registry(reindex=True)
 
 
 def list_history(q: str = "", status: str = "", limit: int = 200) -> list[dict[str, Any]]:
     """Run summaries, newest first. `q` does a full-text search (FTS5 when
-    available, LIKE fallback) across event text + prompt."""
-    _maybe_backfill()
+    available, LIKE fallback) across event text + prompt. Registered-but-not-yet-
+    indexed runs (incl. incomplete ones) are folded in on each call."""
+    sync_registry()
     with _lock:
         conn = _connect()
         try:
