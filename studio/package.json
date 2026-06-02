@@ -1,0 +1,33 @@
+{
+  "name": "hermes-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Hermes Studio — a Tauri 2 desktop appliance wrapping the hermes-max web UI as a friendly, zero-terminal engine.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-notification": "^2.2.0",
+    "@tauri-apps/plugin-fs": "^2.2.0",
+    "@tauri-apps/plugin-shell": "^2.2.0",
+    "@tauri-apps/plugin-dialog": "^2.2.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

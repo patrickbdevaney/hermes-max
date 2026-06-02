@@ -15,10 +15,53 @@ import type { StatusPayload } from "./types";
 import { SideNav } from "./components/SideNav";
 import { TopChrome } from "./components/TopChrome";
 import { RunPage } from "./components/RunPage";
+import { HistoryPage } from "./components/HistoryPage";
+import { ReplayPage } from "./components/ReplayPage";
 import { ActivityPage } from "./components/ActivityPage";
 import { ProvidersPage } from "./components/ProvidersPage";
 import { CostPage } from "./components/CostPage";
+import { ServicesPage } from "./components/ServicesPage";
+import { FabricPage } from "./components/FabricPage";
+import { SkillsPage } from "./components/SkillsPage";
+import { StatePage } from "./components/StatePage";
+import { SettingsPage } from "./components/SettingsPage";
+import { ConfigPage } from "./components/ConfigPage";
+import { PlanEditor } from "./components/run/PlanEditor";
 import { Wizard } from "./components/wizard/Wizard";
+import { Toaster } from "./components/Toaster";
+import { CommandPalette } from "./components/CommandPalette";
+import { pushToast, playCue } from "./lib/toast";
+import { getSettings } from "./lib/settings";
+
+// Phase 6.3 — turn high-signal SSE events into actionable toasts (+ optional
+// sound / desktop notification). Milestones only — never every token.
+function notifyEvent(type: string, d: any, runId: string | null) {
+  const jump = runId ? () => navigate("run", runId) : undefined;
+  const desktop = (title: string, body?: string) => {
+    if (getSettings().notify && typeof Notification !== "undefined"
+      && Notification.permission === "granted" && document.hidden) {
+      try { new Notification(title, { body }); } catch { /**/ }
+    }
+  };
+  if (type === "conductor") {
+    if (d?.event === "trigger") {
+      pushToast({ tone: "conductor", title: "Conductor intervened", detail: d.reason, actionLabel: "View", onAction: jump });
+      playCue("conductor"); desktop("Conductor intervened", d.reason);
+    } else if (d?.event === "verify_fail") {
+      pushToast({ tone: "bad", title: "Verify failed", detail: `step ${d.step ?? "?"}`, onAction: jump });
+      playCue("fail");
+    } else if (d?.event === "verify_pass") {
+      playCue("pass");
+    } else if (d?.event === "done_rejected") {
+      pushToast({ tone: "warn", title: "Done rejected — tests not yet green", onAction: jump });
+    } else if (d?.event === "run_complete") {
+      pushToast({ tone: "good", title: "Run complete — verified", onAction: jump });
+      playCue("complete"); desktop("Run complete", "verified");
+    }
+  } else if (type === "gate" && d?.status === "fail") {
+    pushToast({ tone: "bad", title: `Gate failed: ${d.kind ?? "verify"}`, onAction: jump });
+  }
+}
 
 export default function App() {
   const route = useRoute();
@@ -34,6 +77,14 @@ export default function App() {
   const [firstRun, setFirstRun] = useState(false);
   const [liveRuns, setLiveRuns] = useState(0);
   const autoRouted = useRef(false);
+  // Phase 5 control surface: a pending-message queue + pause + signal-busy.
+  const [pending, setPending] = useState<string[]>([]);
+  const [paused, setPaused] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
+
+  const lastTurn = view.turns[view.turns.length - 1];
+  const working = !!lastTurn && lastTurn.status === "working";
+  const prevWorking = useRef(working);
 
   const refreshStatus = useCallback(() => {
     api.status().then(setStatus).catch(() => void 0);
@@ -90,9 +141,11 @@ export default function App() {
     dispatch({ type: "reset", userText: meta?.prompt ?? null });
     feedDispatch({ type: "reset", userText: meta?.prompt ?? null });
     feedBuf.current = [];
+    setPending([]); setPaused(false);   // control state is per-run
     const stream = openStream(activeRunId, (t, d) => {
       dispatch({ type: "event", evt: t, data: d });
       feedBuf.current.push({ evt: t, data: d, now: Date.now() });
+      notifyEvent(t, d, activeRunId);
     }, setConn);
     // coalesce buffered frames into one feed reduction per BATCH_FLUSH_MS tick
     const flush = setInterval(() => {
@@ -114,7 +167,8 @@ export default function App() {
   // ── actuation ──
   const launch = useCallback(async (cwd: string, prompt: string) => {
     try {
-      const run = await api.run(cwd, prompt, status?.mode);
+      const approvalGate = localStorage.getItem("hmx.approvalGate") === "1";
+      const run = await api.run(cwd, prompt, status?.mode, approvalGate);
       journal.add({ run_id: run.run_id, prompt, cwd, mode: run.mode ?? status?.mode ?? null, start_ts: Date.now() });
       setActiveRunId(run.run_id);
       navigate("run", run.run_id);
@@ -142,10 +196,43 @@ export default function App() {
     navigate("run");
   }, []);
 
-  const fillHeight = route.name === "run";
+  // ── Phase 5 control handlers ──
+  const signal = useCallback((action: "interrupt" | "pause" | "resume") => {
+    if (!activeRunId) return;
+    setControlBusy(true);
+    api.signal(activeRunId, action)
+      .then((r) => { if (r.ok && action !== "interrupt") setPaused(action === "pause"); })
+      .catch(() => void 0)
+      .finally(() => setControlBusy(false));
+  }, [activeRunId]);
+  const steer = useCallback((t: string) => setPending((p) => [t, ...p]), []);      // front
+  const queuePending = useCallback((t: string) => setPending((p) => [...p, t]), []); // back
+  const removePending = useCallback((i: number) => setPending((p) => p.filter((_, k) => k !== i)), []);
+
+  // Drain the queue on handback: when the turn goes working→idle, send the next
+  // pending/steer message as a continue. One at a time, in order.
+  useEffect(() => {
+    if (prevWorking.current && !working && activeRunId && pending.length > 0) {
+      const [next, ...rest] = pending;
+      setPending(rest);
+      cont(next);
+    }
+    prevWorking.current = working;
+  }, [working, pending, activeRunId, cont]);
+
+  const cwd = activeRunId ? (journal.get(activeRunId)?.cwd ?? null) : null;
+
+  const fillHeight = route.name === "run" || route.name === "runs" || route.name === "replay";
 
   return (
     <div className="flex h-screen overflow-hidden">
+      <Toaster />
+      <CommandPalette
+        activeRunId={activeRunId}
+        working={working}
+        onNewRun={newRun}
+        onInterrupt={() => signal("interrupt")}
+      />
       <SideNav active={route.name} status={status} liveRuns={liveRuns} />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopChrome
@@ -165,14 +252,33 @@ export default function App() {
                 feed={feed}
                 conn={conn}
                 status={status}
+                cwd={cwd}
+                control={{
+                  paused, pending, controlBusy,
+                  onInterrupt: () => signal("interrupt"),
+                  onPause: () => signal("pause"),
+                  onResume: () => signal("resume"),
+                  onSteer: steer,
+                  onPending: queuePending,
+                  onRemovePending: removePending,
+                }}
                 onLaunch={launch}
                 onContinue={cont}
                 onNewRun={newRun}
               />
             )}
+            {route.name === "runs" && <HistoryPage />}
+            {route.name === "replay" && <ReplayPage runId={route.runId} />}
+            {route.name === "plan" && <PlanEditor cwd={route.runId ? (journal.get(route.runId)?.cwd ?? null) : cwd} />}
             {route.name === "activity" && <ActivityPage />}
             {route.name === "providers" && <ProvidersPage status={status} refreshStatus={refreshStatus} />}
             {route.name === "cost" && <CostPage />}
+            {route.name === "services" && <ServicesPage />}
+            {route.name === "fabric" && <FabricPage status={status} />}
+            {route.name === "skills" && <SkillsPage />}
+            {route.name === "state" && <StatePage runId={route.runId} />}
+            {route.name === "config" && <ConfigPage refreshStatus={refreshStatus} />}
+            {route.name === "settings" && <SettingsPage />}
             {route.name === "setup" && (
               <Wizard
                 status={status}

@@ -3,7 +3,7 @@
 import { launchToken } from "./token";
 import type {
   StatusPayload, RecentProject, RunHandle, KeysStatus, TestResult, ConfigResult,
-  CostReport, RunSummary,
+  CostReport, RunSummary, HistoryRun, HistoryDetail, ServicesPayload, StateFilesPayload,
 } from "../types";
 
 // The CSRF cookie is set SameSite=Strict by the server on page load; we echo it
@@ -47,8 +47,25 @@ export const api = {
   recent: () => get<{ projects: RecentProject[] }>("/api/projects/recent"),
   // All runs the server knows about — terminal / hm dev / UI-launched (Fix 4).
   runs: () => get<{ runs: RunSummary[] }>("/api/runs"),
-  run: (cwd: string, prompt: string, mode?: string | null) =>
-    post<RunHandle>("/api/run", { cwd, prompt, mode }),
+  // Phase 4: searchable persistent history (SQLite + FTS5 over the livelog).
+  history: (q = "", status = "") =>
+    get<{ runs: HistoryRun[] }>(`/api/history?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
+  historyRun: (runId: string) =>
+    get<HistoryDetail>(`/api/history/${encodeURIComponent(runId)}`),
+  // Phase 5: live control of a run's process + the editable PLAN.md.
+  signal: (runId: string, action: "interrupt" | "pause" | "resume") =>
+    post<{ ok: boolean; action?: string; error?: string }>(
+      `/api/run/${encodeURIComponent(runId)}/signal`, { action }),
+  readPlan: (cwd: string) =>
+    get<{ ok: boolean; path: string; exists: boolean; content: string; error?: string }>(
+      `/api/plan?cwd=${encodeURIComponent(cwd)}`),
+  writePlan: (cwd: string, content: string) =>
+    post<{ ok: boolean; path?: string; error?: string }>("/api/plan", { cwd, content }),
+  // Phase 6 dashboards.
+  services: () => get<ServicesPayload>("/api/services"),
+  state: (cwd: string) => get<StateFilesPayload>(`/api/state?cwd=${encodeURIComponent(cwd)}`),
+  run: (cwd: string, prompt: string, mode?: string | null, approvalGate?: boolean) =>
+    post<RunHandle>("/api/run", { cwd, prompt, mode, approval_gate: !!approvalGate }),
   // Turn 2+ of a conversation: continue the same run (server reuses its cwd/session).
   continueRun: (runId: string, prompt: string) =>
     post<RunHandle>("/api/run", { run_id: runId, prompt }),

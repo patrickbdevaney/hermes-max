@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hermes Studio — Phase 0 spike</title>
+<style>
+  body { background:#0d0d0f; color:#e6e6ea; font:13px ui-monospace,monospace; margin:0; padding:12px; }
+  #stats { position:sticky; top:0; background:#0d0d0f; border-bottom:1px solid #2a2a30; padding:8px 0; margin-bottom:8px; }
+  #stats b { color:#7aa2ff; }
+  .good { color:#5fd75f; } .warn { color:#e6c200; } .bad { color:#ff5f5f; }
+  #out { white-space:pre-wrap; opacity:.92; line-height:1.5; }
+  .rz { color:#888; font-style:italic; }
+</style>
+</head>
+<body>
+  <div id="stats">connecting…</div>
+  <div id="out"></div>
+<script>
+const GATE_SECONDS = __GATE_SECONDS__;          // injected by the protocol handler
+const out = document.getElementById("out");
+const stats = document.getElementById("stats");
+
+let batches = 0, chars = 0, structured = 0, done = false;
+let longFrames = 0, maxFrame = 0, frames = 0, lastT = performance.now();
+const start = performance.now();
+let buf = "";
+
+// jank meter — count frames slower than 50ms (below ~20fps) while streaming
+function loop(t) {
+  const d = t - lastT; lastT = t; frames++;
+  if (d > 50) longFrames++;
+  if (d > maxFrame) maxFrame = d;
+  const el = (t - start) / 1000;
+  stats.innerHTML =
+    `<b>batches</b> ${batches} · <b>chars</b> ${chars} · <b>structured</b> ${structured} · ` +
+    `<b>fps</b> ${(frames / (el || 1)).toFixed(0)} · ` +
+    `<b>long frames(&gt;50ms)</b> <span class="${longFrames === 0 ? "good" : longFrames < 5 ? "warn" : "bad"}">${longFrames}</span> · ` +
+    `<b>max frame</b> ${maxFrame.toFixed(0)}ms · <b>t</b> ${el.toFixed(1)}s`;
+  if (el < GATE_SECONDS + 1) requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function render() {
+  // cap DOM like the real virtualized feed would (last ~8000 chars)
+  out.textContent = buf.length > 8000 ? "…" + buf.slice(-8000) : buf;
+}
+
+const { invoke, Channel } = window.__TAURI__.core;
+const ch = new Channel();
+ch.onmessage = (b) => {
+  batches++;
+  if (b.tokens) { buf += b.tokens; chars += b.tokens.length; }
+  if (b.events && b.events.length) structured += b.events.length;
+  if (b.done) done = true;
+  render();
+};
+invoke("start_stream", { onEvent: ch }).catch((e) => { stats.textContent = "start_stream error: " + e; });
+
+// auto-gate: after GATE_SECONDS, write the verdict and let Rust exit
+setTimeout(() => {
+  const el = (performance.now() - start) / 1000;
+  const verdict = {
+    ok: batches > 0 && chars > 0 && longFrames < Math.max(5, Math.ceil(el / 3)),
+    gate_seconds: GATE_SECONDS,
+    elapsed_s: +el.toFixed(2),
+    batches, chars, structured, done,
+    long_frames_gt_50ms: longFrames,
+    max_frame_ms: +maxFrame.toFixed(0),
+    avg_fps: +(frames / (el || 1)).toFixed(1),
+    rendered_chars: out.textContent.length,
+    crashed: false
+  };
+  invoke("write_verdict", { json: JSON.stringify(verdict) });
+}, GATE_SECONDS * 1000);
+</script>
+</body>
+</html>

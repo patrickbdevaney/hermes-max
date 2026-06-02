@@ -38,6 +38,13 @@ for _p in (_REPO, os.path.join(_REPO, "mcp-escalation"), os.path.join(_REPO, "mc
 
 _STUCK_TURNS = int(os.environ.get("CONDUCTOR_STUCK_TURNS", "4"))
 
+# Phase 2 — token fan-out. The hermes AIAgent exposes stream_delta / thinking /
+# reasoning callbacks; we install them on pre_llm_call and remove them on
+# post_llm_call, writing each delta to the livelog as a gen.* span. The Phase 1
+# Rust stream + (once wired) feeds.py carry gen.* to both surfaces.
+_CTX = None          # captured at register() so hooks can reach the live agent
+_tok_warned = False  # warn once if the agent can't be found
+
 
 # ── state ──────────────────────────────────────────────────────────────────
 def _state_path(cwd: str) -> Path:
@@ -203,6 +210,7 @@ def _handle_done(cwd: str, state: dict[str, Any]) -> None:
 def _pre_llm_call(**kw: Any) -> dict[str, Any]:
     """Re-inject the execution contract into the next user message — every turn,
     so it survives context compaction. Returns {"context": ...} (the Hermes schema)."""
+    _install_token_callbacks()  # Phase 2: fan the model's token stream into the livelog
     cwd = os.getcwd()
     state = _load_state(cwd)
     plan = _load_plan(cwd)
@@ -212,6 +220,27 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
     turns_on = int(state.get("turns_on_current_step", 0))
     guidance = state.get("pending_guidance")
 
+    # ── v2 cooperative controls (flags written by Hermes Studio via ui/server) ──
+    # These are honoured BETWEEN steps; they cannot hard-block the model call, so
+    # they cooperatively instruct the agent (Hard Decision #6).
+    cdir = _state_path(cwd).parent  # <cwd>/.hermes-conductor
+    paused = (cdir / "pause").exists()
+    steer = None
+    try:
+        sp = cdir / "steer.txt"
+        if sp.exists():
+            steer = sp.read_text(encoding="utf-8").strip() or None
+            sp.unlink()
+    except OSError:
+        pass
+    approve_gate = os.environ.get("CONDUCTOR_REQUIRE_APPROVAL") == "1"
+    approved = True
+    if approve_gate:
+        try:
+            approved = (cdir / "approve").read_text(encoding="utf-8").strip() == "1"
+        except OSError:
+            approved = False
+
     lines = [
         f"## Execution State [conductor, turn {state.get('total_turns', 0) + 1}]",
         f"Current step: {step}/{total or '?'} — {sd.get('description', '?')}",
@@ -219,10 +248,24 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
         f"Turns on this step: {turns_on}",
         f"Last verify: {state.get('last_verify_result', 'not run')}",
     ]
-    if guidance:
+    if paused:
+        lines = ["## ⏸ OPERATOR PAUSE",
+                 "The operator has paused this run. Do NOT begin new work. Finish only the "
+                 "current action if one is mid-flight, then STOP and wait — do not start the "
+                 "next step until the pause is lifted.", ""] + lines
+        _emit("paused", {"step": step})
+    if steer:
+        lines += ["", "## Operator steer (apply NOW, non-destructive):", steer]
+        _emit("steer", {"step": step, "text": steer[:200]})
+    if guidance and approved:
         lines += ["", "## Frontier Guidance (from conductor — apply NOW):", str(guidance)]
         state["pending_guidance"] = None
         _emit("guidance_applied", {"step": step})
+    elif guidance and not approved:
+        # approval gate on but not yet approved → hold the guidance, tell the user
+        lines += ["", "## Guidance awaiting operator approval — pause and request approval "
+                  "before proceeding on this step."]
+        _emit("awaiting_approval", {"step": step})
     if sd.get("complexity") == "HIGH" and turns_on == 0:
         lines.append("⚠ This step is HIGH complexity — call reasoning_escalation before "
                      "writing code, or set conductor_requested=true in EXECUTION_STATE.json.")
@@ -273,6 +316,7 @@ def _extract_tokens(resp: Any) -> dict[str, int]:
 def _post_llm_call(response: Any = None, **kw: Any) -> None:
     """Emit conductor.llm_response with token counts so the web UI's run chrome can
     compute tok/s (output tokens / wall-time between the call and this response)."""
+    _remove_token_callbacks()  # Phase 2: detach the per-turn token writers
     resp = response if response is not None else kw.get("result") or kw.get("completion")
     cwd = os.getcwd()
     state = _load_state(cwd)
@@ -347,8 +391,77 @@ def _on_session_end(**kw: Any) -> None:
 
 
 # ── plugin entry point (the real Hermes API) ─────────────────────────────────
+# ── Phase 2: token fan-out into the livelog ──────────────────────────────────
+def _token_agent() -> Any:
+    """The live hermes AIAgent (the holder of the stream callbacks)."""
+    ctx = _CTX
+    mgr = getattr(ctx, "_manager", None) if ctx is not None else None
+    if mgr is None:
+        return None
+    cli = getattr(mgr, "_cli", None)
+    agent = getattr(cli, "agent", None) if cli is not None else None
+    return agent if agent is not None else getattr(mgr, "_agent", None)
+
+
+def _gen(span: str, text: Any) -> None:
+    """Write one token/reasoning delta as a gen.* span. Non-blocking-ish (the
+    livelog append is cheap) and silent on empty/None."""
+    if not text:
+        return
+    try:
+        s = text if isinstance(text, str) else (getattr(text, "content", None) or "")
+        if s:
+            from lib import livelog
+            # `text` is what feeds.py/stream.rs/feed.ts read; `content` mirrors the
+            # directive's field name.
+            livelog.forward(span, {"text": s, "content": s})
+    except Exception:  # noqa: BLE001 - never let token logging break a turn
+        pass
+
+
+def _delta_writer():
+    return lambda delta=None, *a, **k: _gen("gen.token", getattr(delta, "content", None) if not isinstance(delta, str) else delta)
+
+
+def _thinking_writer():
+    return lambda chunk=None, *a, **k: _gen("gen.thinking", chunk)
+
+
+def _reasoning_writer():
+    return lambda chunk=None, *a, **k: _gen("gen.reasoning", chunk)
+
+
+def _install_token_callbacks() -> None:
+    global _tok_warned
+    agent = _token_agent()
+    if agent is None:
+        if not _tok_warned:
+            _tok_warned = True
+            _emit("error", {"reason": "token-stream: live agent not found; gen.* disabled"})
+        return
+    try:
+        agent.stream_delta_callback = _delta_writer()
+        agent.thinking_callback = _thinking_writer()
+        agent.reasoning_callback = _reasoning_writer()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _remove_token_callbacks() -> None:
+    agent = _token_agent()
+    if agent is None:
+        return
+    for attr in ("stream_delta_callback", "thinking_callback", "reasoning_callback"):
+        try:
+            setattr(agent, attr, None)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def register(ctx) -> None:
     """Hermes calls this with a PluginContext. Register the lifecycle hooks."""
+    global _CTX
+    _CTX = ctx  # capture so the token-callback installer can reach the live agent
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     ctx.register_hook("post_llm_call", _post_llm_call)
     ctx.register_hook("post_tool_call", _post_tool_call)

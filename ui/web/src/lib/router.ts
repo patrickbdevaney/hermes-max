@@ -10,26 +10,34 @@
 //   #/setup          → the onboarding / edit wizard
 import { useEffect, useState } from "react";
 
-export type RouteName = "run" | "activity" | "providers" | "cost" | "setup";
+export type RouteName =
+  | "run" | "runs" | "replay" | "activity" | "providers" | "cost" | "setup"
+  | "services" | "skills" | "fabric" | "state" | "config" | "plan" | "settings";
+
+// Routes that carry a trailing :runId segment.
+const ID_ROUTES = new Set<RouteName>(["run", "replay", "plan", "state"]);
 
 export interface Route {
   name: RouteName;
-  runId: string | null;   // only meaningful when name === "run"
+  runId: string | null;   // meaningful for ID_ROUTES
 }
 
-const NAMES: RouteName[] = ["run", "activity", "providers", "cost", "setup"];
+const NAMES: RouteName[] = [
+  "run", "runs", "replay", "activity", "providers", "cost", "setup",
+  "services", "skills", "fabric", "state", "config", "plan", "settings",
+];
 
 export function parseHash(hash: string): Route {
   // Strip the leading "#", tolerate "#/foo" and "#foo" and trailing slashes.
   const raw = hash.replace(/^#\/?/, "").replace(/\/+$/, "");
   const [head, ...rest] = raw.split("/");
   const name = (NAMES.includes(head as RouteName) ? head : "run") as RouteName;
-  const runId = name === "run" && rest.length ? decodeURIComponent(rest.join("/")) : null;
+  const runId = ID_ROUTES.has(name) && rest.length ? decodeURIComponent(rest.join("/")) : null;
   return { name, runId };
 }
 
 export function hrefFor(name: RouteName, runId?: string | null): string {
-  if (name === "run" && runId) return `#/run/${encodeURIComponent(runId)}`;
+  if (ID_ROUTES.has(name) && runId) return `#/${name}/${encodeURIComponent(runId)}`;
   return `#/${name}`;
 }
 

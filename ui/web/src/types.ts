@@ -6,7 +6,9 @@
 export type EventType =
   | "token" | "phase" | "plan" | "plan_item" | "tool_call" | "file_op"
   | "shell" | "gate" | "checkpoint" | "escalation" | "cost" | "narration"
-  | "heartbeat" | "span" | "conductor";
+  | "heartbeat" | "span" | "conductor"
+  // Phase 2 — streamed model token deltas (folded into a live feed item)
+  | "gen.token" | "gen.reasoning" | "gen.thinking";
 
 export interface Base { run_id: string; ts?: number; hms?: string }
 
@@ -45,6 +47,9 @@ export interface ConductorEvt extends Base {
   tokens?: number; thinking_tokens?: number; output_tokens?: number; elapsed_s?: number;
   cost?: number; failures?: number; result?: string; file?: string;
   from_step?: number; to_step?: number; done?: boolean; final_step?: number; total_turns?: number;
+  // Phase 7 — the pre_llm_call re-injection / compaction-survival surface. These
+  // pass through verbatim from the conductor livelog span (note/basis/contract).
+  note?: string; basis?: string; contract?: string;
 }
 export type HeartbeatEvt = Base & { tool?: string; done?: number | null; total?: number | null;
   eta_s?: number | null; elapsed_s?: number | null; item?: string | null; note?: string | null };
@@ -106,6 +111,26 @@ export interface RunSummary {
   run_id: string; cwd?: string | null; prompt?: string | null; mode?: string | null;
   start_ts?: number | null; origin?: string; status?: string; active?: boolean;
 }
+
+// ── Phase 4: persistent run history (SQLite + FTS5 over the livelog) ──
+export interface HistoryRun {
+  run_id: string; prompt?: string | null; cwd?: string | null; mode?: string | null;
+  origin?: string; start_ts?: number | null; end_ts?: number | null; status?: string;
+  step_count?: number; turn_count?: number; cost_usd?: number;
+  free_tok?: number; paid_tok?: number; conductor_fires?: number;
+  verify_pass?: number; verify_fail?: number;
+}
+export interface HistoryEvent { event: string; data: any; seq: number; ts: number; hms: string }
+export interface HistoryDetail { summary: HistoryRun; events: HistoryEvent[] }
+
+// ── Phase 6: dashboards (services health + state-file inspection) ──
+export interface ServiceHealth { port: number; open: boolean; latency_ms: number | null }
+export interface ServicesPayload { services: ServiceHealth[]; up: number; total: number }
+export interface StateFile {
+  name: string; path: string; exists: boolean; size?: number;
+  json?: any; content?: string; error?: string;
+}
+export interface StateFilesPayload { cwd: string; files: StateFile[] }
 
 export interface RecentProject { path: string; last_used: number | null }
 export interface RunHandle {

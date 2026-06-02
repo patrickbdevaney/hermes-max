@@ -14,24 +14,46 @@ import { ResearchFanOut, FullTrace } from "./L2Panels";
 import { VirtualFeed } from "./run/VirtualFeed";
 import { FlowGraph } from "./run/FlowGraph";
 import { RunChrome } from "./run/RunChrome";
+import { ShadowMeter } from "./run/ShadowMeter";
+import { RunReceipt } from "./run/RunReceipt";
+import { ConductorSwimlane } from "./run/ConductorSwimlane";
+import { RunControls } from "./run/RunControls";
+import { PlanEditor } from "./run/PlanEditor";
+import { MemoryView } from "./run/MemoryView";
 import type { RunView, Turn } from "../state";
 import type { FeedState } from "../lib/feed";
 import type { ConnState } from "../lib/events";
 import type { StatusPayload, RecentProject } from "../types";
 
-type Tab = "feed" | "flow" | "turns";
+type Tab = "feed" | "conductor" | "flow" | "memory" | "turns" | "plan";
 type TurnLens = "timeline" | "graph";
 const TABS: { id: Tab; label: string }[] = [
-  { id: "feed", label: "Feed" }, { id: "flow", label: "Flow" }, { id: "turns", label: "Turns" },
+  { id: "feed", label: "Feed" }, { id: "conductor", label: "Conductor" },
+  { id: "flow", label: "Flow" }, { id: "memory", label: "Memory" },
+  { id: "turns", label: "Turns" }, { id: "plan", label: "Plan" },
 ];
 
-export function RunPage({ runId, view, feed, conn, status, onLaunch, onContinue, onNewRun }:
+export interface RunControlProps {
+  paused: boolean;
+  pending: string[];
+  controlBusy?: boolean;
+  onInterrupt: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  onSteer: (text: string) => void;
+  onPending: (text: string) => void;
+  onRemovePending: (i: number) => void;
+}
+
+export function RunPage({ runId, view, feed, conn, status, cwd, control, onLaunch, onContinue, onNewRun }:
   {
     runId: string | null;
     view: RunView;
     feed: FeedState;
     conn: ConnState;
     status: StatusPayload | null;
+    cwd: string | null;
+    control: RunControlProps;
     onLaunch: (cwd: string, prompt: string) => void;
     onContinue: (prompt: string) => void;
     onNewRun: () => void;
@@ -48,7 +70,7 @@ export function RunPage({ runId, view, feed, conn, status, onLaunch, onContinue,
   const live = conn === "live";
   // Deep-linked to a run the server no longer has: the stream can't open and nothing
   // streams. Tell the truth rather than spin forever.
-  const replayLost = conn === "reconnecting" && view.lastEventTs === 0 && view.turns.every((t) => t.entries.length === 0);
+  const replayLost = (conn === "reconnecting" || conn === "lost") && view.lastEventTs === 0 && view.turns.every((t) => t.entries.length === 0);
 
   return (
     <div className="flex h-full flex-col">
@@ -97,13 +119,25 @@ export function RunPage({ runId, view, feed, conn, status, onLaunch, onContinue,
 
       {/* persistent run chrome: step / turns / cost / tok-s — visible in every tab */}
       <div className="pt-3">
-        <RunChrome chrome={feed.chrome} live={live} />
+        <RunChrome chrome={feed.chrome} live={live} conn={conn} />
       </div>
+
+      {/* cost shadow — live meter while executing, shareable receipt on settle */}
+      {(feed.chrome.execFreeTok + feed.chrome.execPaidTok + feed.chrome.plannerTokens) > 0 && (
+        <div className="pt-2">
+          {feed.chrome.running && live
+            ? <ShadowMeter chrome={feed.chrome} />
+            : <RunReceipt chrome={feed.chrome} conductorFires={feed.flow.conductors.length} runId={runId} />}
+        </div>
+      )}
 
       {/* the active view */}
       <div className="min-h-0 flex-1 py-3">
-        {tab === "feed" && <VirtualFeed items={feed.items} live={live} />}
+        {tab === "feed" && <VirtualFeed items={feed.items} live={live} flow={feed.flow} activeStep={feed.flow.current} />}
+        {tab === "conductor" && <ConductorSwimlane flow={feed.flow} live={live} />}
         {tab === "flow" && <FlowGraph flow={feed.flow} live={live} />}
+        {tab === "memory" && <MemoryView flow={feed.flow} turns={feed.chrome.turns} />}
+        {tab === "plan" && <PlanEditor cwd={cwd} />}
         {tab === "turns" && (
           <div className="h-full space-y-5 overflow-y-auto pr-1">
             {view.turns.map((turn) => (
@@ -114,12 +148,30 @@ export function RunPage({ runId, view, feed, conn, status, onLaunch, onContinue,
         )}
       </div>
 
+      {/* control surface (Phase 5): steer / interrupt / pause / pending */}
+      <div className="pt-2">
+        <RunControls
+          working={working}
+          paused={control.paused}
+          pending={control.pending}
+          busy={control.controlBusy}
+          onInterrupt={control.onInterrupt}
+          onPause={control.onPause}
+          onResume={control.onResume}
+          onSteer={control.onSteer}
+          onPending={control.onPending}
+          onRemovePending={control.onRemovePending}
+        />
+      </div>
+
       {/* the composer — actuates the agent */}
       <div className="border-t border-ink-800 pt-3">
         <Composer
           onSend={onContinue}
           working={working}
           autoFocus
+          historyKey={runId ?? "launcher"}
+          allowPlanFirst
           placeholder={working ? "the agent is working…" : "Describe the next step…"}
         />
       </div>
@@ -171,6 +223,7 @@ function EmptyState({ status, onLaunch }:
   const [cwd, setCwd] = useState("");
   const [browseHint, setBrowseHint] = useState<string | null>(null);
   const [browsing, setBrowsing] = useState(false);
+  const [approvalGate, setApprovalGate] = useState(() => localStorage.getItem("hmx.approvalGate") === "1");
 
   useEffect(() => {
     api.recent().then((r) => {
@@ -239,6 +292,8 @@ function EmptyState({ status, onLaunch }:
             onSend={(prompt) => onLaunch(cwd, prompt)}
             working={false}
             autoFocus
+            allowPlanFirst
+            historyKey="launcher"
             placeholder="e.g. Build a tested Python rate limiter with token-bucket and sliding-window…"
           />
         </div>
@@ -247,6 +302,12 @@ function EmptyState({ status, onLaunch }:
           {driver && <Badge tone={driver.state === "none" ? "bad" : "good"}><Dot tone={driver.state === "none" ? "bad" : "good"} />{driver.label}</Badge>}
           <span>runs in <span className="font-mono text-mist-200">{status?.mode ?? "—"}</span> mode</span>
           <span>· {costy ? "cloud rungs may cost — the live total is always shown" : "typically $0 (free/local rungs)"}</span>
+          <label className="ml-auto flex cursor-pointer items-center gap-1 text-[11px] text-mist-300" title="ask the conductor to require approval before re-injecting guidance">
+            <input type="checkbox" checked={approvalGate}
+              onChange={(e) => { setApprovalGate(e.target.checked); try { localStorage.setItem("hmx.approvalGate", e.target.checked ? "1" : "0"); } catch { /**/ } }}
+              className="accent-current text-conductor" />
+            approval gate
+          </label>
         </div>
       </div>
     </div>

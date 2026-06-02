@@ -1,0 +1,41 @@
+[package]
+name = "hermes-studio"
+version = "0.1.0"
+description = "Hermes Studio — desktop appliance for the hermes-max agent stack"
+authors = ["hermes-max"]
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+# Lightweight blocking HTTP for endpoint/health probes (rustls — no OpenSSL).
+ureq = { version = "2", features = ["json", "tls"] }
+# OS keychain. On Linux the pure-Rust secret-service backend (zbus) is used — it
+# talks to the org.freedesktop.secrets DBus service at RUNTIME (gnome-keyring /
+# KWallet, pulled in via libsecret-1-0 in the .deb depends) and needs no C lib to
+# BUILD. On macOS, add the "apple-native" feature.
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+# Build a stripped, smaller binary in release to respect the 50MB bundle budget.
+default = []
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

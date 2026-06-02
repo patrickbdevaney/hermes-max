@@ -20,6 +20,7 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -213,7 +214,8 @@ def _run_log_dir() -> str:
 
 def create_run(cwd: str, prompt: str, mode: str | None,
                continue_session: bool = False,
-               run_id: str | None = None) -> dict[str, Any]:
+               run_id: str | None = None,
+               approval_gate: bool = False) -> dict[str, Any]:
     """Anchor a run at the current log end and launch the agent in `cwd`.
 
     The agent is invoked one-shot as `hermes --yolo -z <prompt>` (the documented
@@ -235,8 +237,14 @@ def create_run(cwd: str, prompt: str, mode: str | None,
                         "agent yourself, or use the 'live' run to attach.")
     else:
         env = dict(os.environ)
+        env["HERMES_RUN_ID"] = run_id  # let the conductor/agent tag work by run (v2)
         if mode:
             env["CONDUCTOR_MODE"] = mode
+        # Phase 5.3 — optional human-in-the-loop: ask the in-harness conductor to
+        # require operator approval before re-injecting guidance. Honoured by the
+        # harness when it supports the flag; harmless otherwise.
+        if approval_gate:
+            env["CONDUCTOR_REQUIRE_APPROVAL"] = "1"
         # Inject any keychain-held provider keys the agent can't see otherwise
         # (no-op for the .env backend — the agent reads .env itself).
         try:
@@ -306,3 +314,145 @@ def proc_finished(run: dict[str, Any]) -> bool:
     """True once a launched agent process has exited (always False for attach)."""
     proc = run.get("proc")
     return proc is not None and proc.poll() is not None
+
+
+# ── Phase 5: control surface (the justified backend write endpoints) ──────────
+# The agent is a detached one-shot process per turn, so live control is OS-signal
+# based: INTERRUPT aborts the current turn, PAUSE/RESUME suspend/continue it. The
+# process is its own session leader (start_new_session=True), so we signal the
+# whole process group to catch any children, falling back to the lone pid.
+_SIGNALS = {
+    "interrupt": signal.SIGTERM,
+    "pause": getattr(signal, "SIGSTOP", signal.SIGTERM),
+    "resume": getattr(signal, "SIGCONT", signal.SIGTERM),
+}
+
+
+# ── v2 cooperative controls (flags under <cwd>/.hermes-conductor/) ────────────
+# The conductor honours these between steps (see plugins/conductor). Cooperative,
+# not OS-level — the right scope for a detached one-shot agent (Hard Decision #6).
+def _conductor_dir(run_id: str) -> Optional[str]:
+    run = get_run(run_id)
+    cwd = (run or {}).get("cwd")
+    if not cwd:
+        return None
+    d = os.path.join(cwd, ".hermes-conductor")
+    try:
+        os.makedirs(d, exist_ok=True)
+        return d
+    except OSError:
+        return None
+
+
+def pause_run(run_id: str, _body: dict[str, Any]) -> dict[str, Any]:
+    d = _conductor_dir(run_id)
+    if not d:
+        return {"ok": False, "error": "unknown run"}
+    try:
+        open(os.path.join(d, "pause"), "w").close()
+        return {"ok": True, "paused": True}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+
+
+def resume_run(run_id: str, _body: dict[str, Any]) -> dict[str, Any]:
+    d = _conductor_dir(run_id)
+    if not d:
+        return {"ok": False, "error": "unknown run"}
+    try:
+        p = os.path.join(d, "pause")
+        if os.path.exists(p):
+            os.remove(p)
+        return {"ok": True, "paused": False}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+
+
+def steer_run(run_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    d = _conductor_dir(run_id)
+    text = (body.get("text") or "").strip()
+    if not d:
+        return {"ok": False, "error": "unknown run"}
+    if not text:
+        return {"ok": False, "error": "empty steer"}
+    try:
+        with open(os.path.join(d, "steer.txt"), "a") as f:
+            f.write(text + "\n")
+        return {"ok": True, "queued": True}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+
+
+def approve_run(run_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    d = _conductor_dir(run_id)
+    if not d:
+        return {"ok": False, "error": "unknown run"}
+    try:
+        with open(os.path.join(d, "approve"), "w") as f:
+            f.write("1" if body.get("approve") else "0")
+        return {"ok": True, "approve": bool(body.get("approve"))}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+
+
+def signal_run(run_id: str, action: str) -> dict[str, Any]:
+    """Send a control signal to a run's live process. Returns a JSON-safe result."""
+    sig = _SIGNALS.get(action)
+    if sig is None:
+        return {"ok": False, "error": f"unknown action: {action}"}
+    run = get_run(run_id)
+    if run is None:
+        return {"ok": False, "error": f"unknown run: {run_id}"}
+    proc = run.get("proc")
+    pid = run.get("pid")
+    if pid is None and proc is not None:
+        pid = proc.pid
+    if pid is None:
+        d = _read_descriptor(run_id)
+        pid = d.get("pid") if d else None
+    if not _pid_alive(pid) and not (proc is not None and proc.poll() is None):
+        return {"ok": False, "error": "no live process for this run (it may have finished)"}
+    try:
+        try:
+            os.killpg(os.getpgid(int(pid)), sig)   # whole group (turn + children)
+        except (OSError, ProcessLookupError):
+            os.kill(int(pid), sig)                  # fallback: the leader only
+    except (OSError, ProcessLookupError, ValueError, TypeError) as e:
+        return {"ok": False, "error": str(e)}
+    if action == "interrupt":
+        run["status"] = "exited"
+    run["control"] = "paused" if action == "pause" else ("running" if action == "resume" else run.get("control"))
+    return {"ok": True, "action": action, "run_id": run_id}
+
+
+# ── Phase 5.4: editable PLAN.md (the conductor's living plan artifact) ─────────
+def _plan_path(cwd: Optional[str]) -> str:
+    base = os.path.abspath(os.path.expanduser(cwd or os.getcwd()))
+    return os.path.join(base, "PLAN.md")
+
+
+def read_plan(cwd: Optional[str]) -> dict[str, Any]:
+    path = _plan_path(cwd)
+    try:
+        with open(path) as f:
+            return {"ok": True, "path": path, "exists": True, "content": f.read()}
+    except FileNotFoundError:
+        return {"ok": True, "path": path, "exists": False, "content": ""}
+    except OSError as e:
+        return {"ok": False, "path": path, "error": str(e)}
+
+
+def write_plan(cwd: Optional[str], content: str) -> dict[str, Any]:
+    base = os.path.abspath(os.path.expanduser(cwd or os.getcwd()))
+    if not os.path.isdir(base):
+        return {"ok": False, "error": f"directory not found: {base}"}
+    path = os.path.join(base, "PLAN.md")
+    try:
+        # atomic-ish write: temp then replace, so a reader never sees a half file
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(content)
+        os.replace(tmp, path)
+        return {"ok": True, "path": path}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}

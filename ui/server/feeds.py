@@ -118,8 +118,12 @@ def _parse_plan(cwd: str) -> Optional[dict[str, Any]]:
 
 
 # ── SSE encoding ──────────────────────────────────────────────────────────────
-def _sse(event: str, data: dict[str, Any]) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+def _sse(event: str, data: dict[str, Any], eid: int | None = None) -> str:
+    # An `id:` line lets the browser's EventSource resume from the last-seen
+    # position on reconnect (it echoes Last-Event-ID). We use the livelog BYTE
+    # OFFSET as the id — append-only + offset-addressable makes resume trivial.
+    head = f"id: {eid}\n" if eid is not None else ""
+    return f"{head}event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
 # ── livelog record → zero-or-more typed events ────────────────────────────────
@@ -208,6 +212,11 @@ def _translate(rec: dict[str, Any], run_id: str, calls: dict[str, list[int]],
         name = (rec.get("span") or "").lower()
         why = rec.get("reason") or rec.get("note") or rec.get("basis") or ""
         ret = rec.get("returned") or ""
+        if name in ("gen.token", "gen.reasoning", "gen.thinking"):
+            # Phase 2 — the model's streamed token deltas (written by the conductor's
+            # token callbacks). Pass through verbatim so both surfaces stream live.
+            out.append((name, {**base, "text": rec.get("text") or rec.get("content") or ""}))
+            return out
         if name.startswith("conductor."):
             # The conductor plugin's in-harness event feed (pre_llm_call / post_tool_call
             # / triggers / guidance / run_complete). Pass through as a typed `conductor`
@@ -313,8 +322,11 @@ def stream_events(run: dict[str, Any]) -> Iterator[str]:
                     rec = json.loads(line)
                 except ValueError:
                     continue
+                # byte offset AFTER this record → the resume point if the client
+                # reconnects having seen this frame (Phase 4.5).
+                eid = f.tell() if f else None
                 for event, data in _translate(rec, run_id, calls, seq):
-                    yield _sse(event, data)
+                    yield _sse(event, data, eid=eid)
                 continue
 
             # ── drain live spans from the OTLP hub (bounded per iteration) ──
@@ -371,6 +383,13 @@ def stream_events(run: dict[str, Any]) -> Iterator[str]:
                 yield _sse("narration", {"run_id": run_id,
                                          "plain_text": "Done — your turn.", "level": "info"})
                 yield _sse("phase", {"run_id": run_id, "phase": "done", "status": "ok"})
+                # Index the completed run for search/replay (Phase 4.1). Deferred
+                # import avoids a feeds↔history cycle; best-effort, never blocks.
+                try:
+                    from . import history
+                    history.ingest_run(latest)
+                except Exception:  # noqa: BLE001
+                    pass
 
             if t - last_beat >= _HEARTBEAT:
                 last_beat = t

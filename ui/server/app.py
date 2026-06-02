@@ -21,6 +21,20 @@ _UI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # .../ui
 _DIST = os.path.join(_UI_DIR, "web", "dist")
 
 
+def _studio_secret() -> str:
+    """The Hermes Studio per-launch secret: env first (set when Studio spawns the
+    sidecar), then the 0600 file (so an ADOPTED server — started by `hm ui` before
+    Studio — can validate too). Empty string ⇒ no secret configured."""
+    s = os.environ.get("HERMES_STUDIO_SECRET")
+    if s:
+        return s
+    try:
+        with open(os.path.expanduser("~/.hermes-max/studio.secret")) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 class Handler(BaseHTTPRequestHandler):
     # Set by the server factory in __main__.py.
     launch_token: str = ""     # opt-in bearer (--token), for remote/Tailscale exposure
@@ -58,6 +72,15 @@ class Handler(BaseHTTPRequestHandler):
         vals = query.get("token")
         return vals[0] if vals else None
 
+    def _studio_secret_ok(self) -> bool:
+        """Hermes Studio (the Tauri shell) authenticates control POSTs with a
+        per-launch shared secret instead of Origin+CSRF — on Linux the tauri://
+        origin sends a BLANK Origin (wry #366), so Origin allowlisting can't work.
+        The secret is a 0600 file a DNS-rebinding attacker can't read, so it closes
+        the same hole the Origin/CSRF guard does."""
+        sent = self.headers.get("X-HMX-Secret")
+        return bool(sent) and security.token_ok(sent, _studio_secret())
+
     def _api_authorized(self, query: dict, *, is_post: bool) -> str | None:
         """Localhost hardening, token-free by default. Three guards:
 
@@ -67,14 +90,17 @@ class Handler(BaseHTTPRequestHandler):
           • A SameSite=Strict double-submit cookie (hmx_csrf) is also required on
             POSTs — a cross-site page can't read our cookie to echo it back.
 
-        The launch token is NOT required to open the page; it only kicks in when the
+        A valid X-HMX-Secret (Hermes Studio's per-launch secret) is accepted in
+        lieu of the Origin+CSRF POST guard — the Tauri shell's control path. The
+        launch token is NOT required to open the page; it only kicks in when the
         operator opts into `--token` to expose the UI beyond loopback (Tailscale)."""
         origin = self.headers.get("Origin")
+        secret_ok = self._studio_secret_ok()
         if not security.host_ok(self.headers.get("Host")):
             return "bad Host (loopback only)"
-        if not security.origin_ok(origin):
+        if not secret_ok and not security.origin_ok(origin):
             return "bad Origin (loopback only)"
-        if is_post:
+        if is_post and not secret_ok:
             if not origin:
                 return "POST requires an Origin (loopback)"
             if self.csrf_token and not security.token_ok(self.headers.get("X-HMX-CSRF"), self.csrf_token):
@@ -119,6 +145,32 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"runs": runs.list_runs()})
         if path == "/api/keys/status":
             return self._send_json(config_api.keys_status())
+        if path == "/api/plan":
+            # Phase 5.4 — read PLAN.md for a working directory.
+            cwd = (query.get("cwd") or [os.getcwd()])[0]
+            return self._send_json(runs.read_plan(cwd))
+        if path == "/api/services":
+            # Phase 6 — MCP service health (real loopback TCP probe).
+            from . import dashboards
+            return self._send_json(dashboards.services_health())
+        if path == "/api/state":
+            # Phase 6/7 — the run's on-disk state files (ground truth).
+            from . import dashboards
+            cwd = (query.get("cwd") or [os.getcwd()])[0]
+            return self._send_json(dashboards.read_state(cwd))
+        if path == "/api/history":
+            # Searchable run history (Phase 4) — SQLite + FTS5 over the livelog.
+            from . import history
+            q = (query.get("q") or [""])[0]
+            status = (query.get("status") or [""])[0]
+            return self._send_json({"runs": history.list_history(q, status)})
+        if path.startswith("/api/history/"):
+            from . import history
+            run_id = unquote(path[len("/api/history/"):]).strip("/")
+            detail = history.get_run(run_id)
+            if detail is None:
+                return self._deny(404, f"no indexed run: {run_id}")
+            return self._send_json(detail)
         if path.startswith("/api/events/"):
             run_id = unquote(path[len("/api/events/"):])
             return self._stream_events(run_id)
@@ -156,7 +208,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(runs.continue_run(existing, prompt))
             cwd = body.get("cwd") or os.getcwd()
             mode = body.get("mode")
-            return self._send_json(runs.create_run(cwd, prompt, mode))
+            return self._send_json(runs.create_run(
+                cwd, prompt, mode, approval_gate=bool(body.get("approval_gate"))))
         if path.startswith("/api/keys/"):
             provider = unquote(path[len("/api/keys/"):]).strip("/")
             if not provider:
@@ -165,6 +218,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(config_api.store_key(provider, value))
         if path == "/api/config":
             return self._send_json(config_api.apply_config(body))
+        if path.startswith("/api/run/") and path.endswith("/signal"):
+            # interrupt a live run (SIGTERM the process group — the destructive control).
+            run_id = unquote(path[len("/api/run/"):-len("/signal")]).strip("/")
+            return self._send_json(runs.signal_run(run_id, body.get("action") or ""))
+        for verb, fn in (("steer", runs.steer_run), ("pause", runs.pause_run),
+                         ("resume", runs.resume_run), ("approve", runs.approve_run)):
+            suffix = "/" + verb
+            if path.startswith("/api/run/") and path.endswith(suffix):
+                # v2 control plane: cooperative steer/pause/resume + conductor approval,
+                # honoured by the conductor between steps (flags under .hermes-conductor/).
+                run_id = unquote(path[len("/api/run/"):-len(suffix)]).strip("/")
+                return self._send_json(fn(run_id, body))
+        if path == "/api/plan":
+            # Phase 5.4 — write an edited PLAN.md (mid-run edits trigger re-planning
+            # the next time the harness re-reads its living plan).
+            return self._send_json(runs.write_plan(body.get("cwd"), body.get("content") or ""))
         if path == "/api/test-connection":
             provider = body.get("provider") or ""
             if not provider:
@@ -222,6 +291,13 @@ class Handler(BaseHTTPRequestHandler):
         run = runs.get_run(run_id)
         if run is None:
             return self._deny(404, f"unknown run: {run_id}")
+        # Replay-on-reconnect (Phase 4.5): the browser echoes the last `id:` it saw
+        # as Last-Event-ID. Our ids are livelog byte offsets, so resume = seek there
+        # rather than replaying from the run's start. Guarded so it never seeks
+        # before the run began.
+        leid = self.headers.get("Last-Event-ID")
+        if leid and leid.isdigit():
+            run = {**run, "start_offset": max(int(run.get("start_offset", 0)), int(leid))}
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache, no-transform")
