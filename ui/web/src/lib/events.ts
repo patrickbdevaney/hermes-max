@@ -6,7 +6,13 @@ import type { EventType } from "../types";
 const EVENT_TYPES: EventType[] = [
   "token", "phase", "plan", "plan_item", "tool_call", "file_op", "shell",
   "gate", "checkpoint", "escalation", "cost", "narration", "heartbeat", "span",
+  "conductor",
 ];
+
+// Memory/robustness limit (Fix D): a backend that is down should not let the browser
+// spin forever reopening a socket. After this many consecutive failed reconnects we
+// give up and surface a terminal "reconnecting" so the UI can stop showing a live dot.
+const MAX_SSE_RECONNECTS = 10;
 
 export type ConnState = "connecting" | "live" | "reconnecting";
 
@@ -20,13 +26,20 @@ export function openStream(
   onConn: (state: ConnState) => void,
 ): EventStream {
   let closed = false;
+  let reconnects = 0;
   onConn("connecting");
   const es = new EventSource(api.eventsUrl(runId));
 
-  es.onopen = () => { if (!closed) onConn("live"); };
+  es.onopen = () => { if (!closed) { reconnects = 0; onConn("live"); } };
   es.onerror = () => {
-    // EventSource will auto-retry; reflect that without tearing down.
-    if (!closed) onConn("reconnecting");
+    if (closed) return;
+    reconnects += 1;
+    onConn("reconnecting");
+    // EventSource auto-retries; only intervene once we've exhausted the budget.
+    if (reconnects >= MAX_SSE_RECONNECTS) {
+      closed = true;
+      es.close();
+    }
   };
 
   for (const t of EVENT_TYPES) {

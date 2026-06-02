@@ -6,7 +6,7 @@
 export type EventType =
   | "token" | "phase" | "plan" | "plan_item" | "tool_call" | "file_op"
   | "shell" | "gate" | "checkpoint" | "escalation" | "cost" | "narration"
-  | "heartbeat" | "span";
+  | "heartbeat" | "span" | "conductor";
 
 export interface Base { run_id: string; ts?: number; hms?: string }
 
@@ -33,6 +33,19 @@ export interface CostEvt extends Base {
   free_tok?: number; paid_tok?: number; provider?: string;
 }
 export interface NarrationEvt extends Base { plain_text: string; level?: "info" | "warn" }
+
+// The conductor plugin's in-harness event feed (ui/server/feeds.py passes
+// `conductor.<event>` livelog spans through verbatim). `event` discriminates:
+// llm_call | llm_response | tool/file_write | verify_pass | verify_fail | trigger |
+// guidance | guidance_applied | step_advance | run_complete | session_end | budget_exhausted.
+export interface ConductorEvt extends Base {
+  event: string;
+  step?: number; total?: number; turns_on_step?: number; has_guidance?: boolean;
+  reason?: string; tier?: string; model?: string;
+  tokens?: number; thinking_tokens?: number; output_tokens?: number; elapsed_s?: number;
+  cost?: number; failures?: number; result?: string; file?: string;
+  from_step?: number; to_step?: number; done?: boolean; final_step?: number; total_turns?: number;
+}
 export type HeartbeatEvt = Base & { tool?: string; done?: number | null; total?: number | null;
   eta_s?: number | null; elapsed_s?: number | null; item?: string | null; note?: string | null };
 

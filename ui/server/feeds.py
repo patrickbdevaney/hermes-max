@@ -208,6 +208,21 @@ def _translate(rec: dict[str, Any], run_id: str, calls: dict[str, list[int]],
         name = (rec.get("span") or "").lower()
         why = rec.get("reason") or rec.get("note") or rec.get("basis") or ""
         ret = rec.get("returned") or ""
+        if name.startswith("conductor."):
+            # The conductor plugin's in-harness event feed (pre_llm_call / post_tool_call
+            # / triggers / guidance / run_complete). Pass through as a typed `conductor`
+            # SSE event the web UI's feed + flow views consume directly.
+            ev = name.split(".", 1)[1]
+            payload = {**base, "event": ev}
+            for k in ("step", "total", "reason", "tier", "model", "tokens", "thinking_tokens",
+                      "output_tokens", "cost", "cost_usd", "failures", "result", "file",
+                      "turns_on_step", "has_guidance", "calls", "free", "paid",
+                      "from_step", "to_step", "done", "final_step", "total_turns"):
+                v = rec.get(k)
+                if v is not None:
+                    payload[k] = v
+            out.append(("conductor", payload))
+            return out
         if "task_classification" in name:
             if "needs_plan" in why.lower():
                 out.append(("phase", {**base, "phase": "plan", "status": "ok"}))

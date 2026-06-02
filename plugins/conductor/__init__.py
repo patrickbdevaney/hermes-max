@@ -243,6 +243,46 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
     return {"context": "\n".join(lines)}
 
 
+def _coerce_int(v: Any) -> Optional[int]:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_tokens(resp: Any) -> dict[str, int]:
+    """Best-effort token counts from a hermes LLM response (dict or object).
+    Tries a few common shapes; absent fields just don't appear (tok/s degrades to —)."""
+    out: dict[str, int] = {}
+
+    def _get(obj: Any, key: str) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+
+    usage = _get(resp, "usage") or resp
+    for src, dst in (("output_tokens", "output_tokens"), ("completion_tokens", "output_tokens"),
+                     ("thinking_tokens", "thinking_tokens"), ("reasoning_tokens", "thinking_tokens"),
+                     ("prompt_tokens", "prompt_tokens"), ("input_tokens", "prompt_tokens")):
+        v = _coerce_int(_get(usage, src))
+        if v is not None and dst not in out:
+            out[dst] = v
+    return out
+
+
+def _post_llm_call(response: Any = None, **kw: Any) -> None:
+    """Emit conductor.llm_response with token counts so the web UI's run chrome can
+    compute tok/s (output tokens / wall-time between the call and this response)."""
+    resp = response if response is not None else kw.get("result") or kw.get("completion")
+    cwd = os.getcwd()
+    state = _load_state(cwd)
+    toks = _extract_tokens(resp)
+    payload = {"step": int(state.get("current_step", 1)),
+               "elapsed_s": _coerce_int(kw.get("elapsed_s") or kw.get("duration_s")) or 0}
+    payload.update(toks)
+    _emit("llm_response", payload)
+
+
 def _post_tool_call(tool_name: str = "", args: Optional[dict] = None, result: Any = None, **kw: Any):
     """Detect file writes + verify results; fire the conductor on stuck-detection."""
     cwd = os.getcwd()
@@ -310,5 +350,6 @@ def _on_session_end(**kw: Any) -> None:
 def register(ctx) -> None:
     """Hermes calls this with a PluginContext. Register the lifecycle hooks."""
     ctx.register_hook("pre_llm_call", _pre_llm_call)
+    ctx.register_hook("post_llm_call", _post_llm_call)
     ctx.register_hook("post_tool_call", _post_tool_call)
     ctx.register_hook("on_session_end", _on_session_end)

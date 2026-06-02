@@ -29,6 +29,8 @@ export default {
           200: "#cfcfd6",
           300: "#a1a1aa",  // secondary (body, labels)
           400: "#6b6b73",  // tertiary (captions, hints, cost)
+          500: "#52525a",  // quaternary (timestamps, faint meta)
+          600: "#3f3f46",  // faintest (gutter rules, disabled)
         },
         text: { primary: "#ededef", secondary: "#a1a1aa", tertiary: "#6b6b73", disabled: "#3f3f46" },
         // Accent — primary action + live/active state ONLY.
@@ -52,11 +54,16 @@ export default {
         flash: { "0%": { backgroundColor: "transparent" },
                  "30%": { backgroundColor: "rgba(77,141,255,0.12)" },
                  "100%": { backgroundColor: "transparent" } },
+        // marching-ants for the active flow edge (n8n/ComfyUI style): the dash
+        // pattern scrolls along the stroke. State is also conveyed by colour, so
+        // reduced-motion (which freezes this) loses nothing.
+        dash: { to: { strokeDashoffset: "-12" } },
       },
       animation: {
         pulse2: "pulse2 2.4s ease-in-out infinite",
         risein: "risein 0.2s ease-out",
         flash: "flash 1.1s ease-out",
+        dash: "dash 0.6s linear infinite",
       },
     },
   },
