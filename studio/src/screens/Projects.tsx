@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import { listProjects, createProject, pickDirectory, type Project } from "../lib/projects";
 import { probeCapabilities, type DetectResult } from "../lib/detect";
+import { computeShadow, fmtMoney } from "../lib/shadow";
 import { ProjectCard } from "../components/ProjectCard";
 
 export function Projects({ onOpen, onSettings }: { onOpen: (p: Project) => void; onSettings: () => void }) {
@@ -17,13 +18,26 @@ export function Projects({ onOpen, onSettings }: { onOpen: (p: Project) => void;
 
   const aiDown = detect && detect.suggested_mode === "NeedsSetup";
 
+  // A gentle running total across all projects (S5.2).
+  const totalCost = projects.reduce((s, p) => s + (p.lifetime_cost_usd ?? 0), 0);
+  const totalTokens = projects.reduce((s, p) => s + (p.lifetime_tokens ?? 0), 0);
+  const totalShadow = computeShadow(totalCost, totalTokens);
+  const built = projects.filter((p) => p.last_run_ts).length;
+
   return (
     <div className="mx-auto max-w-4xl px-6 py-8">
-      <header className="mb-6 flex items-center justify-between">
+      <header className="mb-2 flex items-center justify-between">
         <h1 className="font-display text-2xl font-semibold tracking-tight2 text-mist-100">Your projects</h1>
         <button type="button" onClick={onSettings}
           className="rounded-md border border-ink-700 px-3 py-1.5 text-xs text-mist-300 hover:bg-ink-850">Settings</button>
       </header>
+      {built > 0 && (
+        <p className="mb-6 text-xs text-mist-500">
+          You've built {built} project{built === 1 ? "" : "s"} for{" "}
+          <span className="font-mono text-good">{fmtMoney(totalCost)}</span>
+          {totalShadow.savedUsd > 0 && <> — saved ~<span className="font-mono text-conductor">{fmtMoney(totalShadow.savedUsd)}</span> vs premium AI</>}
+        </p>
+      )}
 
       {aiDown && (
         <div className="mb-4 flex items-center justify-between rounded-lg border border-warn/40 bg-warn-soft/15 px-3 py-2 text-xs text-warn">

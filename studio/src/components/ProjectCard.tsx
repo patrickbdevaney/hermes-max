@@ -2,6 +2,7 @@
 // action. The ⋯ menu opens project actions (open folder, rename, forget).
 import { useState } from "react";
 import { openProjectFolder, renameProject, deleteProject, type Project } from "../lib/projects";
+import { computeShadow, fmtMoney, fmtMultiple } from "../lib/shadow";
 import { StatusDot } from "./StatusDot";
 
 const STATUS: Record<string, { tone: "good" | "accent" | "warn" | "muted"; label: string; pulse?: boolean }> = {
@@ -26,6 +27,10 @@ export function ProjectCard({ project, onOpen, onChanged }:
   const st = STATUS[project.last_status ?? "ready"] ?? STATUS.ready;
 
   const cost = project.lifetime_cost_usd ?? 0;
+  const sv = computeShadow(cost, project.lifetime_tokens ?? 0);
+  const savedHint = sv.savedUsd > 0
+    ? `saved ~${fmtMoney(sv.savedUsd)} (${fmtMultiple(sv.multiple)} cheaper) vs premium AI`
+    : undefined;
   const sub = [
     ago(project.last_run_ts),
     project.last_step && project.last_total ? `step ${project.last_step}/${project.last_total}` : null,
@@ -53,7 +58,7 @@ export function ProjectCard({ project, onOpen, onChanged }:
         </span>
       </div>
       {project.prompt && <p className="mt-1 line-clamp-2 text-sm text-mist-400">“{project.prompt}”</p>}
-      <p className="mt-2 font-mono text-[11px] text-mist-500" title={cost > 0 ? "saved vs premium AI shown in the receipt" : undefined}>{sub}</p>
+      <p className="mt-2 font-mono text-[11px] text-mist-500" title={savedHint}>{sub}</p>
 
       <div className="mt-3 flex items-center gap-2">
         <button type="button" onClick={() => onOpen(project)}
