@@ -48,7 +48,8 @@ export type StepStatus = "pending" | "active" | "complete" | "failed";
 export interface FlowStep { n: number; status: StepStatus; turns: number; lastVerify?: string }
 export interface ConductorNode {
   id: string; step: number; reason: string; tier?: string; model?: string;
-  resolved: boolean; tokens?: number;
+  resolved: boolean; tokens?: number; cost?: number; failures?: number;
+  ts: number;            // ms — for ordering the swimlane
 }
 export interface FlowState {
   total: number;          // best-known step count (0 until first llm_call)
@@ -320,7 +321,8 @@ function applyConductor(
       add({ kind: "conductor", tone: "warn", icon: "⚡",
             title: `conductor: ${trunc(d.reason, 40)}`, meta: `${d.tier ?? ""} · step ${step}`.trim(),
             ts: now, hms: d.hms, step });
-      const conductors = [...flow.conductors, { id, step, reason: d.reason || "?", tier: d.tier, resolved: false }]
+      const conductors = [...flow.conductors,
+        { id, step, reason: d.reason || "?", tier: d.tier, resolved: false, failures: d.failures, ts: now }]
         .slice(-MAX_GRAPH_NODES);
       flow = { ...flow, conductors };
       break;
@@ -335,7 +337,7 @@ function applyConductor(
       // resolve the most recent unresolved conductor node for this step
       let resolved = false;
       const conductors = flow.conductors.map((c) => {
-        if (!resolved && !c.resolved && c.step === step) { resolved = true; return { ...c, resolved: true, model: d.model, tokens: d.tokens }; }
+        if (!resolved && !c.resolved && c.step === step) { resolved = true; return { ...c, resolved: true, model: d.model, tokens: d.tokens, cost }; }
         return c;
       });
       flow = { ...flow, conductors };
@@ -372,6 +374,14 @@ function applyConductor(
     }
     case "budget_exhausted": {
       add({ kind: "conductor", tone: "warn", icon: "⚠", title: `escalation budget exhausted (${d.tier ?? ""})`, ts: now, hms: d.hms });
+      break;
+    }
+    case "done_rejected": {
+      // The agent thinks it's done, but the verify gate hasn't gone green — the
+      // ground-truth distinction the verify-gate spine makes visible (3.3).
+      add({ kind: "verify", tone: "warn", icon: "⊘", title: "done rejected — tests not yet green",
+            meta: `step ${step}`, ts: now, hms: d.hms, step });
+      flow = { ...flow, steps: setStep(ensureSteps(flow, flow.total), step, { lastVerify: "rejected" }) };
       break;
     }
     default:

@@ -16,15 +16,17 @@ import { FlowGraph } from "./run/FlowGraph";
 import { RunChrome } from "./run/RunChrome";
 import { ShadowMeter } from "./run/ShadowMeter";
 import { RunReceipt } from "./run/RunReceipt";
+import { ConductorSwimlane } from "./run/ConductorSwimlane";
 import type { RunView, Turn } from "../state";
 import type { FeedState } from "../lib/feed";
 import type { ConnState } from "../lib/events";
 import type { StatusPayload, RecentProject } from "../types";
 
-type Tab = "feed" | "flow" | "turns";
+type Tab = "feed" | "conductor" | "flow" | "turns";
 type TurnLens = "timeline" | "graph";
 const TABS: { id: Tab; label: string }[] = [
-  { id: "feed", label: "Feed" }, { id: "flow", label: "Flow" }, { id: "turns", label: "Turns" },
+  { id: "feed", label: "Feed" }, { id: "conductor", label: "Conductor" },
+  { id: "flow", label: "Flow" }, { id: "turns", label: "Turns" },
 ];
 
 export function RunPage({ runId, view, feed, conn, status, onLaunch, onContinue, onNewRun }:
@@ -114,6 +116,7 @@ export function RunPage({ runId, view, feed, conn, status, onLaunch, onContinue,
       {/* the active view */}
       <div className="min-h-0 flex-1 py-3">
         {tab === "feed" && <VirtualFeed items={feed.items} live={live} flow={feed.flow} activeStep={feed.flow.current} />}
+        {tab === "conductor" && <ConductorSwimlane flow={feed.flow} live={live} />}
         {tab === "flow" && <FlowGraph flow={feed.flow} live={live} />}
         {tab === "turns" && (
           <div className="h-full space-y-5 overflow-y-auto pr-1">
