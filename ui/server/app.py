@@ -119,6 +119,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"runs": runs.list_runs()})
         if path == "/api/keys/status":
             return self._send_json(config_api.keys_status())
+        if path == "/api/history":
+            # Searchable run history (Phase 4) — SQLite + FTS5 over the livelog.
+            from . import history
+            q = (query.get("q") or [""])[0]
+            status = (query.get("status") or [""])[0]
+            return self._send_json({"runs": history.list_history(q, status)})
+        if path.startswith("/api/history/"):
+            from . import history
+            run_id = unquote(path[len("/api/history/"):]).strip("/")
+            detail = history.get_run(run_id)
+            if detail is None:
+                return self._deny(404, f"no indexed run: {run_id}")
+            return self._send_json(detail)
         if path.startswith("/api/events/"):
             run_id = unquote(path[len("/api/events/"):])
             return self._stream_events(run_id)
@@ -222,6 +235,13 @@ class Handler(BaseHTTPRequestHandler):
         run = runs.get_run(run_id)
         if run is None:
             return self._deny(404, f"unknown run: {run_id}")
+        # Replay-on-reconnect (Phase 4.5): the browser echoes the last `id:` it saw
+        # as Last-Event-ID. Our ids are livelog byte offsets, so resume = seek there
+        # rather than replaying from the run's start. Guarded so it never seeks
+        # before the run began.
+        leid = self.headers.get("Last-Event-ID")
+        if leid and leid.isdigit():
+            run = {**run, "start_offset": max(int(run.get("start_offset", 0)), int(leid))}
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache, no-transform")

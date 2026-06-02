@@ -107,6 +107,17 @@ export interface RunSummary {
   start_ts?: number | null; origin?: string; status?: string; active?: boolean;
 }
 
+// ── Phase 4: persistent run history (SQLite + FTS5 over the livelog) ──
+export interface HistoryRun {
+  run_id: string; prompt?: string | null; cwd?: string | null; mode?: string | null;
+  origin?: string; start_ts?: number | null; end_ts?: number | null; status?: string;
+  step_count?: number; turn_count?: number; cost_usd?: number;
+  free_tok?: number; paid_tok?: number; conductor_fires?: number;
+  verify_pass?: number; verify_fail?: number;
+}
+export interface HistoryEvent { event: string; data: any; seq: number; ts: number; hms: string }
+export interface HistoryDetail { summary: HistoryRun; events: HistoryEvent[] }
+
 export interface RecentProject { path: string; last_used: number | null }
 export interface RunHandle {
   run_id: string; cwd: string; prompt: string | null; mode: string | null;

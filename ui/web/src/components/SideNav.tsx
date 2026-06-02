@@ -10,7 +10,7 @@ import type { StatusPayload } from "../types";
 
 const ITEMS: { name: RouteName; label: string; hint: string }[] = [
   { name: "run", label: "Run", hint: "talk to the agent · watch it work" },
-  { name: "activity", label: "Activity", hint: "past runs" },
+  { name: "runs", label: "Runs", hint: "searchable history · replay" },
   { name: "providers", label: "Providers", hint: "rungs · keys" },
   { name: "cost", label: "Cost", hint: "the ledger" },
   { name: "setup", label: "Setup", hint: "profile · mode · keys" },

@@ -15,6 +15,8 @@ import type { StatusPayload } from "./types";
 import { SideNav } from "./components/SideNav";
 import { TopChrome } from "./components/TopChrome";
 import { RunPage } from "./components/RunPage";
+import { HistoryPage } from "./components/HistoryPage";
+import { ReplayPage } from "./components/ReplayPage";
 import { ActivityPage } from "./components/ActivityPage";
 import { ProvidersPage } from "./components/ProvidersPage";
 import { CostPage } from "./components/CostPage";
@@ -142,7 +144,7 @@ export default function App() {
     navigate("run");
   }, []);
 
-  const fillHeight = route.name === "run";
+  const fillHeight = route.name === "run" || route.name === "runs" || route.name === "replay";
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -170,6 +172,8 @@ export default function App() {
                 onNewRun={newRun}
               />
             )}
+            {route.name === "runs" && <HistoryPage />}
+            {route.name === "replay" && <ReplayPage runId={route.runId} />}
             {route.name === "activity" && <ActivityPage />}
             {route.name === "providers" && <ProvidersPage status={status} refreshStatus={refreshStatus} />}
             {route.name === "cost" && <CostPage />}
