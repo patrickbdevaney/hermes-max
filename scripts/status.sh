@@ -111,10 +111,6 @@ try:
 except Exception:
     sys.exit(0)
 cfg = reg.load_config(); env = dict(os.environ)
-chain = cfg["role_chains"].get("synth", [])
-allowed = set(res.resolve_chain(chain, cfg["providers"], env))
-free = sum(1 for p in chain if cfg["providers"].get(p, {}).get("tier") == "free")
-paid = sum(1 for p in chain if cfg["providers"].get(p, {}).get("tier") == "paid")
 # plan/exec/cost summary, mode-aware (the executor + cost come from the FABRIC mode).
 sys.path.insert(0, sys.argv[1])
 fmode = exec_line = cost_line = ""; ceiling = ""
@@ -132,11 +128,18 @@ try:
     cost_line = meta.get("monthly_cost", "?")
 except Exception:
     pass
-# plan kind reflects the CEILING (free → no paid fallback; full/frontier → V4-Pro fallback).
-if fmode == "full-local":
+# the EFFECTIVE synth chain for this mode (same builder the conductor uses).
+chain = reg.synth_chain_for_mode(cfg["role_chains"].get("synth", []), cfg["providers"], fmode)
+allowed = set(res.resolve_chain(chain, cfg["providers"], env))
+free = sum(1 for p in chain if cfg["providers"].get(p, {}).get("tier") == "free")
+paid = sum(1 for p in chain if cfg["providers"].get(p, {}).get("tier") == "paid")
+# plan kind reflects the mode's economic intent.
+if fmode == "free-full-local":
+    plan_kind = "kimi-k2.6:free → V4-Pro fallback"
+elif fmode == "full-local":
     plan_kind = "V4-Pro first (paid), free cascade fallback"
 elif ceiling == "free":
-    plan_kind = "free cascade ($0, no paid fallback)"
+    plan_kind = "free cascade ($0 hard, no paid fallback)"
 elif ceiling in ("full", "frontier"):
     plan_kind = "free cascade → V4-Pro fallback"
 elif ceiling == "local":
@@ -148,7 +151,7 @@ if exec_line:
     print(f"  exec   {exec_line}")
 if cost_line:
     print(f"  cost   {cost_line}/mo  ·  $0 while the free planner tier has capacity")
-print(f"  synth cascade  ({free} free → {paid} paid; 429 falls through):")
+print(f"  synth chain  ({free} free → {paid} paid; 429 falls through):")
 for i, pid in enumerate(chain, 1):
     p = cfg["providers"].get(pid, {})
     tier = p.get("tier", "?"); model = p.get("models", {}).get("synth", "?")

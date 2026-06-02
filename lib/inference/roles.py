@@ -93,6 +93,7 @@ def mode_meta(name: str) -> dict[str, Any]:
         "requires_gpu": bool(m.get("requires_gpu", False)),
         "monthly_cost": m.get("monthly_cost", "?"),
         "inference_mode": m.get("inference_mode", "full"),
+        "tagline": " ".join((m.get("tagline") or "").split()),
         "posture": " ".join((m.get("posture") or "").split()),
         "chains": m.get("chains") or {},
     }

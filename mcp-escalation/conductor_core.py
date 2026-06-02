@@ -401,13 +401,12 @@ def run_role(role: str, messages: list[dict] | None = None, *, prompt: str | Non
     providers = cfg["providers"]
     caps = cfg["caps"]
     chain = cfg["role_chains"].get(role, [])
+    # The synth (planner) chain is reshaped by the FABRIC mode (free = full cascade;
+    # free-full-local = kimi:free → V4-Pro only; full-local = V4-Pro paid first).
+    if role == "synth":
+        chain = reg.synth_chain_for_mode(chain, providers, _fabric_mode())
     env = dict(os.environ)
     present = resolver.resolve_chain(chain, providers, env)
-    # full-local mode promises V4-Pro's planning quality — try PAID synth rungs first
-    # (a stable sort), so the planner doesn't hand back a free-cascade plan instead.
-    # (free / free-full-local leave the free-first cascade order untouched.)
-    if role == "synth" and _fabric_mode() == "full-local":
-        present.sort(key=lambda pid: 0 if providers.get(pid, {}).get("tier") == "paid" else 1)
     if not present:
         return {"ok": False, "proceed_local": True, "role": role, "role_active": False,
                 "reason": f"role '{role}' is OFF (no present provider key in its chain) "

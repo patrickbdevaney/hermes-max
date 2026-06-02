@@ -248,6 +248,31 @@ DEFAULT_ROLE_CHAINS: dict[str, list[str]] = {
     "escalate": ["anthropic"],
 }
 
+# The two named rungs free-full-local uses: kimi-k2.6:free ($0 attempt) → V4-Pro
+# (quality fallback on 429). Provider ids in the registry.
+FREE_FULL_LOCAL_SYNTH = ["openrouter", "deepinfra"]
+
+
+def synth_chain_for_mode(synth_chain: list[str], providers: dict[str, dict[str, Any]],
+                         fabric_mode: str) -> list[str]:
+    """Mode-aware synth (planner) ordering. The conductor's base synth chain is the
+    full free-first cascade; a FABRIC mode reshapes it by economic intent:
+
+      free / default → the full six-rung free cascade (unchanged; $0 hard constraint)
+      free-full-local → exactly [kimi-k2.6:free, DeepSeek-V4-Pro] — quality-first,
+                        $0-when-possible: try the best free planner, fall to V4-Pro on
+                        429 (NOT the whole free cascade).
+      full-local      → V4-Pro (paid) FIRST, then the rest — paid quality guarantee.
+
+    Returns the ordered provider-id list (still presence/ceiling-gated downstream).
+    Used by BOTH conductor_core.run_role and `hm status` so they never diverge."""
+    chain = list(synth_chain)
+    if fabric_mode == "free-full-local":
+        return [p for p in FREE_FULL_LOCAL_SYNTH if p in chain]
+    if fabric_mode == "full-local":
+        return sorted(chain, key=lambda p: 0 if providers.get(p, {}).get("tier") == "paid" else 1)
+    return chain
+
 # ── DEFAULT parallel_draft POOL (UNORDERED; fan out for cross-family diversity)─
 # Each entry pins a (provider, model) so one provider can contribute several
 # families (Cerebras GLM + gpt-oss; Groq gpt-oss + qwen3 + llama-4). The paid

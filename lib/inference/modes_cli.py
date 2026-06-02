@@ -54,14 +54,15 @@ def cmd_set(name: str) -> int:
 
 
 def cmd_list() -> int:
-    print(f"{'MODE':<16}{'COST/MO':<10}{'GPU?':<6}POSTURE")
+    print(f"{'MODE':<16}{'COST/MO':<10}{'GPU?':<6}WHAT IT DOES")
     cur = roles.active_mode_name()
     for name in roles.all_modes():
         m = roles.mode_meta(name)
         gpu = "yes" if m["requires_gpu"] else "no"
-        posture = m["posture"].split(". ")[0]
+        # the taxonomy tagline (one crisp line); fall back to the posture's first sentence.
+        desc = m.get("tagline") or m["posture"].split(". ")[0]
         star = " *" if name == cur else ""
-        print(f"{name + star:<16}{m['monthly_cost']:<10}{gpu:<6}{posture}")
+        print(f"{name + star:<16}{m['monthly_cost']:<10}{gpu:<6}{desc}")
     print("\n  * = active. Switch with: hm mode <name>")
     return 0
 
