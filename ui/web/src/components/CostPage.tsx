@@ -5,6 +5,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { Dot, fmtUsd, fmtInt } from "./ui";
+import { CascadeSankey } from "./CascadeSankey";
+import { computeShadow, rateLabel, fmtMoney, fmtMultiple, FRONTIER } from "../lib/shadow";
 import type { CostReport, CostBucket } from "../types";
 
 const WINDOWS = ["today", "week", "month", "all"] as const;
@@ -52,6 +54,18 @@ export function CostPage() {
 
       {loading && <p className="text-sm text-mist-400">loading…</p>}
 
+      {rep && <ShadowSummary report={rep} />}
+
+      {rep && Object.keys(rep.by_provider ?? {}).length > 0 && (
+        <section className="rounded-lg border border-ink-800 bg-ink-900 p-4">
+          <h2 className="mb-3 text-sm font-medium text-mist-200">Provider cascade</h2>
+          <CascadeSankey report={rep} />
+          <p className="mt-2 text-[11px] text-mist-500">
+            Where tokens routed — the local executor absorbing the bulk, paid providers handling the rare rest.
+          </p>
+        </section>
+      )}
+
       <BucketTable title="By provider" buckets={rep?.by_provider} />
       <BucketTable title="By model" buckets={rep?.by_model} />
       <BucketTable title="By role" buckets={rep?.by_role} />
@@ -70,6 +84,32 @@ export function CostPage() {
         </section>
       )}
     </div>
+  );
+}
+
+// The cost shadow over the selected window: real token volume re-priced at the
+// configurable frontier rate (lib/shadow). Explicitly labelled — never borrowed.
+function ShadowSummary({ report }: { report: CostReport }) {
+  const tokens = (report.free_tok ?? 0) + (report.paid_tok ?? 0);
+  if (tokens <= 0) return null;
+  const r = computeShadow(report.total_usd ?? 0, tokens);
+  return (
+    <section className="rounded-lg border border-conductor/30 bg-conductor/5 p-4">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="flex items-end gap-3">
+          <span className="font-mono text-3xl font-semibold tabular-nums text-conductor">{fmtMultiple(r.multiple)}</span>
+          <div className="pb-1">
+            <div className="text-sm text-mist-200">cheaper than {FRONTIER.model}</div>
+            <div className="text-xs text-mist-400">
+              actual <span className="font-mono text-good">{fmtMoney(r.actualUsd)}</span> · shadow{" "}
+              <span className="font-mono text-mist-200">{fmtMoney(r.shadowUsd)}</span> · saved{" "}
+              <span className="font-mono text-conductor">{fmtMoney(r.savedUsd)}</span> ({r.savedPct.toFixed(0)}%)
+            </div>
+          </div>
+        </div>
+      </div>
+      <p className="mt-2 text-[10px] text-mist-500">{fmtInt(tokens)} tokens re-priced against {rateLabel()}</p>
+    </section>
   );
 }
 

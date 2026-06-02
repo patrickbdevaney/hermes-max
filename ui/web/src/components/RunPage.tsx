@@ -14,6 +14,8 @@ import { ResearchFanOut, FullTrace } from "./L2Panels";
 import { VirtualFeed } from "./run/VirtualFeed";
 import { FlowGraph } from "./run/FlowGraph";
 import { RunChrome } from "./run/RunChrome";
+import { ShadowMeter } from "./run/ShadowMeter";
+import { RunReceipt } from "./run/RunReceipt";
 import type { RunView, Turn } from "../state";
 import type { FeedState } from "../lib/feed";
 import type { ConnState } from "../lib/events";
@@ -99,6 +101,15 @@ export function RunPage({ runId, view, feed, conn, status, onLaunch, onContinue,
       <div className="pt-3">
         <RunChrome chrome={feed.chrome} live={live} conn={conn} />
       </div>
+
+      {/* cost shadow — live meter while executing, shareable receipt on settle */}
+      {(feed.chrome.execFreeTok + feed.chrome.execPaidTok + feed.chrome.plannerTokens) > 0 && (
+        <div className="pt-2">
+          {feed.chrome.running && live
+            ? <ShadowMeter chrome={feed.chrome} />
+            : <RunReceipt chrome={feed.chrome} conductorFires={feed.flow.conductors.length} runId={runId} />}
+        </div>
+      )}
 
       {/* the active view */}
       <div className="min-h-0 flex-1 py-3">
