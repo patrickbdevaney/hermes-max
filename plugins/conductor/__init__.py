@@ -222,6 +222,12 @@ def _handle_done(cwd: str, state: dict[str, Any]) -> None:
         summary = f"verify_formal: {kind} ({fres.get('method') or fres.get('reason','')})"[:160]
         passed = kind in ("verified", "unknown")  # unknown = can't adjudicate → don't block done
         _emit("verify_enforced", {"phase": "done", "result": kind, "method": fres.get("method")})
+        # P6 — promote a done-gate counterexample/rejected-spec into the regression corpus.
+        if _enforce is not None and not passed:
+            try:
+                _enforce.promote_counterexample(state, fres, target=cwd)
+            except Exception:  # noqa: BLE001
+                pass
     except Exception:  # noqa: BLE001
         try:
             import verify_core

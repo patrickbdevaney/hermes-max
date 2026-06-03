@@ -56,6 +56,7 @@ ENF_RAG = _on("CONDUCTOR_ENFORCE_RAG")
 ENF_PROFILE = _on("CONDUCTOR_ENFORCE_PROFILE")  # P1 cost attribution (enforced, post_llm_call)
 ENF_ROUTE = _on("CONDUCTOR_ENFORCE_ROUTE")      # P2 bandit route read (pre_llm_call) + write (post-run)
 ENF_DAG = _on("CONDUCTOR_ENFORCE_DAG")          # P5 DAG schedule hint (pre_llm_call, multi-file only)
+ENF_REGRESSION = _on("CONDUCTOR_ENFORCE_REGRESSION")  # P6 auto-promote counterexamples (enforced)
 _MULTIFILE_HINT = ("multiple files", "across", "refactor", "rename", "move ", "each module",
                    "every file", "all the", "throughout", "codebase-wide", "multi-file")
 WRITE_MIN_BYTES = int(os.environ.get("CONDUCTOR_VERIFY_WRITE_MIN_BYTES", "64"))
@@ -105,6 +106,8 @@ def on_file_write(cwd: str, state: dict[str, Any], path: str) -> Optional[str]:
     kind = res.get("result")
     _emit("verify_enforced", {"phase": "write", "file": path, "result": kind,
                               "stage": res.get("stage"), "advisories": res.get("advisories")})
+    if kind in ("counterexample", "spec_rejected"):
+        promote_counterexample(state, res, target=path)  # P6 compounding
     if kind == "counterexample":
         n = int(state.get("formal_write_fails", 0)) + 1
         state["formal_write_fails"] = n
@@ -349,6 +352,28 @@ def log_run_outcome(cwd: str, state: dict[str, Any], solved: bool,
     except Exception:  # noqa: BLE001
         return
     _emit("outcome_logged", {"task_class": tc, "backend": backend, "solved": solved})
+
+
+# P6 ── auto-promote counterexamples to the regression corpus (enforced) ──────
+def promote_counterexample(state: dict[str, Any], result: dict[str, Any], target: str = "") -> None:
+    """ENFORCED: when a verify gate yields a counterexample / rejected spec, promote it into
+    the deduped regression corpus so future runs catch it for free. The executor is biased to
+    skip this; the consequence of skipping is degraded future runs. Cheap, deduped, no-op on
+    verified/unknown. Degrades silently if the corpus module is absent."""
+    if not ENF_REGRESSION or not isinstance(result, dict):
+        return
+    if result.get("result") not in ("counterexample", "spec_rejected"):
+        return
+    rg = _mod("regression_core")
+    if rg is None:
+        return
+    try:
+        r = rg.promote_from_result(result, task_class=state.get("task_class", ""), target=target)
+        if r.get("added"):
+            _emit("regression_promoted", {"key": r.get("key"), "kind": result.get("result"),
+                                          "task_class": state.get("task_class")})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # P5 ── DAG schedule hint (default-on, multi-file only) ───────────────────────

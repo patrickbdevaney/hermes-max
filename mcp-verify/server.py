@@ -353,6 +353,46 @@ def protocol_check(path: str) -> dict:
 
 @mcp.tool()
 @_threaded
+def promote_counterexample(trace: str, task_class: str = "", target: str = "",
+                           language: str = "python", kind: str = "counterexample",
+                           test_code: str = "") -> dict:
+    """Phase 6 — promote a counterexample / seeded bug / rejected spec into the growing,
+    DEDUPED regression corpus so future runs catch it for free. If `test_code` is supplied
+    (e.g. the property that caught the bug) it is written as a regression test guard. Cheap,
+    idempotent on a normalized dedup key."""
+    try:
+        import regression_core
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"regression_core unavailable: {e}"}
+    return regression_core.promote(trace, task_class, target, language, kind, test_code)
+
+
+@mcp.tool()
+@_threaded
+def regression_corpus(task_class: str = "") -> dict:
+    """Phase 6 — list the regression corpus (optionally by task class): counts + recent
+    entries. The compounding moat the verify/formal MCPs feed."""
+    try:
+        import regression_core
+    except Exception as e:  # noqa: BLE001
+        return {"count": 0, "error": f"regression_core unavailable: {e}"}
+    return regression_core.corpus(task_class or None)
+
+
+@mcp.tool()
+@_threaded
+def seeded_bug_table() -> dict:
+    """Phase 6 — roll up the regression corpus by task class + kind (feeds the eval's
+    seeded-bug catch table)."""
+    try:
+        import regression_core
+    except Exception as e:  # noqa: BLE001
+        return {"total": 0, "error": f"regression_core unavailable: {e}"}
+    return regression_core.seeded_bug_table()
+
+
+@mcp.tool()
+@_threaded
 def formal_stats() -> dict:
     """Report the formal-verification ladder's configuration: whether a spec-generation
     model/pool is reachable, mutation budget, min kill-rate, and which languages have
