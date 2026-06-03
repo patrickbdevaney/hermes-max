@@ -270,6 +270,61 @@ def smt_verify(path: str, task_spec: str = "", agent_tests: str = "") -> dict:
 
 @mcp.tool()
 @_threaded
+def edge_contract_monitor(path: str, contracts: str = "") -> dict:
+    """Part A Phase 4 — assume-guarantee contracts at module EDGES, installed as dependency-
+    free RUNTIME MONITORS (pre/post assertions wrapping public functions) where static proof
+    is infeasible. A verified callee's postcondition becomes the caller's assumption. The
+    cheap pool proposes the contracts; supply `contracts` to use your own. Never raises."""
+    try:
+        import composition
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"composition unavailable: {e}"}
+    return composition.edge_contract_monitor(path, contracts or None)
+
+
+@mcp.tool()
+@_threaded
+def stateful_test(path: str, machine_code: str, max_examples: int = 100) -> dict:
+    """Part A Phase 4 — stateful property testing for cross-module state spanning files.
+    `machine_code` defines a Hypothesis RuleBasedStateMachine (TestMachine) exercising the
+    module; Hypothesis searches for a violating SEQUENCE of transitions that single-call PBT
+    can't reach. Adjudicated by the pytest oracle. Returns {status, counterexample}."""
+    try:
+        import composition
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "reason": f"composition unavailable: {e}"}
+    return composition.stateful_test(path, machine_code, max_examples)
+
+
+@mcp.tool()
+@_threaded
+def concurrency_check(path: str) -> dict:
+    """Part A Phase 4 — route shared-memory-concurrent Rust to Loom (exhaustive interleavings,
+    bounded preemptions) / Shuttle (randomized); Kani cannot check concurrency. Triggers only
+    when concurrency primitives are present; degrades with a directive when the crate isn't
+    wired."""
+    try:
+        import composition
+    except Exception as e:  # noqa: BLE001
+        return {"result": "unknown", "reason": f"composition unavailable: {e}"}
+    return composition.concurrency_check(path)
+
+
+@mcp.tool()
+@_threaded
+def protocol_check(path: str) -> dict:
+    """Part A Phase 4 — route a multi-node protocol DESIGN to TLA+/Apalache or Alloy (check
+    the design, where distributed bugs are cheapest). Triggers only on a distributed-protocol
+    signal; degrades with a directive when no model checker is installed."""
+    try:
+        import composition
+    except Exception as e:  # noqa: BLE001
+        return {"result": "unknown", "reason": f"composition unavailable: {e}"}
+    return composition.protocol_check(path)
+
+
+@mcp.tool()
+@_threaded
 def formal_stats() -> dict:
     """Report the formal-verification ladder's configuration: whether a spec-generation
     model/pool is reachable, mutation budget, min kill-rate, and which languages have
