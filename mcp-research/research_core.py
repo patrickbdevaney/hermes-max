@@ -51,6 +51,11 @@ except Exception:  # noqa: BLE001
 
 import session_state  # per-session research budget/cooldown + exhaustion gate
 
+try:
+    import rank as _rank  # embeddings + cosine for intra-request saturation (Phase 1)
+except Exception:  # noqa: BLE001
+    _rank = None  # type: ignore
+
 # ── config (all local defaults; the chat endpoint is the only "model" dep) ────
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "").rstrip("/")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", os.environ.get("DISTILL_MODEL", "/model"))
@@ -69,12 +74,20 @@ LLM_MAX_TOKENS = int(os.environ.get("RESEARCH_LLM_MAX_TOKENS", "6000"))
 
 # Bounds — the overspawning guard. Conservative by default, all configurable.
 MAX_RESEARCH_LOOPS = int(os.environ.get("MAX_RESEARCH_LOOPS", "3"))
+# Phase 1: deep_research is now a QUALITY-GATED wave loop, not a blunt pass count.
+# A wave = develop→explore→retain for the current gap set; we stop on full
+# coverage, saturation, or the wall budget. The env name is kept for compat.
+RESEARCH_MAX_WAVES = int(os.environ.get("RESEARCH_MAX_WAVES", os.environ.get("MAX_RESEARCH_LOOPS", "3")))
 MAX_SUBGOALS = int(os.environ.get("RESEARCH_MAX_SUBGOALS", "5"))
 QUERIES_PER_SUBGOAL = int(os.environ.get("RESEARCH_QUERIES_PER_SUBGOAL", "4"))
 MAX_SOURCES_PER_QUERY = int(os.environ.get("RESEARCH_MAX_SOURCES_PER_QUERY", "3"))
 MAX_TOTAL_SOURCES = int(os.environ.get("RESEARCH_MAX_TOTAL_SOURCES", "8"))
-WALL_BUDGET_S = float(os.environ.get("RESEARCH_WALL_BUDGET_S", "600"))
+# The loop is now scrape-bound (wider coverage), so the wall budget is larger.
+WALL_BUDGET_S = float(os.environ.get("RESEARCH_WALL_BUDGET_S", "900"))
 MIN_INDEPENDENT_SOURCES = int(os.environ.get("RESEARCH_MIN_SOURCES", "2"))
+# Saturation thresholds (Phase 1, ported from banyan's intra-session signals).
+RESEARCH_MARGINAL_GAIN_FLOOR = float(os.environ.get("RESEARCH_MARGINAL_GAIN_FLOOR", "0.15"))
+RESEARCH_DRIFT_COSINE = float(os.environ.get("RESEARCH_DRIFT_COSINE", "0.93"))
 
 # ── Adaptive-retrieval CORPUS-FIRST gate (gbrain "brain-first lookup") ────────
 # Before the expensive cascade, deep_research asks the RAG store whether prior
@@ -367,10 +380,16 @@ def plan_research(question: str) -> dict[str, Any]:
 
 # ── STAGE 2: develop_queries (diversity → counters echo chamber) ──────────────
 _QUERY_SYS = (
-    "Generate diverse, COMPLEMENTARY web-search queries for the sub-goal — vary the "
-    "abstraction level (broad vs specific), phrasing, and angle so they retrieve "
-    "DIFFERENT sources, NOT near-duplicates. Prefer queries likely to surface "
-    "primary/official sources. Return a STRICT JSON array of strings only."
+    "Generate diverse, COMPLEMENTARY web-search queries for the sub-goal. Maximize "
+    "SOURCE diversity, not just string diversity, two ways:\n"
+    "1. PERSPECTIVE (STORM): adopt 2-4 distinct expert personas relevant to the topic "
+    "(e.g. implementer, security-auditor, economist, end-user) and write one query "
+    "from each — different personas surface different sources.\n"
+    "2. ABSTRACTION: vary altitude across three levels — LANDSCAPE (broad overview / "
+    "state of the art), MECHANISM (how it works / specific behaviour), and FRONTIER "
+    "(failure modes, criticism, head-to-head comparison/benchmark).\n"
+    "Prefer queries likely to surface primary/official sources, NOT near-duplicates. "
+    "Return a STRICT JSON array of strings only."
 )
 
 
@@ -400,8 +419,16 @@ def develop_queries(subgoal: str, n: int = QUERIES_PER_SUBGOAL) -> dict[str, Any
          {"role": "user", "content": f"Sub-goal: {subgoal}\nGenerate {n} queries."}],
         temperature=0.5))
     queries = [str(q).strip() for q in parsed if str(q).strip()] if isinstance(parsed, list) else []
-    if not queries:  # graceful deterministic fallback: a few angle variants
-        queries = [subgoal, f"{subgoal} documentation", f"{subgoal} example", f"{subgoal} best practices"]
+    if not queries:
+        # graceful deterministic fallback: three abstraction altitudes + variants,
+        # mirroring the perspective/abstraction intent without a model.
+        queries = [
+            f"{subgoal} overview",                 # landscape
+            f"how does {subgoal} work",            # mechanism
+            f"{subgoal} failure modes limitations",  # frontier
+            f"{subgoal} documentation",
+            f"{subgoal} best practices",
+        ]
     queries = _dedup_queries(queries)[:n]
     otel_emit.record("queries_developed", {"subgoal": subgoal, "n": len(queries)})
     return {"ok": True, "subgoal": subgoal, "queries": queries}
@@ -843,6 +870,93 @@ def _citation_verify(report_md: str, sources: list[dict]) -> dict[str, Any]:
             "source_attribution": attribution, "sources_checked": len(sources), "backend": backend}
 
 
+# ── PHASE 1: in-request iterative coverage loop ──────────────────────────────
+# Coverage = fraction of sub-goals with >= MIN_INDEPENDENT_SOURCES independent
+# domains (one vote per domain, the verify-gate independence rule). Each retained
+# source is tagged with its sub-goal (via the query→subgoal map) in the loop.
+def _coverage_state(subgoals: list[str], sources: list[dict]) -> dict[str, set]:
+    cov: dict[str, set] = {sg: set() for sg in subgoals}
+    for s in sources:
+        sg = s.get("_subgoal")
+        dom = s.get("domain") or _domain(s.get("url", ""))
+        if sg in cov and dom:
+            cov[sg].add(dom)
+    return cov
+
+
+def _coverage_fraction(cov: dict[str, set]) -> float:
+    if not cov:
+        return 0.0
+    covered = sum(1 for d in cov.values() if len(d) >= MIN_INDEPENDENT_SOURCES)
+    return covered / len(cov)
+
+
+def _assess_saturation(new_sources: list[dict], prior_total: int, centroid):
+    """Port banyan's intra-session signals to intra-request: marginal-gain decline
+    (this wave added < floor of prior total) OR embedding drift (new chunks too
+    close to the run's evidence centroid). Returns (saturated, new_centroid, info)."""
+    new_unique = len(new_sources)
+    gain = (new_unique / prior_total) if prior_total else 1.0
+    marginal = prior_total > 0 and gain < RESEARCH_MARGINAL_GAIN_FLOOR
+    drift = False
+    new_centroid = centroid
+    if _rank is not None and new_sources:
+        texts = [(s.get("markdown") or s.get("snippet", ""))[:2000] for s in new_sources]
+        try:
+            vecs = _rank._embed(texts)
+        except Exception:  # noqa: BLE001
+            vecs = None
+        if vecs:
+            mean = [sum(col) / len(vecs) for col in zip(*vecs)]
+            if centroid is not None:
+                sims = [_rank._cosine(v, centroid) for v in vecs]
+                if sims and (sum(sims) / len(sims)) >= RESEARCH_DRIFT_COSINE:
+                    drift = True
+            new_centroid = mean if centroid is None else [0.7 * a + 0.3 * b for a, b in zip(centroid, mean)]
+    return (marginal or drift), new_centroid, {
+        "marginal_gain": round(gain, 3), "marginal_saturated": marginal, "drift_saturated": drift}
+
+
+_REFLECT_SYS = (
+    "You are a research gap analyst (STORM expert-questioning + Self-Ask). Given the "
+    "sub-goals, the evidence retained so far (domains per sub-goal), and which "
+    "sub-goals are under-covered, return STRICT JSON: {\"uncovered_subgoals\": [...], "
+    "\"unresolved_contradictions\": [...], \"followup_queries\": [\"targeted query for "
+    "the gap\", ...]}. followup_queries must target the GAPS specifically — do not "
+    "restate covered ground. No prose outside the JSON."
+)
+
+
+def reflect_gaps(subgoals: list[str], sources: list[dict], coverage: dict[str, set]) -> dict[str, Any]:
+    """After a wave, decide what's still missing and propose targeted follow-up
+    queries. Cheap, short-context (the canonical 'mildly intelligent rote call').
+    Deterministic fallback: a sub-goal is uncovered if < MIN_INDEPENDENT_SOURCES
+    independent domains; follow-ups are its abstraction-altitude variants."""
+    uncovered = [sg for sg in subgoals if len(coverage.get(sg, set())) < MIN_INDEPENDENT_SOURCES]
+    evidence = "\n".join(
+        f"- {sg}: {len(coverage.get(sg, set()))} domain(s) [{', '.join(sorted(coverage.get(sg, set()))[:4])}]"
+        for sg in subgoals)
+    parsed = _json_from_llm(_llm(
+        [{"role": "system", "content": _REFLECT_SYS},
+         {"role": "user", "content":
+            f"Sub-goals + coverage:\n{evidence}\n\nUnder-covered: {uncovered}\n"
+            "Propose follow-up queries that close the gaps."}],
+        temperature=0.3, max_tokens=2000))
+    if isinstance(parsed, dict):
+        fq = [str(q).strip() for q in (parsed.get("followup_queries") or []) if str(q).strip()]
+        if fq:
+            unc = [str(s).strip() for s in (parsed.get("uncovered_subgoals") or []) if str(s).strip()] or uncovered
+            contra = [str(c).strip() for c in (parsed.get("unresolved_contradictions") or []) if str(c).strip()]
+            return {"uncovered_subgoals": unc, "unresolved_contradictions": contra,
+                    "followup_queries": _dedup_queries(fq)[:6]}
+    # deterministic: abstraction-altitude variants of each uncovered sub-goal
+    fq = []
+    for sg in uncovered:
+        fq += [f"{sg} overview", f"how does {sg} work", f"{sg} failure modes limitations"]
+    return {"uncovered_subgoals": uncovered, "unresolved_contradictions": [],
+            "followup_queries": _dedup_queries(fq)[:6]}
+
+
 # ── ORCHESTRATOR: deep_research ───────────────────────────────────────────────
 def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
                   max_total_sources: int = MAX_TOTAL_SOURCES,
@@ -968,38 +1082,77 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
     subgoals = plan["subgoals"]
     all_sources: list[dict] = []
     seen_urls: list[str] = []
-    loops = 0
     echo_blocked_total = 0
     low_authority_total = 0
     stop_reason = "completed"
+    max_waves = max(1, min(int(max_loops), 8))  # max_loops kept for compat; now WAVE-gated
+    centroid = None  # running evidence centroid for drift saturation
 
-    for loop in range(max_loops):
-        loops = loop + 1
-        if time.monotonic() - t0 > WALL_BUDGET_S:
-            stop_reason = "wall-clock budget"
-            break
-        if len(all_sources) >= max_total_sources:
-            stop_reason = "source cap"
-            break
-        subgoal = subgoals[loop % len(subgoals)]
-        dq = develop_queries(subgoal)
-        ex = explore(dq["queries"], seen_urls=seen_urls,
+    def _run_wave(qmap: list[tuple[str, str]]) -> list[dict]:
+        """Explore the (query→subgoal) batch; tag each retained source with its
+        sub-goal so coverage can be computed."""
+        nonlocal seen_urls, echo_blocked_total, low_authority_total
+        ex = explore([q for q, _ in qmap], seen_urls=seen_urls,
                      max_total=max(1, max_total_sources - len(all_sources)),
                      category=category)
         new = ex.get("sources", [])
-        all_sources.extend(new)
+        q2sg = {q: sg for q, sg in qmap}
+        for s in new:
+            s["_subgoal"] = q2sg.get(s.get("query"))
         seen_urls = ex.get("seen_urls", seen_urls)
         echo_blocked_total += ex.get("echo_chamber_blocked", 0)
         low_authority_total += ex.get("low_authority_filtered", 0)
-        # tqdm-style empirical progress (Stage 7a): item N/total, per-loop yield,
-        # running elapsed — the live log derives the ETA. Real movement, not "running…".
+        return new
+
+    # ── Wave 1: one batch of diverse (perspective × abstraction) queries per sub-goal ──
+    wave1: list[tuple[str, str]] = []
+    for sg in subgoals:
+        for q in develop_queries(sg)["queries"]:
+            wave1.append((q, sg))
+    waves = 1
+    new = _run_wave(wave1)
+    all_sources.extend(new)
+    otel_emit.record("research_progress", {
+        "tool": "deep_research", "done": len(all_sources), "total": max_total_sources,
+        "item": f"wave 1/{max_waves}: {len(subgoals)} sub-goal(s)",
+        "per_item": f"+{len(new)} sources", "elapsed_s": round(time.monotonic() - t0, 1)})
+
+    # ── Waves 2..N: assess coverage/saturation, reflect on gaps, target the gaps ──
+    while waves < max_waves:
+        if time.monotonic() - t0 > WALL_BUDGET_S:
+            stop_reason = "wall-clock budget"; break
+        if len(all_sources) >= max_total_sources:
+            stop_reason = "source cap"; break
+        cov = _coverage_state(subgoals, all_sources)
+        coverage = _coverage_fraction(cov)
+        saturated, centroid, sat = _assess_saturation(new, len(all_sources) - len(new), centroid)
+        otel_emit.record("research_coverage", {
+            "tool": "deep_research", "wave": waves, "coverage": round(coverage, 3),
+            "covered": sum(1 for d in cov.values() if len(d) >= MIN_INDEPENDENT_SOURCES),
+            "subgoals": len(subgoals)})
+        otel_emit.record("research_saturation", {"tool": "deep_research", "wave": waves, **sat})
+        if coverage >= 1.0:
+            stop_reason = "covered"; break
+        if saturated:
+            stop_reason = "saturated"; break
+        gaps = reflect_gaps(subgoals, all_sources, cov)
+        fq = gaps.get("followup_queries", [])
+        if not fq:
+            stop_reason = "no gaps"; break
+        uncovered = gaps.get("uncovered_subgoals") or [
+            sg for sg in subgoals if len(cov.get(sg, set())) < MIN_INDEPENDENT_SOURCES]
+        sg_label = uncovered[0] if uncovered else subgoals[0]
+        waves += 1
+        new = _run_wave([(q, sg_label) for q in fq])  # targeted gap wave
+        all_sources.extend(new)
         otel_emit.record("research_progress", {
             "tool": "deep_research", "done": len(all_sources), "total": max_total_sources,
-            "item": f"loop {loops}/{max_loops}: {subgoal[:48]}",
+            "item": f"wave {waves}/{max_waves}: gaps ({len(uncovered)} uncovered)",
             "per_item": f"+{len(new)} sources", "elapsed_s": round(time.monotonic() - t0, 1)})
-        if not new and loop > 0:
-            stop_reason = "no new sources"
-            break
+        if not new:
+            stop_reason = "no new sources"; break
+
+    loops = waves  # result/otel field kept as `loops` for back-compat
 
     # extract -> verify (intermediate) -> synthesize
     claims = _extract_claims(question, all_sources)
