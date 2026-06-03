@@ -371,10 +371,16 @@ def _post_llm_call(response: Any = None, **kw: Any) -> None:
     cwd = os.getcwd()
     state = _load_state(cwd)
     toks = _extract_tokens(resp)
-    payload = {"step": int(state.get("current_step", 1)),
-               "elapsed_s": _coerce_int(kw.get("elapsed_s") or kw.get("duration_s")) or 0}
+    elapsed_s = _coerce_int(kw.get("elapsed_s") or kw.get("duration_s")) or 0
+    payload = {"step": int(state.get("current_step", 1)), "elapsed_s": elapsed_s}
     payload.update(toks)
     _emit("llm_response", payload)
+    # P1 — enforced cost/latency/backend attribution for the local executor call.
+    if _enforce is not None:
+        try:
+            _enforce.profile_executor_call(state, toks, elapsed_s * 1000)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _post_tool_call(tool_name: str = "", args: Optional[dict] = None, result: Any = None, **kw: Any):

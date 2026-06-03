@@ -161,3 +161,13 @@ servers:
     profiles: [gpu_local, lean_cloud]
     requires: []
     degrades_to: pure static analysis (ast + regex); no model/network; greenfield returns an empty map
+
+  - name: costprofiler
+    dir: mcp-costprofiler
+    port: 9116
+    port_env: MCP_COSTPROFILER_PORT
+    health: /health
+    register_as: hermes-max-costprofiler
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: reads the lib/inference ledger + executor-call log; no model/network; empty until calls are logged

@@ -34,7 +34,7 @@ from typing import Any, Optional
 # mcp-escalation + mcp-verify; add the rest here so a missing dir degrades to None.
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 for _d in ("mcp-verify", "mcp-checkpoint", "mcp-research", "mcp-watchdog",
-           "mcp-knowledge-graph", "mcp-codebase-rag"):
+           "mcp-knowledge-graph", "mcp-codebase-rag", "mcp-costprofiler", "mcp-search"):
     _p = os.path.join(_REPO, _d)
     if _p not in sys.path:
         sys.path.append(_p)
@@ -52,6 +52,7 @@ ENF_WATCHDOG = _on("CONDUCTOR_ENFORCE_WATCHDOG")
 ENF_KG = _on("CONDUCTOR_ENFORCE_KG")
 ENF_CLASSIFY = _on("CONDUCTOR_ENFORCE_CLASSIFY")
 ENF_RAG = _on("CONDUCTOR_ENFORCE_RAG")
+ENF_PROFILE = _on("CONDUCTOR_ENFORCE_PROFILE")  # P1 cost attribution (enforced, post_llm_call)
 _MULTIFILE_HINT = ("multiple files", "across", "refactor", "rename", "move ", "each module",
                    "every file", "all the", "throughout", "codebase-wide", "multi-file")
 WRITE_MIN_BYTES = int(os.environ.get("CONDUCTOR_VERIFY_WRITE_MIN_BYTES", "64"))
@@ -282,6 +283,28 @@ def rag_before_multifile(cwd: str, state: dict[str, Any], step_desc: str) -> Opt
         lines.append(f"- `{loc}`: {snip}")
     return ("## Prior patterns (enforced RAG, multi-file edit)\nRelevant existing code to "
             "match before editing across files:\n" + "\n".join(lines))
+
+
+# P1 ── cost/latency/backend attribution (enforced, post_llm_call) ────────────
+def profile_executor_call(state: dict[str, Any], toks: dict[str, int],
+                          wall_ms: int) -> None:
+    """Attribute the local executor's call to the local-serial backend (the external hermes
+    loop bypasses the lib/inference ledger). Enforced so nothing escapes accounting; emits a
+    span attribute set. ~$0 (sunk hardware). Degrades to a no-op if the profiler is absent."""
+    if not ENF_PROFILE:
+        return
+    prof = _mod("profiler_core")
+    if prof is None:
+        return
+    tc = state.get("task_class") or "code_execute"
+    in_tok = int(toks.get("prompt_tokens", 0) or 0)
+    out_tok = int(toks.get("output_tokens", 0) or 0)
+    try:
+        prof.log_call("local-serial", tc, in_tok, out_tok, 0.0, int(wall_ms),
+                      provider="local_vllm", source="executor")
+        _emit("cost_attributed", prof.span_attrs("local-serial", tc, in_tok, out_tok, 0.0, int(wall_ms)))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def enforce_stats() -> dict[str, Any]:
