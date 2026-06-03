@@ -349,12 +349,15 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
             if g:
                 lines += ["", g]
         # P5 — DAG schedule hint (multi-file only): ready wave + parallel/isolation + conflicts.
-        try:
-            dg = _enforce.dag_schedule_hint(state, plan)
-            if dg:
-                lines += ["", dg]
-        except Exception:  # noqa: BLE001
-            pass
+        # P7 — committee-planning availability hint (critical planning + parallel backend up).
+        for hint_fn in (_enforce.dag_schedule_hint, _enforce.committee_hint):
+            try:
+                h = (hint_fn(state, plan) if hint_fn is _enforce.dag_schedule_hint
+                     else hint_fn(state, step_desc))
+                if h:
+                    lines += ["", h]
+            except Exception:  # noqa: BLE001
+                pass
     for g in (state.get("enforce_guidance") or []):
         lines += ["", str(g)]
     state["enforce_guidance"] = []

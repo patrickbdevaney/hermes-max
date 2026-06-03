@@ -57,6 +57,7 @@ ENF_PROFILE = _on("CONDUCTOR_ENFORCE_PROFILE")  # P1 cost attribution (enforced,
 ENF_ROUTE = _on("CONDUCTOR_ENFORCE_ROUTE")      # P2 bandit route read (pre_llm_call) + write (post-run)
 ENF_DAG = _on("CONDUCTOR_ENFORCE_DAG")          # P5 DAG schedule hint (pre_llm_call, multi-file only)
 ENF_REGRESSION = _on("CONDUCTOR_ENFORCE_REGRESSION")  # P6 auto-promote counterexamples (enforced)
+ENF_COMMITTEE = _on("CONDUCTOR_ENFORCE_COMMITTEE")    # P7 committee-availability HINT (cheap; no auto-spend)
 _MULTIFILE_HINT = ("multiple files", "across", "refactor", "rename", "move ", "each module",
                    "every file", "all the", "throughout", "codebase-wide", "multi-file")
 WRITE_MIN_BYTES = int(os.environ.get("CONDUCTOR_VERIFY_WRITE_MIN_BYTES", "64"))
@@ -352,6 +353,39 @@ def log_run_outcome(cwd: str, state: dict[str, Any], solved: bool,
     except Exception:  # noqa: BLE001
         return
     _emit("outcome_logged", {"task_class": tc, "backend": backend, "solved": solved})
+
+
+# P7 ── committee-planning availability hint (critical planning, parallel backend up) ──
+def committee_hint(state: dict[str, Any], step_desc: str) -> Optional[str]:
+    """Surface committee planning AVAILABILITY for a critical, planning-flavoured step when a
+    PARALLEL backend (fabric/cloud) is up. This is a free SUGGESTION — it does NOT spend (the
+    committee_plan tool is voluntary + critical-gated). Never suggests serializing on local.
+    Once per step."""
+    if not ENF_COMMITTEE or not (step_desc or "").strip():
+        return None
+    step = int(state.get("current_step", 1))
+    if state.get("committee_step") == step:
+        return None
+    state["committee_step"] = step
+    # only for plan/design/architecture steps the classifier marked critical
+    if not any(w in step_desc.lower() for w in ("plan", "design", "architect", "decompose")):
+        return None
+    if not (state.get("route") or {}).get("escalate") and state.get("task_class") != "plan":
+        return None
+    dc = _mod("dispatch_core")
+    if dc is None:
+        return None
+    try:
+        tgt = dc.target_for(3)
+    except Exception:  # noqa: BLE001
+        return None
+    if tgt.get("backend") == "local-serial" or not tgt.get("parallel"):
+        return None  # never suggest a committee with no parallel backend
+    _emit("committee_available", {"step": step, "backend": tgt.get("backend")})
+    return (f"## Committee planning available (gated)\nThis is a high-consequence planning "
+            f"step and a parallel backend (**{tgt.get('backend')}**) is up. Consider "
+            f"`committee_plan(task, critical=true)` — vote 2-3 independent plan drafts (cloud/"
+            f"fabric, never local) and take the highest-scored. Off by default; use only here.")
 
 
 # P6 ── auto-promote counterexamples to the regression corpus (enforced) ──────

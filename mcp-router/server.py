@@ -25,6 +25,7 @@ for _d in (_REPO, *(os.path.join(_REPO, d) for d in
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
+import committee_core
 import dag_core
 import dispatch_core
 import router_core
@@ -147,6 +148,24 @@ def dag_schedule(steps: list, done: list | None = None, repo_path: str = "") -> 
 def dag_stats() -> dict:
     """Report the DAG scheduling rule (local = context-isolated serial, not parallel)."""
     return dag_core.dag_stats()
+
+
+@mcp.tool()
+@_threaded
+def committee_plan(task: str, n: int = 3, repo_map: str = "", critical: bool = False,
+                   task_class: str = "plan") -> dict:
+    """Phase 7 — gated committee planning for a high-consequence planning decision. OFF unless
+    critical=True. Fans 2-3 plan drafts across cloud-deepseek (V4 Pro) + fabric ONLY (never
+    serialized on local), scores by structural well-formedness × the Phase-2 backend accuracy
+    weight (oracle-scored where a proposed gate is checkable), returns the winning plan."""
+    return committee_core.committee_plan(task, n, repo_map, critical, task_class)
+
+
+@mcp.tool()
+@_threaded
+def committee_stats() -> dict:
+    """Report committee config (OFF by default; cloud/fabric-only fan-out, never local)."""
+    return committee_core.committee_stats()
 
 
 @mcp.tool()
