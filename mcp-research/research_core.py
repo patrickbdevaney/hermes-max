@@ -56,6 +56,11 @@ try:
 except Exception:  # noqa: BLE001
     _rank = None  # type: ignore
 
+try:
+    import pool as _pool  # multi-provider cheap fan-out (Phase 3); None → _llm path
+except Exception:  # noqa: BLE001
+    _pool = None  # type: ignore
+
 # ── config (all local defaults; the chat endpoint is the only "model" dep) ────
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "").rstrip("/")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", os.environ.get("DISTILL_MODEL", "/model"))
@@ -88,6 +93,10 @@ MIN_INDEPENDENT_SOURCES = int(os.environ.get("RESEARCH_MIN_SOURCES", "2"))
 # Saturation thresholds (Phase 1, ported from banyan's intra-session signals).
 RESEARCH_MARGINAL_GAIN_FLOOR = float(os.environ.get("RESEARCH_MARGINAL_GAIN_FLOOR", "0.15"))
 RESEARCH_DRIFT_COSINE = float(os.environ.get("RESEARCH_DRIFT_COSINE", "0.93"))
+# Relevance cascade COARSE rung (Phase 3.2): embed candidate snippets vs the query
+# BEFORE any LLM/cross-encoder sees them; drop the off-topic tail. Skipped wholesale
+# when no EMBED_BASE_URL (rank._embed → None) so the keyless path is unchanged.
+RESEARCH_RELEVANCE_FLOOR = float(os.environ.get("RESEARCH_RELEVANCE_FLOOR", "0.30"))
 
 # ── Adaptive-retrieval CORPUS-FIRST gate (gbrain "brain-first lookup") ────────
 # Before the expensive cascade, deep_research asks the RAG store whether prior
@@ -435,6 +444,32 @@ def develop_queries(subgoal: str, n: int = QUERIES_PER_SUBGOAL) -> dict[str, Any
 
 
 # ── STAGE 3: explore (dedup + authority rank + bounded breadth) ───────────────
+def _relevance_prefilter(query: str, candidates: list[dict[str, Any]],
+                         keep_min: int) -> tuple[list[dict[str, Any]], int]:
+    """COARSE rung of the relevance cascade (Phase 3.2). Embeds the query + each
+    candidate's (title+snippet) in ONE batched call, scores cosine, and drops the
+    tail below RESEARCH_RELEVANCE_FLOOR — but never below `keep_min` survivors, so a
+    query is never starved. Pure no-op (returns candidates, 0) when:
+      • the embed backend is unavailable (rank is None / no EMBED_BASE_URL), or
+      • there is nothing to gain (≤ keep_min candidates).
+    This is the only near-free filter that runs BEFORE the cross-encoder/LLM, so
+    every downstream (paid) rung sees a smaller, on-topic set."""
+    if _rank is None or len(candidates) <= max(1, keep_min):
+        return candidates, 0
+    texts = [f"{c.get('title','')} {c.get('content','')}"[:800] for c in candidates]
+    embs = _rank._embed([query] + texts)
+    if not embs or len(embs) != len(texts) + 1:
+        return candidates, 0  # backend down or shape mismatch → leave untouched
+    qv, cvs = embs[0], embs[1:]
+    scored = sorted(
+        ((_rank._cosine(qv, cv), c) for cv, c in zip(cvs, candidates)),
+        key=lambda t: t[0], reverse=True)
+    kept = [c for s, c in scored if s >= RESEARCH_RELEVANCE_FLOOR]
+    if len(kept) < keep_min:                       # never starve the query
+        kept = [c for _, c in scored[:keep_min]]
+    return kept, len(candidates) - len(kept)
+
+
 def explore(queries: list[str], seen_urls: list[str] | None = None,
             max_sources_per_query: int = MAX_SOURCES_PER_QUERY,
             max_total: int = MAX_TOTAL_SOURCES,
@@ -454,12 +489,20 @@ def explore(queries: list[str], seen_urls: list[str] | None = None,
     sources: list[dict[str, Any]] = []
     echo_blocked = 0
     low_authority_filtered = 0
+    relevance_filtered = 0
     fetch_attempts = 0
 
     for q in queries:
         if len(sources) >= max_total:
             break
         candidates = _search(q, limit=max(max_sources_per_query * 3, 8), category=category)
+        # COARSE relevance rung (Phase 3.2): near-free embedding cosine pre-filter.
+        # Embed the candidate snippets + query in ONE call and drop the off-topic
+        # tail BEFORE the cross-encoder/LLM ever sees them. Guarded: a None embed
+        # backend (no EMBED_BASE_URL) leaves `candidates` untouched. Never zeroes a
+        # query — we keep at least the top `max_sources_per_query` by cosine.
+        candidates, _rf = _relevance_prefilter(q, candidates, max_sources_per_query)
+        relevance_filtered += _rf
         # authority-aware re-rank of candidates for THIS query (primary first).
         for c in candidates:
             c["_authority"] = authority_score(c.get("url", ""))
@@ -511,14 +554,18 @@ def explore(queries: list[str], seen_urls: list[str] | None = None,
     otel_emit.record("sources_explored", {
         "queries": len(queries), "sources": len(sources), "fetch_attempts": fetch_attempts,
         "echo_chamber_blocked": echo_blocked, "low_authority_filtered": low_authority_filtered,
+        "relevance_prefiltered": relevance_filtered,
     })
     if echo_blocked:
         otel_emit.record("echo_chamber_blocked", {"count": echo_blocked})
     if low_authority_filtered:
         otel_emit.record("low_authority_filtered", {"count": low_authority_filtered})
+    if relevance_filtered:
+        otel_emit.record("relevance_prefiltered", {"count": relevance_filtered})
     return {"ok": True, "queries": queries, "count": len(sources), "sources": sources,
             "seen_urls": sorted(seen_norm), "echo_chamber_blocked": echo_blocked,
-            "low_authority_filtered": low_authority_filtered}
+            "low_authority_filtered": low_authority_filtered,
+            "relevance_prefiltered": relevance_filtered}
 
 
 # ── STAGE 4a: verify_claims (the differentiator — ≥2 independent sources) ──────
@@ -555,25 +602,31 @@ _VERIFY_BATCH_SIZE = int(os.environ.get("RESEARCH_VERIFY_BATCH", "8"))
 
 
 def _label_support_batch(pairs: list[tuple[str, str]]) -> list[str]:
-    """Label many (claim, snippet) pairs. One cheap call per RESEARCH_VERIFY_BATCH
-    pairs; deterministic fallback ('unchecked') when no model. Order-preserving."""
+    """Label many (claim, snippet) pairs. Packs RESEARCH_VERIFY_BATCH pairs per
+    cheap call; when the multi-provider pool is configured the chunk-calls fan out
+    CONCURRENTLY across lanes (Phase 3) — else sequential _llm. Deterministic
+    fallback ('unchecked') when no model. Order-preserving."""
     out: list[str] = ["unchecked"] * len(pairs)
-    if not pairs or not VLLM_BASE_URL:
+    if not pairs or not (VLLM_BASE_URL or (_pool and _pool.available())):
         return out
-    for start in range(0, len(pairs), _VERIFY_BATCH_SIZE):
-        chunk = pairs[start:start + _VERIFY_BATCH_SIZE]
-        user = "\n\n".join(f"[{i}] CLAIM: {c}\nEXCERPT:\n{s[:1200]}" for i, (c, s) in enumerate(chunk))
-        parsed = _json_from_llm(_llm(
-            [{"role": "system", "content": _VERIFY_BATCH_SYS}, {"role": "user", "content": user}],
-            temperature=0, max_tokens=2000))
+    chunks = [pairs[s:s + _VERIFY_BATCH_SIZE] for s in range(0, len(pairs), _VERIFY_BATCH_SIZE)]
+    prompts = ["\n\n".join(f"[{i}] CLAIM: {c}\nEXCERPT:\n{s[:1200]}" for i, (c, s) in enumerate(ch)) for ch in chunks]
+    if _pool and _pool.available():
+        replies = _pool.map_cheap(prompts, system=_VERIFY_BATCH_SYS, temperature=0, max_tokens=2000)
+    else:
+        replies = [_llm([{"role": "system", "content": _VERIFY_BATCH_SYS}, {"role": "user", "content": p}],
+                        temperature=0, max_tokens=2000) for p in prompts]
+    for ci, reply in enumerate(replies):
+        parsed = _json_from_llm(reply)
+        base = ci * _VERIFY_BATCH_SIZE
         if isinstance(parsed, list):
             for item in parsed:
                 if not isinstance(item, dict):
                     continue
                 i = item.get("i")
                 lab = str(item.get("label", "")).lower().strip()
-                if isinstance(i, int) and 0 <= i < len(chunk) and lab in ("supports", "contradicts", "neutral"):
-                    out[start + i] = lab
+                if isinstance(i, int) and 0 <= i < len(chunks[ci]) and lab in ("supports", "contradicts", "neutral"):
+                    out[base + i] = lab
     return out
 
 
