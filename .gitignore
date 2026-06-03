@@ -1,8 +1,10 @@
 migration/
 .env
 # vendored browser binaries (Lightpanda ~130MB / Obscura ~80MB) — fetched per-host,
-# never committed. See .env.example LIGHTPANDA_BIN / OBSCURA_BIN.
-bin/
+# never committed (see .env.example LIGHTPANDA_BIN / OBSCURA_BIN). Tracked helper
+# scripts in bin/ are allow-listed below.
+bin/*
+!bin/hm-native
 # runtime config + state dir — the system reads live config from here (or
 # $HERMES_MAX_CONFIG_DIR); the repo ships only config/*.example.yaml. Never commit.
 .hermes-max/

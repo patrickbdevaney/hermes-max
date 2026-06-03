@@ -305,6 +305,7 @@ _verb_help() {
     dev)        echo "hm dev [--MODE] — the one-window tmux cockpit: a hermes pane, a live activity (watch) pane, and a compact status pane (mode + spend). Detachable; reattach with 'hm attach'. tmux absent → prints manual instructions." ;;
     attach)     echo "hm attach — reattach to the running 'hermes-max' tmux cockpit started by hm dev." ;;
     run)        echo "hm run \"task\" — launch the Hermes agent on a task (exec's 'hermes'). Equivalent to running 'hermes' directly." ;;
+    native)     echo "hm native \"task\" [type] — conductor plans (writes a signed PLAN.md) then hands the RAW prompt to NATIVE hermes with the full TUI. Hermes self-directs with PLAN.md as context (the lighter sibling of 'hm run', which enforces strict execute-the-plan). Runs an MCP preflight (warn-only); degrades gracefully if the conductor is down. Also callable directly as bin/hm-native." ;;
     ui-test)    echo "hm ui-test — PART V actuation equivalence test: drives a real bounded agent turn through the web UI's own API headlessly and asserts every action surfaced in the SSE visual-flow, real artifacts landed on disk, verify went green, the handback fired, a follow-up turn actuated, and zero secrets leaked. Proves the UI ACTUATES the agent (a complete replacement for hm dev + hermes), not just visualizes it. Runs in --mode free; needs the stack up (hm up)." ;;
     ui)         echo "hm ui [--port N] [--no-open] [--token [T]] — open the localhost web view: L0 ambient + L1 timeline + L2 span tree + live cost, fed by the existing livelog/ledger/OTLP over SSE. Auto-opens your browser and prints one line (http://localhost:7080). Port is sticky (~/.hermes-max/ui.conf; next free port if taken). No token needed on localhost — hardened by 127.0.0.1 bind + Origin/Host checks + a SameSite CSRF cookie. --token adds a bearer for remote/Tailscale exposure. Read-only. Ctrl-C to stop." ;;
     studio)     echo "hm studio [build] — Hermes Studio, the Tauri desktop appliance (studio/). No arg = run the dev build (opens the native window, sidecars the Python server). 'hm studio build' (or 'hm studio:build') produces the Linux .deb. Sets HERMES_MAX_ROOT to this repo so the app finds ui/server." ;;
@@ -624,6 +625,10 @@ case "${cmd}" in
     hermes --yolo -z "${_hm_exec}"; _rc=$?
     rm -f "${_hm_pf}"; [ -n "${_hm_run_id}" ] && python3 "${SCRIPTS}/complete_run.py" "${_hm_run_id}" 2>/dev/null
     exit ${_rc}
+    ;;
+  native)
+    if [ -n "${HM_PRINT:-}" ]; then echo "${REPO_ROOT}/bin/hm-native $*"; exit 0; fi
+    exec "${REPO_ROOT}/bin/hm-native" "$@"
     ;;
   setup)   _dispatch "${SCRIPTS}/setup.sh" "$@" ;;
   studio|studio:build)

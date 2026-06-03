@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# hm-native "prompt" [task_type]
+# Conductor plan (-> signed PLAN.md in cwd) then NATIVE hermes with the full TUI.
+#
+# Unlike `hm run`, hermes receives the RAW prompt and self-directs: PLAN.md sits in
+# the working directory as CONTEXT, not as the strict "execute this, do not replan"
+# contract `hm run` enforces. Full MCP layer (via the registered ~/.hermes/config.yaml),
+# full native streaming. The Python ReAct executor is NOT used — hermes runs as itself.
+#
+# Works both as `hm native "…"` (the hm CLI delegates here) and as a direct call
+# `~/hermes-max/bin/hm-native "…"`.
+set -euo pipefail
+
+PROMPT="${1:-}"
+TASK_TYPE="${2:-}"
+
+if [ -z "${PROMPT}" ]; then
+  echo "Usage: hm native \"your prompt\" [code|research|browser|synthesis]" >&2
+  exit 1
+fi
+
+# This script lives in <repo>/bin/ ; resolve the repo root from it (symlink-safe).
+REPO_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/.." && pwd)"
+ENV_FILE="${HMX_ENV_FILE:-${REPO_ROOT}/.env}"
+export HERMES_MAX_DIR="${REPO_ROOT}"
+
+command -v hermes >/dev/null 2>&1 || {
+  echo "✗ 'hermes' not on PATH — install/activate Hermes first." >&2; exit 127; }
+
+# ── Step 1: conductor plan → signed PLAN.md (best-effort; never aborts the run) ──
+# .env is sourced in a subshell so the conductor's synth chain has its provider keys.
+( set -a; [ -f "${ENV_FILE}" ] && . "${ENV_FILE}" 2>/dev/null; set +a
+  python3 "${REPO_ROOT}/scripts/hm_native_plan.py" "${PROMPT}" ${TASK_TYPE:+"${TASK_TYPE}"} ) || true
+
+# ── Step 2: MCP preflight (warn-only, never abort — hermes runs regardless) ──────
+check_mcp() {
+  local port="$1" name="$2"
+  if curl -sf -m 2 "http://localhost:${port}/health" >/dev/null 2>&1; then
+    echo "  ${name} (${port}) ✓"
+  else
+    echo "  ${name} (${port}) ✗ — not responding (start the stack: hm up / hm dev)"
+  fi
+}
+echo "── MCP preflight ──"
+check_mcp 9101 "verify"
+check_mcp 9102 "codebase-rag"
+check_mcp 9103 "knowledge-graph"
+check_mcp 9105 "escalation"
+check_mcp 9108 "search"
+check_mcp 9110 "research"
+echo ""
+
+# ── Step 3: hand off to NATIVE hermes — raw prompt, full TUI, streaming. `exec`
+# replaces this process so hermes owns the terminal and keeps the same pid. ──────
+exec hermes --yolo -z "${PROMPT}"
