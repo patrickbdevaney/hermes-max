@@ -55,3 +55,6 @@ replacements.txt
 restore_products.txt
 vendor/
 .serena/
+
+# generated full-repo dump (repo_dump.py) — large artifact, not tracked
+repo_dump.md
