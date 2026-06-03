@@ -98,9 +98,46 @@ async def _one(lane: _Lane, client: httpx.AsyncClient, messages: list[dict],
     return None
 
 
-async def map_cheap_async(prompts: list[str], system: str | None = None,
-                          temperature: float = 0.2, max_tokens: int = 1200) -> list[str | None]:
+def _select_lanes(cloud_only: bool = False) -> list[_Lane]:
+    """All lanes (groq, cerebras, local) or — when cloud_only — just the paid/cloud
+    lanes, so helper inference can reserve the local vLLM endpoint for the agent's
+    main execution driver. Returns [] when cloud_only and no cloud lane exists; the
+    caller is then expected to fall back to its own local path."""
     ls = lanes()
+    return [l for l in ls if l.name != "local"] if cloud_only else ls
+
+
+def cloud_available() -> bool:
+    """True iff at least one NON-local (Groq/Cerebras) lane is configured."""
+    return any(l.name != "local" for l in lanes())
+
+
+async def complete_one_async(messages: list[dict], temperature: float = 0.2,
+                             max_tokens: int = 1200, cloud_only: bool = False) -> str | None:
+    """A SINGLE chat completion routed across the lanes in priority order (groq →
+    cerebras → local), returning the first non-empty reply. With cloud_only it never
+    touches the local lane (returns None if no cloud lane → caller falls back)."""
+    ls = _select_lanes(cloud_only)
+    if not ls:
+        return None
+    async with httpx.AsyncClient(timeout=POOL_TIMEOUT) as client:
+        for lane in ls:
+            out = await _one(lane, client, messages, temperature, max_tokens)
+            if out:
+                return out
+    return None
+
+
+def complete_one(messages: list[dict], temperature: float = 0.2,
+                 max_tokens: int = 1200, cloud_only: bool = False) -> str | None:
+    """Sync wrapper for complete_one_async (loop-safe via _run)."""
+    return _run(complete_one_async(messages, temperature, max_tokens, cloud_only))
+
+
+async def map_cheap_async(prompts: list[str], system: str | None = None,
+                          temperature: float = 0.2, max_tokens: int = 1200,
+                          cloud_only: bool = False) -> list[str | None]:
+    ls = _select_lanes(cloud_only)
     results: list[str | None] = [None] * len(prompts)
     if not ls or not prompts:
         return results
@@ -152,12 +189,14 @@ def _run(coro: Any) -> Any:
 
 
 def map_cheap(prompts: list[str], system: str | None = None,
-              temperature: float = 0.2, max_tokens: int = 1200) -> list[str | None]:
+              temperature: float = 0.2, max_tokens: int = 1200,
+              cloud_only: bool = False) -> list[str | None]:
     """Ordered, bounded, concurrent cheap completions across the provider lanes.
-    Returns [None]*n when no lane is configured (caller keeps its deterministic path)."""
+    Returns [None]*n when no (selected) lane is configured (caller keeps its
+    deterministic path). cloud_only excludes the local vLLM lane."""
     if not prompts:
         return []
-    return _run(map_cheap_async(prompts, system, temperature, max_tokens))
+    return _run(map_cheap_async(prompts, system, temperature, max_tokens, cloud_only))
 
 
 def available() -> bool:

@@ -345,12 +345,23 @@ def _llm(messages: list[dict], max_tokens: int = LLM_MAX_TOKENS, temperature: fl
     watchdog heartbeat immediately BEFORE it starts and (via finally) immediately
     AFTER it returns or raises. check_stall(task_id=...) then sees a fresh heartbeat
     and never kills a slow-but-alive inference. See heartbeat.py / watchdog_core."""
-    if not VLLM_BASE_URL:
-        return None
-    body = {"model": VLLM_MODEL, "messages": messages,
-            "temperature": temperature, "max_tokens": max_tokens}
     heartbeat.beat("deep_research", progress=f"{_HB_PHASE}: inference start")
     try:
+        # HELPER INFERENCE routes to the cheap CLOUD pool (Groq/Cerebras) FIRST: it is
+        # fast and parallel-friendly, AND it keeps the local vLLM endpoint reserved for
+        # the agent's main execution driver (so a minutes-long research synthesis no
+        # longer competes with the executor on the single local GPU lane). The local
+        # vLLM is used only as a sovereign fallback when no cloud lane is configured or
+        # the cloud call comes back empty.
+        if _pool is not None and _pool.cloud_available():
+            out = _pool.complete_one(messages, temperature=temperature,
+                                     max_tokens=max_tokens, cloud_only=True)
+            if out:
+                return out
+        if not VLLM_BASE_URL:
+            return None
+        body = {"model": VLLM_MODEL, "messages": messages,
+                "temperature": temperature, "max_tokens": max_tokens}
         with httpx.Client(timeout=LLM_TIMEOUT) as c:
             r = c.post(f"{VLLM_BASE_URL}/chat/completions", json=body)
             r.raise_for_status()
@@ -691,8 +702,11 @@ def _label_support_batch(pairs: list[tuple[str, str]]) -> list[str]:
         return out
     chunks = [pairs[s:s + _VERIFY_BATCH_SIZE] for s in range(0, len(pairs), _VERIFY_BATCH_SIZE)]
     prompts = ["\n\n".join(f"[{i}] CLAIM: {c}\nEXCERPT:\n{s[:1200]}" for i, (c, s) in enumerate(ch)) for ch in chunks]
-    if _pool and _pool.available():
-        replies = _pool.map_cheap(prompts, system=_VERIFY_BATCH_SYS, temperature=0, max_tokens=2000)
+    if _pool and _pool.cloud_available():
+        # Fan out the verify chunks across the CLOUD lanes only (Groq/Cerebras) so the
+        # local vLLM stays free for the executor; _llm fallback below keeps it sovereign.
+        replies = _pool.map_cheap(prompts, system=_VERIFY_BATCH_SYS, temperature=0,
+                                  max_tokens=2000, cloud_only=True)
     else:
         replies = [_llm([{"role": "system", "content": _VERIFY_BATCH_SYS}, {"role": "user", "content": p}],
                         temperature=0, max_tokens=2000) for p in prompts]
