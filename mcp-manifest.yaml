@@ -171,3 +171,13 @@ servers:
     profiles: [gpu_local, lean_cloud]
     requires: []
     degrades_to: reads the lib/inference ledger + executor-call log; no model/network; empty until calls are logged
+
+  - name: router
+    dir: mcp-router
+    port: 9117
+    port_env: MCP_ROUTER_PORT
+    health: /health
+    register_as: hermes-max-router
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: deterministic UCB1 over a JSON bandit; classifier falls back to keyword rules; default route local-serial-free

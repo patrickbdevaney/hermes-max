@@ -224,9 +224,11 @@ def _handle_done(cwd: str, state: dict[str, Any]) -> None:
         _emit("run_complete", {"turns": state.get("total_turns", 0),
                                "steps": state.get("current_step", 1)})
         # B3.5 — KG task-close memory write (once per run): record what was decided + why.
+        # P2 — enforced outcome write (solved=True) closing the routing loop.
         if _enforce is not None:
             try:
                 _enforce.kg_taskclose_write(cwd, state, f"completed & verified — {summary}")
+                _enforce.log_run_outcome(cwd, state, solved=True)
             except Exception:  # noqa: BLE001
                 pass
         print(f"\n[conductor] ✓ done condition met AND verified — {summary}", flush=True)
@@ -314,6 +316,13 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
     if _enforce is not None:
         task_text = "; ".join(s.get("description", "") for s in plan.get("steps", []))[:1000]
         step_desc = sd.get("description", "")
+        # P2 — enforced route read BEFORE the model sees the task (sets state['task_class']).
+        try:
+            rl = _enforce.route_task(state, task_text)
+            if rl:
+                lines += ["", rl]
+        except Exception:  # noqa: BLE001
+            pass
         for fn, arg in ((_enforce.research_entry_gate, task_text),
                         (_enforce.classify_step, step_desc),      # B3.6 classify in-hook
                         (_enforce.rag_before_multifile, step_desc)):  # B3.7 RAG pre multi-file
@@ -469,6 +478,10 @@ def _on_session_end(**kw: Any) -> None:
         try:
             _enforce.kg_taskclose_write(cwd, state,
                                         f"session ended at step {state.get('current_step', 1)}")
+            # P2 — backstop outcome write (log_run_outcome is once-per-run; a verified done
+            # already logged solved=True, so this only fires for an unfinished run → unsolved).
+            _enforce.log_run_outcome(cwd, state, solved=bool(state.get("done_condition_met")),
+                                     failure_class="trajectory-fixable")
         except Exception:  # noqa: BLE001
             pass
     _emit("session_end", {"total_turns": state.get("total_turns", 0),

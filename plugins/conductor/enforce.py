@@ -34,7 +34,8 @@ from typing import Any, Optional
 # mcp-escalation + mcp-verify; add the rest here so a missing dir degrades to None.
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 for _d in ("mcp-verify", "mcp-checkpoint", "mcp-research", "mcp-watchdog",
-           "mcp-knowledge-graph", "mcp-codebase-rag", "mcp-costprofiler", "mcp-search"):
+           "mcp-knowledge-graph", "mcp-codebase-rag", "mcp-costprofiler", "mcp-search",
+           "mcp-router"):
     _p = os.path.join(_REPO, _d)
     if _p not in sys.path:
         sys.path.append(_p)
@@ -53,6 +54,7 @@ ENF_KG = _on("CONDUCTOR_ENFORCE_KG")
 ENF_CLASSIFY = _on("CONDUCTOR_ENFORCE_CLASSIFY")
 ENF_RAG = _on("CONDUCTOR_ENFORCE_RAG")
 ENF_PROFILE = _on("CONDUCTOR_ENFORCE_PROFILE")  # P1 cost attribution (enforced, post_llm_call)
+ENF_ROUTE = _on("CONDUCTOR_ENFORCE_ROUTE")      # P2 bandit route read (pre_llm_call) + write (post-run)
 _MULTIFILE_HINT = ("multiple files", "across", "refactor", "rename", "move ", "each module",
                    "every file", "all the", "throughout", "codebase-wide", "multi-file")
 WRITE_MIN_BYTES = int(os.environ.get("CONDUCTOR_VERIFY_WRITE_MIN_BYTES", "64"))
@@ -283,6 +285,69 @@ def rag_before_multifile(cwd: str, state: dict[str, Any], step_desc: str) -> Opt
         lines.append(f"- `{loc}`: {snip}")
     return ("## Prior patterns (enforced RAG, multi-file edit)\nRelevant existing code to "
             "match before editing across files:\n" + "\n".join(lines))
+
+
+# P2 ── bandit route (enforced read pre_llm_call, write post-run) ─────────────
+def route_task(state: dict[str, Any], task_text: str) -> Optional[str]:
+    """ENFORCED READ: at task start, classify the task and pick a backend BEFORE the model
+    sees it (so the executor cannot self-route around the policy). Sets state['task_class']
+    and state['route']; returns an advisory line. Default route is local-serial-free; an
+    escalate=True flag (consumed by P3/P7) only when warranted + uplift-positive. Once/task."""
+    if not ENF_ROUTE or state.get("route_done"):
+        return None
+    if not (task_text or "").strip():
+        return None
+    state["route_done"] = True
+    rc = _mod("router_core")
+    if rc is None:
+        state["task_class"] = "code_execute"
+        return None
+    try:
+        d = rc.route(task_text)
+    except Exception:  # noqa: BLE001
+        state["task_class"] = "code_execute"
+        return None
+    state["task_class"] = d.get("task_class", "code_execute")
+    state["route"] = {"backend": d.get("backend"), "escalate": bool(d.get("escalate"))}
+    notes = []
+    try:
+        notes = rc.recall_notes(state["task_class"], 2)
+    except Exception:  # noqa: BLE001
+        pass
+    _emit("route_selected", {"task_class": state["task_class"], "backend": d.get("backend"),
+                             "escalate": d.get("escalate"), "difficulty": d.get("difficulty")})
+    line = (f"## Route (enforced)\nTask class **{state['task_class']}** → default backend "
+            f"**{d.get('backend')}** ({d.get('reason')}).")
+    if notes:
+        line += "\nPrior experience on this task class:\n" + "\n".join(f"- {n}" for n in notes)
+    return line
+
+
+def log_run_outcome(cwd: str, state: dict[str, Any], solved: bool,
+                    failure_class: str = "") -> None:
+    """ENFORCED WRITE: at run close, log the outcome (profiler reads it) + update the bandit,
+    so each run improves routing. Once per run; cost pulled from the profiler rollup if any."""
+    if not ENF_ROUTE or state.get("outcome_logged"):
+        return
+    state["outcome_logged"] = True
+    rc = _mod("router_core")
+    if rc is None:
+        return
+    tc = state.get("task_class") or "code_execute"
+    backend = (state.get("route") or {}).get("backend", "local-serial")
+    cost = 0.0
+    prof = _mod("profiler_core")
+    if prof is not None:
+        try:
+            cost = prof.report("today", tc).get("total_usd", 0.0)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        rc.log_outcome(tc, backend, solved, cost_usd=cost,
+                       failure_class=(failure_class or "route-fixable") if not solved else "")
+    except Exception:  # noqa: BLE001
+        return
+    _emit("outcome_logged", {"task_class": tc, "backend": backend, "solved": solved})
 
 
 # P1 ── cost/latency/backend attribution (enforced, post_llm_call) ────────────
