@@ -38,6 +38,17 @@ for _p in (_REPO, os.path.join(_REPO, "mcp-escalation"), os.path.join(_REPO, "mc
 
 _STUCK_TURNS = int(os.environ.get("CONDUCTOR_STUCK_TURNS", "4"))
 
+# Part B B2 — lifecycle ENFORCEMENT of the high-value MCPs (verify/checkpoint/research/
+# watchdog), fired deterministically from the hooks below. Lazy + guarded: if the module
+# or any target MCP is absent the enforcement degrades to a no-op, never breaking the loop.
+try:
+    from . import enforce as _enforce
+except Exception:  # noqa: BLE001
+    try:
+        import enforce as _enforce  # when loaded as a top-level module
+    except Exception:  # noqa: BLE001
+        _enforce = None  # type: ignore
+
 # Phase 2 — token fan-out. The hermes AIAgent exposes stream_delta / thinking /
 # reasoning callbacks; we install them on pre_llm_call and remove them on
 # post_llm_call, writing each delta to the livelog as a gen.* span. The Phase 1
@@ -100,8 +111,17 @@ def _load_plan(cwd: str) -> dict[str, Any]:
         if m:
             desc = m.group(1).strip()
             complexity = "HIGH" if re.search(r"complexity\s*:\s*high", desc, re.I) else "standard"
-            desc = re.sub(r"\s*complexity\s*:\s*\w+\s*$", "", desc, flags=re.I).strip()
-            steps.append({"description": desc[:200], "complexity": complexity})
+            # P5 DAG annotations (optional, anywhere in the line): depends_on: [1, 2] · files: a.py, b.py
+            dep_m = re.search(r"depends_on\s*:\s*\[([0-9,\s]*)\]", desc, re.I)
+            depends_on = [int(x) for x in re.findall(r"\d+", dep_m.group(1))] if dep_m else []
+            file_m = re.search(r"files\s*:\s*([^\]]+?)(?:$|;|\s*depends_on)", desc, re.I)
+            files = [f.strip() for f in re.split(r"[,\s]+", file_m.group(1)) if f.strip().endswith(
+                (".py", ".rs", ".ts", ".js", ".go"))] if file_m else []
+            desc = re.sub(r"\s*(complexity\s*:\s*\w+|depends_on\s*:\s*\[[0-9,\s]*\]|files\s*:[^;]*)",
+                          "", desc, flags=re.I)
+            desc = re.sub(r"[,\s]+$", "", desc).strip()  # drop trailing separators left behind
+            steps.append({"description": desc[:200], "complexity": complexity,
+                          "depends_on": depends_on, "files": files})
     return {"steps": steps}
 
 
@@ -128,6 +148,11 @@ def _trigger_conductor(cwd: str, state: dict[str, Any], reason: str, step: int, 
     if int(budget.get(tier, 0)) <= 0:
         _emit("budget_exhausted", {"reason": reason, "tier": tier})
         return
+    # SG2 — the conductor escalation IS a cloud call; if the run spend cap blocked cloud, skip
+    # it (the run continues locally — never aborted, fabric/local never blocked).
+    if state.get("cloud_blocked"):
+        _emit("cloud_blocked", {"reason": reason, "step": step, "why": "run spend cap reached"})
+        return
     _emit("trigger", {"reason": reason, "step": step, "tier": tier})
     try:
         import conductor_core
@@ -150,6 +175,14 @@ def _trigger_conductor(cwd: str, state: dict[str, Any], reason: str, step: int, 
         _emit("guidance", {"reason": reason, "step": step, "model": r.get("model"),
                            "tier": r.get("tier"), "tokens": r.get("tokens", 0),
                            "cost": r.get("cost_usd", 0.0)})
+        # SG1 — record the cloud escalation cost into the SQLite ledger so the cap + ratio
+        # alert see real cloud spend (unless it was free-tier, cost 0).
+        if _enforce is not None:
+            try:
+                _enforce.record_cost("cloud-deepseek", r.get("provider", "cloud"), r.get("model", ""),
+                                     0, int(r.get("tokens", 0) or 0), float(r.get("cost_usd", 0.0) or 0.0), 0)
+            except Exception:  # noqa: BLE001
+                pass
         print(f"[conductor] ⚡ {reason} on step {step} ({r.get('model')}) — guidance ready, "
               "will inject next turn", flush=True)
     else:
@@ -175,6 +208,8 @@ def _sync_execution_state(cwd: str, state: dict[str, Any]) -> None:
         state["turns_on_current_step"] = 0
         state["verify_consecutive_failures"] = 0
         state["conductor_triggered_this_step"] = False
+        state["formal_write_fails"] = 0           # reset enforced-gate retry budget per step
+        state.pop("checkpointed_step", None)       # allow a fresh checkpoint on the new step
         _emit("step_advance", {"step": reported})
 
 
@@ -186,18 +221,44 @@ def _extract_pytest_summary(text: str) -> str:
 
 
 def _handle_done(cwd: str, state: dict[str, Any]) -> None:
-    """Independently verify before accepting the agent's done declaration."""
+    """Independently verify before accepting the agent's done declaration. The
+    authoritative gate is the FULL formal ladder (verify_formal) — verified/unknown accept
+    (unknown = tool/model incapacity, never block on that); counterexample/spec_rejected
+    reject and continue (NEVER report a pass on a rejected spec). Falls back to the
+    deterministic verify_core gate if formal_core is unavailable."""
     passed, summary = False, "verify unavailable"
+    os.environ.setdefault("VERIFY_REQUIRE_PLAN", "false")  # plan already enforced upstream
     try:
-        import verify_core
-        os.environ.setdefault("VERIFY_REQUIRE_PLAN", "false")  # plan already enforced upstream
-        res = verify_core.verify(cwd)
-        passed, summary = bool(res.get("passed")), res.get("summary", "")
-    except Exception as e:  # noqa: BLE001
-        summary = f"verify error: {e}"
+        import formal_core
+        fres = formal_core.verify_formal(cwd)
+        kind = fres.get("result")
+        summary = f"verify_formal: {kind} ({fres.get('method') or fres.get('reason','')})"[:160]
+        passed = kind in ("verified", "unknown")  # unknown = can't adjudicate → don't block done
+        _emit("verify_enforced", {"phase": "done", "result": kind, "method": fres.get("method")})
+        # P6 — promote a done-gate counterexample/rejected-spec into the regression corpus.
+        if _enforce is not None and not passed:
+            try:
+                _enforce.promote_counterexample(state, fres, target=cwd)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        try:
+            import verify_core
+            res = verify_core.verify(cwd)
+            passed, summary = bool(res.get("passed")), res.get("summary", "")
+        except Exception as e:  # noqa: BLE001
+            summary = f"verify error: {e}"
     if passed:
         _emit("run_complete", {"turns": state.get("total_turns", 0),
                                "steps": state.get("current_step", 1)})
+        # B3.5 — KG task-close memory write (once per run): record what was decided + why.
+        # P2 — enforced outcome write (solved=True) closing the routing loop.
+        if _enforce is not None:
+            try:
+                _enforce.kg_taskclose_write(cwd, state, f"completed & verified — {summary}")
+                _enforce.log_run_outcome(cwd, state, solved=True)
+            except Exception:  # noqa: BLE001
+                pass
         print(f"\n[conductor] ✓ done condition met AND verified — {summary}", flush=True)
     else:
         state["done_condition_met"] = False
@@ -278,6 +339,50 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
         "Do not replan or re-architect — execute the plan.",
     ]
 
+    # ── Part B B2: research ENTRY gate (once per qualifying task) + queued enforcement
+    # guidance (verify/watchdog feedback queued by post_tool_call). Best-effort.
+    if _enforce is not None:
+        task_text = "; ".join(s.get("description", "") for s in plan.get("steps", []))[:1000]
+        step_desc = sd.get("description", "")
+        # SG2 — per-run spend cap: set state['cloud_blocked'] when the run cap is reached so
+        # cloud escalation is blocked for the rest of the run (fabric/local still allowed).
+        try:
+            cap_warn = _enforce.check_run_cap(state)
+            if cap_warn:
+                lines += ["", cap_warn]
+        except Exception:  # noqa: BLE001
+            pass
+        # P2 — enforced route read BEFORE the model sees the task (sets state['task_class']).
+        try:
+            rl = _enforce.route_task(state, task_text)
+            if rl:
+                lines += ["", rl]
+        except Exception:  # noqa: BLE001
+            pass
+        for fn, arg in ((_enforce.research_entry_gate, task_text),
+                        (_enforce.classify_step, step_desc),      # B3.6 classify in-hook
+                        (_enforce.rag_before_multifile, step_desc)):  # B3.7 RAG pre multi-file
+            try:
+                g = (fn(cwd, state, arg) if fn is not _enforce.classify_step
+                     else fn(state, arg))
+            except Exception:  # noqa: BLE001
+                g = None
+            if g:
+                lines += ["", g]
+        # P5 — DAG schedule hint (multi-file only): ready wave + parallel/isolation + conflicts.
+        # P7 — committee-planning availability hint (critical planning + parallel backend up).
+        for hint_fn in (_enforce.dag_schedule_hint, _enforce.committee_hint):
+            try:
+                h = (hint_fn(state, plan) if hint_fn is _enforce.dag_schedule_hint
+                     else hint_fn(state, step_desc))
+                if h:
+                    lines += ["", h]
+            except Exception:  # noqa: BLE001
+                pass
+    for g in (state.get("enforce_guidance") or []):
+        lines += ["", str(g)]
+    state["enforce_guidance"] = []
+
     state["total_turns"] = state.get("total_turns", 0) + 1
     state["turns_on_current_step"] = turns_on + 1
     _save_state(cwd, state)
@@ -321,10 +426,16 @@ def _post_llm_call(response: Any = None, **kw: Any) -> None:
     cwd = os.getcwd()
     state = _load_state(cwd)
     toks = _extract_tokens(resp)
-    payload = {"step": int(state.get("current_step", 1)),
-               "elapsed_s": _coerce_int(kw.get("elapsed_s") or kw.get("duration_s")) or 0}
+    elapsed_s = _coerce_int(kw.get("elapsed_s") or kw.get("duration_s")) or 0
+    payload = {"step": int(state.get("current_step", 1)), "elapsed_s": elapsed_s}
     payload.update(toks)
     _emit("llm_response", payload)
+    # P1 — enforced cost/latency/backend attribution for the local executor call.
+    if _enforce is not None:
+        try:
+            _enforce.profile_executor_call(state, toks, elapsed_s * 1000)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _post_tool_call(tool_name: str = "", args: Optional[dict] = None, result: Any = None, **kw: Any):
@@ -335,8 +446,19 @@ def _post_tool_call(tool_name: str = "", args: Optional[dict] = None, result: An
     step = int(state.get("current_step", 1))
     result_text = str(result)[:2000]
 
+    def _queue(g: Optional[str]) -> None:
+        if g:
+            state.setdefault("enforce_guidance", []).append(g)
+
     if tool_name in ("write_file", "edit_file", "str_replace", "patch"):
-        _emit("file_write", {"step": step, "file": args.get("path") or args.get("file_path") or "?"})
+        wpath = args.get("path") or args.get("file_path") or "?"
+        _emit("file_write", {"step": step, "file": wpath})
+        # B2.1 — fire the fast verify_formal compile/type/lint gate on the written file.
+        if _enforce is not None and wpath != "?":
+            try:
+                _queue(_enforce.on_file_write(cwd, state, wpath))
+            except Exception:  # noqa: BLE001
+                pass
 
     if tool_name in ("terminal", "bash", "shell"):
         cmd = str(args.get("command", ""))
@@ -347,14 +469,35 @@ def _post_tool_call(tool_name: str = "", args: Optional[dict] = None, result: An
                 state["verify_consecutive_failures"] = 0
                 _emit("verify_pass", {"step": step, "result": state["last_verify_result"]})
                 print(f"[conductor] ✓ verify passed on step {step}", flush=True)
+                # B2.2 — checkpoint AFTER a green verify (the checkpoint re-verifies and
+                # refuses on RED, so it is the hard gate). Model never decides this.
+                if _enforce is not None:
+                    try:
+                        _enforce.checkpoint_after_green(cwd, state)
+                    except Exception:  # noqa: BLE001
+                        pass
             else:
                 fails = int(state.get("verify_consecutive_failures", 0)) + 1
                 state["verify_consecutive_failures"] = fails
                 _emit("verify_fail", {"step": step, "failures": fails})
                 if fails >= 2 and not state.get("conductor_triggered_this_step"):
                     _trigger_conductor(cwd, state, "verify_double_fail", step, result_text[:500])
+                # P3 — surface the best-of-N dispatch target (fabric→cloud, never blind local).
+                if _enforce is not None:
+                    try:
+                        _queue(_enforce.best_of_n_hint(state))
+                    except Exception:  # noqa: BLE001
+                        pass
 
     _sync_execution_state(cwd, state)
+
+    # B2.4 — watchdog background tick: fires unconditionally on every tool call (a
+    # background-via-hook, never a model tool call). Emits a span; nudges on a spiral.
+    if _enforce is not None:
+        try:
+            _queue(_enforce.watchdog_tick(cwd, state, reasoning_text=result_text))
+        except Exception:  # noqa: BLE001
+            pass
 
     turns = int(state.get("turns_on_current_step", 0))
     if turns >= _STUCK_TURNS and not state.get("conductor_triggered_this_step"):
@@ -381,6 +524,22 @@ def _on_session_end(**kw: Any) -> None:
         summary = conductor_core.escalation_summary()
     except Exception:  # noqa: BLE001
         pass
+    # B3.5 backstop — ensure a KG task-close write even if the run ended without a
+    # verified done (kg_taskclose_write is once-per-run; a prior _handle_done call no-ops).
+    if _enforce is not None:
+        try:
+            _enforce.kg_taskclose_write(cwd, state,
+                                        f"session ended at step {state.get('current_step', 1)}")
+            # P2 — backstop outcome write (log_run_outcome is once-per-run; a verified done
+            # already logged solved=True, so this only fires for an unfinished run → unsolved).
+            _enforce.log_run_outcome(cwd, state, solved=bool(state.get("done_condition_met")),
+                                     failure_class="trajectory-fixable")
+            # SG3 — end-of-run ratio alert: write ratio.log + print OK/ALERT to the cockpit.
+            rl = _enforce.ratio_log_run(state)
+            if rl:
+                print(f"[conductor] ratio {rl}", flush=True)
+        except Exception:  # noqa: BLE001
+            pass
     _emit("session_end", {"total_turns": state.get("total_turns", 0),
                           "final_step": state.get("current_step", 1),
                           "done": state.get("done_condition_met", False),

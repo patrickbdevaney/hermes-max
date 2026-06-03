@@ -223,7 +223,8 @@ def _translate(rec: dict[str, Any], run_id: str, calls: dict[str, list[int]],
             # SSE event the web UI's feed + flow views consume directly.
             ev = name.split(".", 1)[1]
             payload = {**base, "event": ev}
-            for k in ("step", "total", "reason", "tier", "model", "tokens", "thinking_tokens",
+            for k in ("step", "total", "reason", "tier", "model", "provider", "backend",
+                      "tokens", "thinking_tokens",
                       "output_tokens", "cost", "cost_usd", "failures", "result", "file",
                       "turns_on_step", "has_guidance", "calls", "free", "paid",
                       "from_step", "to_step", "done", "final_step", "total_turns"):

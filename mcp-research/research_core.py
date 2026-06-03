@@ -101,6 +101,11 @@ RESEARCH_SCRAPE_CONCURRENCY = max(1, int(os.environ.get("RESEARCH_SCRAPE_CONCURR
 # The loop is now scrape-bound (wider coverage), so the wall budget is larger.
 WALL_BUDGET_S = float(os.environ.get("RESEARCH_WALL_BUDGET_S", "900"))
 MIN_INDEPENDENT_SOURCES = int(os.environ.get("RESEARCH_MIN_SOURCES", "2"))
+# Per-wave early-exit coverage target (fraction of sub-goals each covered by >=
+# MIN_INDEPENDENT_SOURCES). Default 1.0 = the original "cover every sub-goal" behavior;
+# lower it (e.g. 0.85) to stop a wave earlier once most sub-goals are satisfied, trading
+# a little thoroughness for wall time. Saturation/source-cap/wall-budget breaks still apply.
+RESEARCH_COVERAGE_TARGET = max(0.0, min(1.0, float(os.environ.get("RESEARCH_COVERAGE_TARGET", "1.0"))))
 # Saturation thresholds (Phase 1, ported from banyan's intra-session signals).
 RESEARCH_MARGINAL_GAIN_FLOOR = float(os.environ.get("RESEARCH_MARGINAL_GAIN_FLOOR", "0.15"))
 RESEARCH_DRIFT_COSINE = float(os.environ.get("RESEARCH_DRIFT_COSINE", "0.93"))
@@ -345,12 +350,23 @@ def _llm(messages: list[dict], max_tokens: int = LLM_MAX_TOKENS, temperature: fl
     watchdog heartbeat immediately BEFORE it starts and (via finally) immediately
     AFTER it returns or raises. check_stall(task_id=...) then sees a fresh heartbeat
     and never kills a slow-but-alive inference. See heartbeat.py / watchdog_core."""
-    if not VLLM_BASE_URL:
-        return None
-    body = {"model": VLLM_MODEL, "messages": messages,
-            "temperature": temperature, "max_tokens": max_tokens}
     heartbeat.beat("deep_research", progress=f"{_HB_PHASE}: inference start")
     try:
+        # HELPER INFERENCE routes to the cheap CLOUD pool (Groq/Cerebras) FIRST: it is
+        # fast and parallel-friendly, AND it keeps the local vLLM endpoint reserved for
+        # the agent's main execution driver (so a minutes-long research synthesis no
+        # longer competes with the executor on the single local GPU lane). The local
+        # vLLM is used only as a sovereign fallback when no cloud lane is configured or
+        # the cloud call comes back empty.
+        if _pool is not None and _pool.cloud_available():
+            out = _pool.complete_one(messages, temperature=temperature,
+                                     max_tokens=max_tokens, cloud_only=True)
+            if out:
+                return out
+        if not VLLM_BASE_URL:
+            return None
+        body = {"model": VLLM_MODEL, "messages": messages,
+                "temperature": temperature, "max_tokens": max_tokens}
         with httpx.Client(timeout=LLM_TIMEOUT) as c:
             r = c.post(f"{VLLM_BASE_URL}/chat/completions", json=body)
             r.raise_for_status()
@@ -691,8 +707,11 @@ def _label_support_batch(pairs: list[tuple[str, str]]) -> list[str]:
         return out
     chunks = [pairs[s:s + _VERIFY_BATCH_SIZE] for s in range(0, len(pairs), _VERIFY_BATCH_SIZE)]
     prompts = ["\n\n".join(f"[{i}] CLAIM: {c}\nEXCERPT:\n{s[:1200]}" for i, (c, s) in enumerate(ch)) for ch in chunks]
-    if _pool and _pool.available():
-        replies = _pool.map_cheap(prompts, system=_VERIFY_BATCH_SYS, temperature=0, max_tokens=2000)
+    if _pool and _pool.cloud_available():
+        # Fan out the verify chunks across the CLOUD lanes only (Groq/Cerebras) so the
+        # local vLLM stays free for the executor; _llm fallback below keeps it sovereign.
+        replies = _pool.map_cheap(prompts, system=_VERIFY_BATCH_SYS, temperature=0,
+                                  max_tokens=2000, cloud_only=True)
     else:
         replies = [_llm([{"role": "system", "content": _VERIFY_BATCH_SYS}, {"role": "user", "content": p}],
                         temperature=0, max_tokens=2000) for p in prompts]
@@ -1004,9 +1023,16 @@ _PARAMETRIC_ALGOS = (
     "two pointer", "sliding window", "kmp", "rabin-karp", "union-find", "topological sort",
     "newton's method", "gradient descent", "linear regression", "k-means",
 )
+# NOTE: bare definitional frames ("what is a/the X") are NOT listed here. A
+# definitional question only warrants Tier-0 when X is a KNOWN textbook algorithm
+# — and that case is already caught by _PARAMETRIC_ALGOS above. A generic "what is
+# a <topic>" may well be a novel/external subject outside pretraining (e.g. "what
+# is a Merkle tree in cryptography" is a legitimate, source-backable research ask),
+# so we must NOT hard-block it on the frame alone. Only implement-style frames —
+# where the model is asked to PRODUCE textbook code it already knows — stay here.
 _PARAMETRIC_FRAMES = (
     "how does", "how do i implement", "how to implement", "implement a", "implement the",
-    "explain the", "explain how", "what is a", "what is the", "write a function",
+    "explain how", "write a function",
     "standard way to", "common pattern", "textbook",
 )
 _TARGETED_SIGNALS = (
@@ -1377,7 +1403,7 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
             "covered": sum(1 for d in cov.values() if len(d) >= MIN_INDEPENDENT_SOURCES),
             "subgoals": len(subgoals)})
         otel_emit.record("research_saturation", {"tool": "deep_research", "wave": waves, **sat})
-        if coverage >= 1.0:
+        if coverage >= RESEARCH_COVERAGE_TARGET:
             stop_reason = "covered"; break
         if saturated:
             stop_reason = "saturated"; break

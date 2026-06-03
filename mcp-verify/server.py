@@ -30,6 +30,11 @@ try:
 except Exception:  # noqa: BLE001
     quality_core = None  # type: ignore
 
+try:
+    import formal_core  # Part A: the formal-verification ladder (verify_formal)
+except Exception:  # noqa: BLE001
+    formal_core = None  # type: ignore
+
 # Opt-in: property generation adds wall time and the 35B can hallucinate properties,
 # so the primary verify() gate runs it only when explicitly enabled.
 ENABLE_PROPERTY_TEST = os.environ.get("ENABLE_PROPERTY_TEST", "false").strip().lower() in ("1", "true", "yes")
@@ -201,6 +206,200 @@ def quality_check(path: str) -> dict:
     if quality_core is None:
         return {"ok": False, "reason": "quality_core unavailable"}
     return quality_core.quality_check(path)
+
+
+@mcp.tool()
+@_threaded
+def verify_formal(path: str, language: str = "auto", task_spec: str = "",
+                  sibling_files: list | None = None, agent_tests: str = "") -> dict:
+    """The formal-verification LADDER (Part A) — returns ONE of four values:
+    `verified{property,method}`, `counterexample{input,trace,mutant?}`, `unknown{reason}`,
+    or `spec_rejected{reason}`.
+
+    Runs cheapest→heaviest: Rung 0 compile/type (HARD gate — py_compile/mypy · cargo build
+    · tsc --strict · go build+vet), Rung 1 lint (advisory), Rung 2 cheap-LLM-proposed
+    property tests adjudicated by the pytest oracle and GUARDED by a mutation cross-check
+    (break the module; if the properties still pass they're too weak → spec_rejected) plus
+    a vacuity check. Python is complete at rung 2; Rust/TS/Go enforce rungs 0-1 and return
+    `unknown` for rung 2 (honest — never a false `verified`).
+
+    `agent_tests` (the agent's own passing tests, as source text) is the highest-trust
+    oracle for property generation; `task_spec` (NL) is the lowest. Sovereign/deterministic-
+    first: no model → rung 2 degrades to the smoke gate and returns `unknown`, never a
+    fabricated pass. Never raises. Use as the ground-truth gate before checkpointing."""
+    if formal_core is None:
+        return {"result": "unknown", "reason": "formal_core unavailable"}
+    return formal_core.verify_formal(path, language, task_spec or None, sibling_files,
+                                     agent_tests or None)
+
+
+@mcp.tool()
+@_threaded
+def criticality_classify(path: str, language: str = "auto") -> dict:
+    """Classify a module's VERIFICATION criticality (Part A Phase 2). CRITICAL iff
+    pure/deterministic AND high blast-radius (money/ledger, memory/unsafe, auth/credentials,
+    data-integrity/persistence, or termination). Deterministic keyword/AST rules decide when
+    they fire; a cheap-LLM fallback runs only when rules are silent and degrades to
+    non-critical without a model. Returns {critical, dimensions, pure, concurrent, method}.
+    The router uses this to send only critical, non-concurrent code to the heavy rungs
+    (Kani/SMT) — never the whole codebase."""
+    try:
+        import criticality
+    except Exception as e:  # noqa: BLE001
+        return {"critical": False, "reason": f"criticality unavailable: {e}"}
+    return criticality.criticality_classify(path, language)
+
+
+@mcp.tool()
+@_threaded
+def smt_verify(path: str, task_spec: str = "", agent_tests: str = "") -> dict:
+    """Rung 4 (Part A Phase 3) — SMT/contract verification for the pure CRITICAL FEW.
+    Gated on criticality (pure + high blast-radius); otherwise returns `unknown`. The cheap
+    pool proposes pre/post contracts; the result is trusted as `verified` ONLY after a TRIPLE
+    GUARD: (1) mutation cross-check (break the code — the contract must catch it), (2)
+    differential cross-check (the agent's passing tests must satisfy the contract), (3)
+    code↔spec consistency. Any guard fails → spec_rejected (downgrade to PBT; never a pass).
+    CrossHair does the symbolic check when installed; otherwise the mutation-guarded contract
+    stands in (flagged). Four-value result. Never raises."""
+    try:
+        import smt_contracts
+    except Exception as e:  # noqa: BLE001
+        return {"result": "unknown", "reason": f"smt_contracts unavailable: {e}"}
+    return smt_contracts.smt_verify(path, task_spec or None, agent_tests or None)
+
+
+@mcp.tool()
+@_threaded
+def author_contract(task_spec: str, signature: str = "") -> dict:
+    """Phase 4 — state the property/contract FIRST (before generation). Cheap pool authors a
+    Hypothesis property asserting the postcondition; degrades to using the agent's own tests
+    as the oracle when no model is available. Returns {contract, method}."""
+    try:
+        import vdg_core
+    except Exception as e:  # noqa: BLE001
+        return {"contract": None, "method": f"vdg_core unavailable: {e}"}
+    return vdg_core.author_contract(task_spec, signature)
+
+
+@mcp.tool()
+@_threaded
+def verify_driven_step(path: str, task_spec: str, tests: dict, contract: str = "") -> dict:
+    """Phase 4 — one verification-driven step: run the verify oracle (formal ladder + gate,
+    with `contract` as selection pressure) on a candidate and return {ok, critique}. The
+    `critique` is the counterexample to feed the next bounded-reflection iteration (the
+    conductor enforces the k≤3 bound across turns). Reuses the verify machinery; no new
+    verifier."""
+    try:
+        import vdg_core
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "critique": f"vdg_core unavailable: {e}"}
+    return vdg_core._oracle(path, tests, contract or None, task_spec)
+
+
+@mcp.tool()
+@_threaded
+def edge_contract_monitor(path: str, contracts: str = "") -> dict:
+    """Part A Phase 4 — assume-guarantee contracts at module EDGES, installed as dependency-
+    free RUNTIME MONITORS (pre/post assertions wrapping public functions) where static proof
+    is infeasible. A verified callee's postcondition becomes the caller's assumption. The
+    cheap pool proposes the contracts; supply `contracts` to use your own. Never raises."""
+    try:
+        import composition
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"composition unavailable: {e}"}
+    return composition.edge_contract_monitor(path, contracts or None)
+
+
+@mcp.tool()
+@_threaded
+def stateful_test(path: str, machine_code: str, max_examples: int = 100) -> dict:
+    """Part A Phase 4 — stateful property testing for cross-module state spanning files.
+    `machine_code` defines a Hypothesis RuleBasedStateMachine (TestMachine) exercising the
+    module; Hypothesis searches for a violating SEQUENCE of transitions that single-call PBT
+    can't reach. Adjudicated by the pytest oracle. Returns {status, counterexample}."""
+    try:
+        import composition
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "reason": f"composition unavailable: {e}"}
+    return composition.stateful_test(path, machine_code, max_examples)
+
+
+@mcp.tool()
+@_threaded
+def concurrency_check(path: str) -> dict:
+    """Part A Phase 4 — route shared-memory-concurrent Rust to Loom (exhaustive interleavings,
+    bounded preemptions) / Shuttle (randomized); Kani cannot check concurrency. Triggers only
+    when concurrency primitives are present; degrades with a directive when the crate isn't
+    wired."""
+    try:
+        import composition
+    except Exception as e:  # noqa: BLE001
+        return {"result": "unknown", "reason": f"composition unavailable: {e}"}
+    return composition.concurrency_check(path)
+
+
+@mcp.tool()
+@_threaded
+def protocol_check(path: str) -> dict:
+    """Part A Phase 4 — route a multi-node protocol DESIGN to TLA+/Apalache or Alloy (check
+    the design, where distributed bugs are cheapest). Triggers only on a distributed-protocol
+    signal; degrades with a directive when no model checker is installed."""
+    try:
+        import composition
+    except Exception as e:  # noqa: BLE001
+        return {"result": "unknown", "reason": f"composition unavailable: {e}"}
+    return composition.protocol_check(path)
+
+
+@mcp.tool()
+@_threaded
+def promote_counterexample(trace: str, task_class: str = "", target: str = "",
+                           language: str = "python", kind: str = "counterexample",
+                           test_code: str = "") -> dict:
+    """Phase 6 — promote a counterexample / seeded bug / rejected spec into the growing,
+    DEDUPED regression corpus so future runs catch it for free. If `test_code` is supplied
+    (e.g. the property that caught the bug) it is written as a regression test guard. Cheap,
+    idempotent on a normalized dedup key."""
+    try:
+        import regression_core
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"regression_core unavailable: {e}"}
+    return regression_core.promote(trace, task_class, target, language, kind, test_code)
+
+
+@mcp.tool()
+@_threaded
+def regression_corpus(task_class: str = "") -> dict:
+    """Phase 6 — list the regression corpus (optionally by task class): counts + recent
+    entries. The compounding moat the verify/formal MCPs feed."""
+    try:
+        import regression_core
+    except Exception as e:  # noqa: BLE001
+        return {"count": 0, "error": f"regression_core unavailable: {e}"}
+    return regression_core.corpus(task_class or None)
+
+
+@mcp.tool()
+@_threaded
+def seeded_bug_table() -> dict:
+    """Phase 6 — roll up the regression corpus by task class + kind (feeds the eval's
+    seeded-bug catch table)."""
+    try:
+        import regression_core
+    except Exception as e:  # noqa: BLE001
+        return {"total": 0, "error": f"regression_core unavailable: {e}"}
+    return regression_core.seeded_bug_table()
+
+
+@mcp.tool()
+@_threaded
+def formal_stats() -> dict:
+    """Report the formal-verification ladder's configuration: whether a spec-generation
+    model/pool is reachable, mutation budget, min kill-rate, and which languages have
+    rungs 0-1 vs rung 2 wired."""
+    if formal_core is None:
+        return {"ok": False, "reason": "formal_core unavailable"}
+    return formal_core.verify_formal_stats()
 
 
 if __name__ == "__main__":

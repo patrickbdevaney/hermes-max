@@ -1,8 +1,13 @@
 migration/
 .env
+# vendored browser binaries (Lightpanda ~130MB / Obscura ~80MB) — fetched per-host,
+# never committed. See .env.example LIGHTPANDA_BIN / OBSCURA_BIN.
+bin/
 # runtime config + state dir — the system reads live config from here (or
 # $HERMES_MAX_CONFIG_DIR); the repo ships only config/*.example.yaml. Never commit.
 .hermes-max/
+# conductor runtime scratch dir — local state, never committed.
+.hermes-conductor/
 .mypy_cache/
 __pycache__/
 .ruff_cache/
@@ -55,3 +60,6 @@ replacements.txt
 restore_products.txt
 vendor/
 .serena/
+
+# generated full-repo dump (repo_dump.py) — large artifact, not tracked
+repo_dump.md
