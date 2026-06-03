@@ -541,6 +541,42 @@ def _label_support(claim: str, snippet: str) -> str:
     return "unchecked"
 
 
+# Phase 2.2 — BATCHED entailment. The cost that makes commercial services skip
+# verification is nearly free for us: pack many (claim, source) pairs into one
+# cheap call. A ~50-claim × 2-source report ≈ 100 pairs → a handful of batched
+# calls, seconds across the pool, ≈$0.
+_VERIFY_BATCH_SYS = (
+    "You are a fact-checker. For EACH numbered (claim, source excerpt) pair, decide "
+    "whether the excerpt SUPPORTS the claim. Return a STRICT JSON array aligned to the "
+    "inputs by index: [{\"i\": 0, \"label\": \"supports\"|\"contradicts\"|\"neutral\"}, ...]. "
+    "Mark 'supports' only if the excerpt clearly backs the claim."
+)
+_VERIFY_BATCH_SIZE = int(os.environ.get("RESEARCH_VERIFY_BATCH", "8"))
+
+
+def _label_support_batch(pairs: list[tuple[str, str]]) -> list[str]:
+    """Label many (claim, snippet) pairs. One cheap call per RESEARCH_VERIFY_BATCH
+    pairs; deterministic fallback ('unchecked') when no model. Order-preserving."""
+    out: list[str] = ["unchecked"] * len(pairs)
+    if not pairs or not VLLM_BASE_URL:
+        return out
+    for start in range(0, len(pairs), _VERIFY_BATCH_SIZE):
+        chunk = pairs[start:start + _VERIFY_BATCH_SIZE]
+        user = "\n\n".join(f"[{i}] CLAIM: {c}\nEXCERPT:\n{s[:1200]}" for i, (c, s) in enumerate(chunk))
+        parsed = _json_from_llm(_llm(
+            [{"role": "system", "content": _VERIFY_BATCH_SYS}, {"role": "user", "content": user}],
+            temperature=0, max_tokens=2000))
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                i = item.get("i")
+                lab = str(item.get("label", "")).lower().strip()
+                if isinstance(i, int) and 0 <= i < len(chunk) and lab in ("supports", "contradicts", "neutral"):
+                    out[start + i] = lab
+    return out
+
+
 def verify_claims(claims: list[dict], min_sources: int = MIN_INDEPENDENT_SOURCES) -> dict[str, Any]:
     """Cross-check each material claim against >= min_sources INDEPENDENT sources
     (independent = distinct domain, post-dedup). Flags single-sourced / conflicting
@@ -551,34 +587,44 @@ def verify_claims(claims: list[dict], min_sources: int = MIN_INDEPENDENT_SOURCES
     global _HB_PHASE
     _HB_PHASE = "verify"
     claims = claims or []
-    out: list[dict[str, Any]] = []
+    # ── pass 1: build per-claim one-vote-per-domain source sets (no LLM yet) ──
+    per_claim: list[dict] = []
+    pairs: list[tuple[str, str]] = []          # flat (claim, snippet) for batched entailment
+    pair_ref: list[tuple[int, str]] = []       # back-ref: (claim_index, domain)
     for c in claims:
         claim = str(c.get("claim", "")).strip()
         srcs = c.get("sources", []) or []
         if not claim:
             continue
-        # normalize to {url, snippet}
-        norm = []
+        ci = len(per_claim)
+        by_domain: dict[str, dict] = {}
         for s in srcs:
             if isinstance(s, str):
-                norm.append({"url": s, "snippet": ""})
+                url, snip = s, ""
             elif isinstance(s, dict):
-                norm.append({"url": s.get("url", ""), "snippet": s.get("snippet", s.get("markdown", ""))})
-        by_domain: dict[str, dict] = {}
-        contradicts = 0
-        supporters: list[str] = []
-        for s in norm:
-            dom = _domain(s["url"])
+                url, snip = s.get("url", ""), s.get("snippet", s.get("markdown", ""))
+            else:
+                continue
+            dom = _domain(url)
             if not dom or dom in by_domain:
                 continue  # one vote per domain -> independence
-            label = _label_support(claim, s["snippet"]) if (VLLM_BASE_URL and s["snippet"]) else "unchecked"
-            by_domain[dom] = {"url": s["url"], "label": label}
-            if label == "contradicts":
-                contradicts += 1
-            elif label in ("supports", "unchecked"):
-                # 'unchecked' counts as candidate support (deterministic fallback),
-                # but the status wording stays honest about the lack of entailment.
-                supporters.append(s["url"])
+            by_domain[dom] = {"url": url, "label": "unchecked", "snippet": snip}
+            if snip:
+                pair_ref.append((ci, dom))
+                pairs.append((claim, snip))
+        per_claim.append({"claim": claim, "by_domain": by_domain})
+
+    # ── pass 2: ONE batched entailment sweep over all (claim, source) pairs ──
+    labels = _label_support_batch(pairs)
+    for (ci, dom), lab in zip(pair_ref, labels):
+        per_claim[ci]["by_domain"][dom]["label"] = lab
+
+    # ── pass 3: assemble verdicts ──
+    out: list[dict[str, Any]] = []
+    for pc in per_claim:
+        claim = pc["claim"]
+        by_domain = pc["by_domain"]
+        contradicts = sum(1 for d in by_domain.values() if d["label"] == "contradicts")
         independent = len(by_domain)
         support_n = len([d for d in by_domain.values() if d["label"] in ("supports", "unchecked")])
         if contradicts and support_n:
@@ -614,6 +660,64 @@ _SYNTH_SYS = (
     "with a short 'Confidence & gaps' section. Do NOT invent facts or sources."
 )
 
+# ── Phase 2.1: hierarchical map→reduce ───────────────────────────────────────
+# MAP (cheap/local, per cluster): dense, citation-TAGGED evidence briefs that
+# CARRY CHUNK-IDS THROUGH (so reduce + verify always resolve to source).
+# REDUCE (the ONE frontier call): the long-context conductor/escalation tier
+# takes the briefs + plan + verdicts and writes the report — everything before
+# reduce is cheap/local; reduce is the model-tier boundary.
+RESEARCH_BRIEF_CLUSTER = int(os.environ.get("RESEARCH_BRIEF_CLUSTER", "12"))
+_MAP_SYS = (
+    "Summarize the verified findings into a DENSE, citation-TAGGED evidence brief. "
+    "For each finding keep: the claim, its supporting source ids in [brackets] EXACTLY "
+    "as given (never drop or invent ids), and its verdict label (well-supported / "
+    "single-sourced / conflicting). Compact markdown bullets, no preamble."
+)
+
+
+def _evidence_briefs(question: str, findings: list[dict], idx: dict[str, int]) -> list[str]:
+    """Leaf summaries — one per cluster of findings. Deterministic structured brief
+    (claim → [source ids] → verdict); a cheap MAP call densifies it (ids preserved),
+    falling back to the structured form. Reduce sees briefs, never raw pages."""
+    briefs: list[str] = []
+    for start in range(0, len(findings), RESEARCH_BRIEF_CLUSTER):
+        group = findings[start:start + RESEARCH_BRIEF_CLUSTER]
+        structured = "\n".join(
+            f"- ({f.get('status')}) {f.get('claim')} "
+            + " ".join(f"[{idx[u]}]" for u in f.get("sources", []) if u in idx)
+            for f in group)
+        dens = _llm([{"role": "system", "content": _MAP_SYS},
+                     {"role": "user", "content": f"Question: {question}\n\nFindings:\n{structured}"}],
+                    temperature=0.1, max_tokens=2000)
+        briefs.append(dens.strip() if dens else structured)
+    return briefs
+
+
+def _reduce(question: str, briefs: list[str], citations: list[str], plan: dict | None):
+    """The single frontier long-context call: conductor steer/escalation tier first
+    (better long-context synthesis), local frontier next, deterministic last
+    (handled by the caller). Returns (report_md|None, backend)."""
+    roadmap = (plan or {}).get("roadmap", "")
+    user = (f"Question: {question}\n\nPlan/roadmap: {roadmap}\n\n"
+            f"Evidence briefs (citation-tagged, verdict-labelled):\n" + "\n\n".join(briefs)
+            + "\n\nSources (numbered):\n" + "\n".join(f"[{i + 1}] {u}" for i, u in enumerate(citations)))
+    # rung 1 — conductor steer (cheap cloud / frontier long-context)
+    try:
+        r = _mcp_call(ESCALATION_MCP_URL, "conductor_steer",
+                      {"prompt": f"{_SYNTH_SYS}\n\n{user}", "max_tokens": LLM_MAX_TOKENS})
+        res = (r.get("result") or {}) if isinstance(r, dict) else {}
+        if r.get("ok") and isinstance(res, dict) and not res.get("proceed_local") and res.get("content"):
+            return str(res["content"]).strip(), "conductor_steer"
+    except Exception:  # noqa: BLE001
+        pass
+    # rung 2 — local frontier
+    rep = _llm([{"role": "system", "content": _SYNTH_SYS}, {"role": "user", "content": user}],
+               temperature=0.2)
+    if rep:
+        return rep, "local"
+    # rung 3 — deterministic (caller builds the cited-bullet fallback)
+    return None, "deterministic"
+
 
 def synthesize(question: str, verified_findings: list[dict], plan: dict | None = None) -> dict[str, Any]:
     """Compile a structured, citation-backed report distinguishing well-supported /
@@ -637,16 +741,13 @@ def synthesize(question: str, verified_findings: list[dict], plan: dict | None =
         confidence = "high" if ratio >= 0.66 else ("medium" if ratio >= 0.33 else "low")
     gaps = [f["claim"] for f in verified_findings if f.get("status") != "well-supported"][:10]
 
-    findings_blob = json.dumps(verified_findings, indent=2)[:16000]
-    report = _llm(
-        [{"role": "system", "content": _SYNTH_SYS},
-         {"role": "user", "content":
-            f"Question: {question}\n\nVerified findings (JSON):\n{findings_blob}\n\n"
-            f"Sources (numbered):\n" + "\n".join(f"[{i + 1}] {u}" for i, u in enumerate(citations))}],
-        temperature=0.2)
+    # MAP → REDUCE: dense citation-tagged briefs (cheap/local), then ONE frontier
+    # reduce call over the briefs + plan + verdicts (not raw pages).
+    idx = {u: i + 1 for i, u in enumerate(citations)}
+    briefs = _evidence_briefs(question, verified_findings, idx)
+    report, reduce_backend = _reduce(question, briefs, citations, plan)
     if not report:  # deterministic, still-cited fallback
         lines = [f"# Research brief: {question}", ""]
-        idx = {u: i + 1 for i, u in enumerate(citations)}
         for f in verified_findings:
             cites = " ".join(f"[{idx[u]}]" for u in f.get("sources", []) if u in idx)
             lines.append(f"- ({f.get('status')}) {f.get('claim')} {cites}")
@@ -696,8 +797,9 @@ def synthesize(question: str, verified_findings: list[dict], plan: dict | None =
     otel_emit.record("report_synthesized", {
         "question": question, "citations": citation_count, "claims_total": claims_total,
         "claims_corroborated": claims_corroborated, "unsupported_rate": unsupported_rate,
-        "actionable": actionable, "llm": synthesized})
+        "actionable": actionable, "llm": synthesized, "reduce_backend": reduce_backend})
     return {"ok": True, "question": question, "report_md": report, "synthesized": synthesized,
+            "reduce_backend": reduce_backend,
             "citations": citations,
             # gap-analysis quality metrics (NOT a retry-triggering confidence)
             "actionable": actionable, "gap_note": gap_note,
