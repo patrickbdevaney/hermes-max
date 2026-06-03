@@ -120,6 +120,13 @@ RESEARCH_CORPUS_FIRST = os.environ.get("RESEARCH_CORPUS_FIRST", "1") not in ("0"
 # R-Stage 3 — exhaustion-first ladder + parametric pre-screen (both env-gated).
 RESEARCH_BLOCK_PARAMETRIC = os.environ.get("RESEARCH_BLOCK_PARAMETRIC", "1") not in ("0", "false", "False")
 RESEARCH_EXHAUSTION_GATE = os.environ.get("RESEARCH_EXHAUSTION_GATE", "1") not in ("0", "false", "False")
+# Phase 5 — novel capabilities. Adversarial + temporal are cheap/deterministic → ON;
+# ensemble triples retrieval cost and cross-run needs the KG/corpus up → OFF by default.
+RESEARCH_ADVERSARIAL = os.environ.get("RESEARCH_ADVERSARIAL", "1") not in ("0", "false", "False")
+RESEARCH_TEMPORAL = os.environ.get("RESEARCH_TEMPORAL", "1") not in ("0", "false", "False")
+RESEARCH_ENSEMBLE = os.environ.get("RESEARCH_ENSEMBLE", "0") not in ("0", "false", "False")
+RESEARCH_CROSS_RUN = os.environ.get("RESEARCH_CROSS_RUN", "0") not in ("0", "false", "False")
+RESEARCH_ADVERSARIAL_CLAIMS = int(os.environ.get("RESEARCH_ADVERSARIAL_CLAIMS", "4"))
 
 # Similarity thresholds (Jaccard over word-shingles).
 QUERY_DUP_THRESHOLD = float(os.environ.get("RESEARCH_QUERY_DUP_THRESHOLD", "0.8"))
@@ -1332,13 +1339,24 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
         low_authority_total += ex.get("low_authority_filtered", 0)
         return new
 
+    import novel as _novel  # Phase 5 helpers (local import: avoids import-time cycle)
+    ensemble_strategies: list[str] | None = None
+
     # ── Wave 1: one batch of diverse (perspective × abstraction) queries per sub-goal ──
-    wave1: list[tuple[str, str]] = []
-    for sg in subgoals:
-        for q in develop_queries(sg)["queries"]:
-            wave1.append((q, sg))
     waves = 1
-    new = _run_wave(wave1)
+    if RESEARCH_ENSEMBLE:
+        # 5.4 ensemble-of-decompositions: explore several framings, RRF-fuse the
+        # retained evidence so cross-framing corroboration wins. Replaces wave 1.
+        ens = _novel.ensemble_wave1(question, subgoals, max_total_sources, category)
+        new = ens["sources"]
+        seen_urls = ens["seen_urls"]
+        ensemble_strategies = ens["strategies"]
+    else:
+        wave1: list[tuple[str, str]] = []
+        for sg in subgoals:
+            for q in develop_queries(sg)["queries"]:
+                wave1.append((q, sg))
+        new = _run_wave(wave1)
     all_sources.extend(new)
     otel_emit.record("research_progress", {
         "tool": "deep_research", "done": len(all_sources), "total": max_total_sources,
@@ -1385,6 +1403,38 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
     # extract -> verify (intermediate) -> synthesize
     claims = _extract_claims(question, all_sources)
     verified = verify_claims(claims)["verified"]
+
+    # ── 5.1 ADVERSARIAL / disconfirming wave: actively try to FALSIFY the tentative
+    # findings, fold the counter-evidence in, re-verify, and measure what got downgraded.
+    adversarial: dict[str, Any] = {"ran": False}
+    if RESEARCH_ADVERSARIAL and verified and (time.monotonic() - t0) < WALL_BUDGET_S \
+            and len(all_sources) < max_total_sources:
+        dq = _novel.disconfirm_queries(verified)
+        if dq:
+            adv_new = _run_wave([(q, "disconfirming") for q in dq])
+            for s in adv_new:
+                s["_adversarial"] = True
+            if adv_new:
+                all_sources.extend(adv_new)
+                verified_post = verify_claims(_extract_claims(question, all_sources))["verified"]
+                diff = _novel.verdict_downgrades(verified, verified_post)
+                verified = verified_post
+                adversarial = {"ran": True, "queries": dq, "new_sources": len(adv_new), **diff}
+                otel_emit.record("adversarial_wave", {
+                    "tool": "deep_research", "queries": len(dq), "new_sources": len(adv_new),
+                    "downgraded": diff["count"]})
+
+    # ── 5.2 CROSS-RUN contradiction detection: a new claim that conflicts with a prior
+    # corpus claim becomes a KG `contradicts` edge (self-correcting across time).
+    contradictions: dict[str, Any] = {"contradictions": [], "checked": 0, "backend": "off"}
+    if RESEARCH_CROSS_RUN:
+        contradictions = _novel.cross_run_contradictions(verified, question, write_kg=True)
+
+    # ── 5.3 TEMPORAL provenance: stamp each finding "true as of <run date>" (+ flag a
+    # newer source that may supersede it) — the report becomes a living artifact.
+    if RESEARCH_TEMPORAL:
+        verified = _novel.temporal_annotate(verified, all_sources)
+
     synth = synthesize(question, verified, plan)
 
     # ── CitationAgent pass (M-Stage 5): audit the report's claims vs the sources ─
@@ -1456,6 +1506,11 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
         "echo_chamber_blocked": echo_blocked_total,
         "low_authority_filtered": low_authority_total,
         "compounded": compounded,
+        # Phase 5 novel capabilities (present only when their gate ran)
+        "adversarial": adversarial,
+        "cross_run_contradictions": contradictions.get("contradictions", []),
+        "ensemble_strategies": ensemble_strategies,
+        "valid_as_of": (verified[0].get("valid_as_of") if (RESEARCH_TEMPORAL and verified) else None),
         "elapsed_s": elapsed,
         "sovereign": True,
     }
