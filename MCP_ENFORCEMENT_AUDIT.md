@@ -1,5 +1,10 @@
 # MCP_ENFORCEMENT_AUDIT.md — lifecycle-enforcement inventory (B1)
 
+> **Status:** this is the B1 *baseline* snapshot. The B2 (hard-enforce 4) and B3
+> (soft-enforce 3) targets in the last column are now **implemented** in
+> `plugins/conductor/enforce.py` (see `plugins/conductor/README.md`). This doc is left as
+> the pre-wiring inventory.
+
 **Inventory only — no behaviour changed in this step.** Records, for each of the 14
 MCPs, whether it is currently DISCRETIONARY (the driver LLM decides to call it) or
 already LIFECYCLE-ENFORCED (fired from a conductor hook regardless of the model's
