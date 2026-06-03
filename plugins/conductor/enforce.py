@@ -350,6 +350,35 @@ def log_run_outcome(cwd: str, state: dict[str, Any], solved: bool,
     _emit("outcome_logged", {"task_class": tc, "backend": backend, "solved": solved})
 
 
+# P3 ── best-of-N dispatch hint on verify-failure ─────────────────────────────
+def best_of_n_hint(state: dict[str, Any]) -> Optional[str]:
+    """On a verify failure, consult the parallelism dispatcher for WHERE a best-of-N fan-out
+    should land (fabric→cloud, never a blind local fan-out) and surface it as guidance. The
+    conductor can't hold the agent's candidate files, so it signals the dispatch decision and
+    lets mcp-search run the execution-verified selection. Once per step."""
+    if not ENF_ROUTE:
+        return None
+    step = int(state.get("current_step", 1))
+    if state.get("bon_hinted_step") == step:
+        return None
+    state["bon_hinted_step"] = step
+    dc = _mod("dispatch_core")
+    if dc is None:
+        return None
+    try:
+        tgt = dc.target_for(3, verify_failed=True)
+    except Exception:  # noqa: BLE001
+        return None
+    _emit("best_of_n_dispatch", {"step": step, "backend": tgt.get("backend"),
+                                 "parallel": tgt.get("parallel"), "n": tgt.get("n")})
+    if tgt.get("backend") == "local-serial" and tgt.get("n", 1) <= 1:
+        return None  # no parallel backend + nothing to gain from serial fan-out
+    return (f"## Best-of-N available (enforced dispatch)\nThis step's verify failed. Repeated "
+            f"sampling selected by EXECUTION is worthwhile here — fan out {tgt.get('n')} "
+            f"candidate(s) to **{tgt.get('backend')}** ({'parallel' if tgt.get('parallel') else 'serial, bounded'}) "
+            f"via mcp-search and keep the one that passes the verify gate. {tgt.get('reason')}")
+
+
 # P1 ── cost/latency/backend attribution (enforced, post_llm_call) ────────────
 def profile_executor_call(state: dict[str, Any], toks: dict[str, int],
                           wall_ms: int) -> None:

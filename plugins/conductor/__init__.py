@@ -436,6 +436,12 @@ def _post_tool_call(tool_name: str = "", args: Optional[dict] = None, result: An
                 _emit("verify_fail", {"step": step, "failures": fails})
                 if fails >= 2 and not state.get("conductor_triggered_this_step"):
                     _trigger_conductor(cwd, state, "verify_double_fail", step, result_text[:500])
+                # P3 — surface the best-of-N dispatch target (fabric→cloud, never blind local).
+                if _enforce is not None:
+                    try:
+                        _queue(_enforce.best_of_n_hint(state))
+                    except Exception:  # noqa: BLE001
+                        pass
 
     _sync_execution_state(cwd, state)
 

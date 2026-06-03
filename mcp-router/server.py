@@ -20,10 +20,12 @@ from starlette.responses import JSONResponse
 
 _REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 for _d in (_REPO, *(os.path.join(_REPO, d) for d in
-                    ("mcp-costprofiler", "mcp-verify", "mcp-research"))):
+                    ("mcp-costprofiler", "mcp-verify", "mcp-research", "mcp-search",
+                     "mcp-escalation"))):
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
+import dispatch_core
 import router_core
 
 PORT = int(os.environ.get("MCP_ROUTER_PORT", "9117"))
@@ -96,6 +98,35 @@ def bandit_scores(task_class: str) -> dict:
 def recall_notes(task_class: str, n: int = 3) -> dict:
     """Reflexion-style episodic notes for a task class ('on tasks like this, Y worked')."""
     return {"task_class": task_class, "notes": router_core.recall_notes(task_class, n)}
+
+
+@mcp.tool()
+@_threaded
+def dispatch_target(n: int = 3, verify_failed: bool = False) -> dict:
+    """Where should a fan-out of `n` branches land? Honors the asymmetry: fabric (free,
+    parallel) → cloud (paid, parallel) → local (serial, bounded N≤3, verify-fail only).
+    Never a blind N-way fan-out onto the single-stream local executor."""
+    return dispatch_core.target_for(n, verify_failed)
+
+
+@mcp.tool()
+@_threaded
+def best_of_n(task_spec: str, tests: dict, target_path: str = "solution.py",
+              language: str = "python", n: int = 3, verify_failed: bool = False,
+              critical: bool = False, base_files: dict | None = None) -> dict:
+    """Criticality-gated, EXECUTION-verified best-of-N (Phase 3). OFF unless gated on (a
+    verify-failure or a critical/high-value task). Drafts N candidates through the parallelism
+    dispatcher (fabric→cloud, never a blind local fan-out) and selects by the verify oracle —
+    never self-judgment. Requires `tests` as the execution oracle. Logs the outcome."""
+    return dispatch_core.best_of_n(task_spec, tests, target_path, language, n,
+                                   verify_failed, critical, base_files)
+
+
+@mcp.tool()
+@_threaded
+def dispatch_stats() -> dict:
+    """Report fabric/cloud availability + the local-serial fan-out rule."""
+    return dispatch_core.dispatch_stats()
 
 
 @mcp.tool()
