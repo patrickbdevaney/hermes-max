@@ -38,6 +38,17 @@ for _p in (_REPO, os.path.join(_REPO, "mcp-escalation"), os.path.join(_REPO, "mc
 
 _STUCK_TURNS = int(os.environ.get("CONDUCTOR_STUCK_TURNS", "4"))
 
+# Part B B2 — lifecycle ENFORCEMENT of the high-value MCPs (verify/checkpoint/research/
+# watchdog), fired deterministically from the hooks below. Lazy + guarded: if the module
+# or any target MCP is absent the enforcement degrades to a no-op, never breaking the loop.
+try:
+    from . import enforce as _enforce
+except Exception:  # noqa: BLE001
+    try:
+        import enforce as _enforce  # when loaded as a top-level module
+    except Exception:  # noqa: BLE001
+        _enforce = None  # type: ignore
+
 # Phase 2 — token fan-out. The hermes AIAgent exposes stream_delta / thinking /
 # reasoning callbacks; we install them on pre_llm_call and remove them on
 # post_llm_call, writing each delta to the livelog as a gen.* span. The Phase 1
@@ -175,6 +186,8 @@ def _sync_execution_state(cwd: str, state: dict[str, Any]) -> None:
         state["turns_on_current_step"] = 0
         state["verify_consecutive_failures"] = 0
         state["conductor_triggered_this_step"] = False
+        state["formal_write_fails"] = 0           # reset enforced-gate retry budget per step
+        state.pop("checkpointed_step", None)       # allow a fresh checkpoint on the new step
         _emit("step_advance", {"step": reported})
 
 
@@ -186,15 +199,27 @@ def _extract_pytest_summary(text: str) -> str:
 
 
 def _handle_done(cwd: str, state: dict[str, Any]) -> None:
-    """Independently verify before accepting the agent's done declaration."""
+    """Independently verify before accepting the agent's done declaration. The
+    authoritative gate is the FULL formal ladder (verify_formal) — verified/unknown accept
+    (unknown = tool/model incapacity, never block on that); counterexample/spec_rejected
+    reject and continue (NEVER report a pass on a rejected spec). Falls back to the
+    deterministic verify_core gate if formal_core is unavailable."""
     passed, summary = False, "verify unavailable"
+    os.environ.setdefault("VERIFY_REQUIRE_PLAN", "false")  # plan already enforced upstream
     try:
-        import verify_core
-        os.environ.setdefault("VERIFY_REQUIRE_PLAN", "false")  # plan already enforced upstream
-        res = verify_core.verify(cwd)
-        passed, summary = bool(res.get("passed")), res.get("summary", "")
-    except Exception as e:  # noqa: BLE001
-        summary = f"verify error: {e}"
+        import formal_core
+        fres = formal_core.verify_formal(cwd)
+        kind = fres.get("result")
+        summary = f"verify_formal: {kind} ({fres.get('method') or fres.get('reason','')})"[:160]
+        passed = kind in ("verified", "unknown")  # unknown = can't adjudicate → don't block done
+        _emit("verify_enforced", {"phase": "done", "result": kind, "method": fres.get("method")})
+    except Exception:  # noqa: BLE001
+        try:
+            import verify_core
+            res = verify_core.verify(cwd)
+            passed, summary = bool(res.get("passed")), res.get("summary", "")
+        except Exception as e:  # noqa: BLE001
+            summary = f"verify error: {e}"
     if passed:
         _emit("run_complete", {"turns": state.get("total_turns", 0),
                                "steps": state.get("current_step", 1)})
@@ -278,6 +303,20 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
         "Do not replan or re-architect — execute the plan.",
     ]
 
+    # ── Part B B2: research ENTRY gate (once per qualifying task) + queued enforcement
+    # guidance (verify/watchdog feedback queued by post_tool_call). Best-effort.
+    if _enforce is not None:
+        task_text = "; ".join(s.get("description", "") for s in plan.get("steps", []))[:1000]
+        try:
+            rg = _enforce.research_entry_gate(cwd, state, task_text)
+        except Exception:  # noqa: BLE001
+            rg = None
+        if rg:
+            lines += ["", rg]
+    for g in (state.get("enforce_guidance") or []):
+        lines += ["", str(g)]
+    state["enforce_guidance"] = []
+
     state["total_turns"] = state.get("total_turns", 0) + 1
     state["turns_on_current_step"] = turns_on + 1
     _save_state(cwd, state)
@@ -335,8 +374,19 @@ def _post_tool_call(tool_name: str = "", args: Optional[dict] = None, result: An
     step = int(state.get("current_step", 1))
     result_text = str(result)[:2000]
 
+    def _queue(g: Optional[str]) -> None:
+        if g:
+            state.setdefault("enforce_guidance", []).append(g)
+
     if tool_name in ("write_file", "edit_file", "str_replace", "patch"):
-        _emit("file_write", {"step": step, "file": args.get("path") or args.get("file_path") or "?"})
+        wpath = args.get("path") or args.get("file_path") or "?"
+        _emit("file_write", {"step": step, "file": wpath})
+        # B2.1 — fire the fast verify_formal compile/type/lint gate on the written file.
+        if _enforce is not None and wpath != "?":
+            try:
+                _queue(_enforce.on_file_write(cwd, state, wpath))
+            except Exception:  # noqa: BLE001
+                pass
 
     if tool_name in ("terminal", "bash", "shell"):
         cmd = str(args.get("command", ""))
@@ -347,6 +397,13 @@ def _post_tool_call(tool_name: str = "", args: Optional[dict] = None, result: An
                 state["verify_consecutive_failures"] = 0
                 _emit("verify_pass", {"step": step, "result": state["last_verify_result"]})
                 print(f"[conductor] ✓ verify passed on step {step}", flush=True)
+                # B2.2 — checkpoint AFTER a green verify (the checkpoint re-verifies and
+                # refuses on RED, so it is the hard gate). Model never decides this.
+                if _enforce is not None:
+                    try:
+                        _enforce.checkpoint_after_green(cwd, state)
+                    except Exception:  # noqa: BLE001
+                        pass
             else:
                 fails = int(state.get("verify_consecutive_failures", 0)) + 1
                 state["verify_consecutive_failures"] = fails
@@ -355,6 +412,14 @@ def _post_tool_call(tool_name: str = "", args: Optional[dict] = None, result: An
                     _trigger_conductor(cwd, state, "verify_double_fail", step, result_text[:500])
 
     _sync_execution_state(cwd, state)
+
+    # B2.4 — watchdog background tick: fires unconditionally on every tool call (a
+    # background-via-hook, never a model tool call). Emits a span; nudges on a spiral.
+    if _enforce is not None:
+        try:
+            _queue(_enforce.watchdog_tick(cwd, state, reasoning_text=result_text))
+        except Exception:  # noqa: BLE001
+            pass
 
     turns = int(state.get("turns_on_current_step", 0))
     if turns >= _STUCK_TURNS and not state.get("conductor_triggered_this_step"):

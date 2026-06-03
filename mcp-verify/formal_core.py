@@ -416,6 +416,26 @@ def verify_formal(path: str, language: str = "auto", task_spec: str | None = Non
     return result
 
 
+def compile_gate(path: str, language: str = "auto") -> dict[str, Any]:
+    """FAST write-time gate: rungs 0-1 only (compile/type hard, lint advisory), no LLM,
+    no PBT/mutation/tests. Returns a four-value result — `counterexample` on a hard
+    compile/type failure, else `unknown` (clean-but-not-proven, or no toolchain). Cheap
+    enough to fire on every file write; the full ladder (rung 2) runs at the done gate."""
+    abspath = os.path.abspath(os.path.expanduser(path))
+    if not os.path.exists(abspath):
+        return {**_unknown(f"path does not exist: {abspath}"), "language": language}
+    lang = language if language != "auto" else verify_core.detect_language(abspath)
+    g = _compile_gate(abspath, lang)
+    base = {"language": lang, "rung0_1": g["stages"],
+            "advisories": [a["tool"] for a in g["advisories"]]}
+    if g["hard_fail"] is not None:
+        hf = g["hard_fail"]
+        return {**_counterexample(None, hf.get("output", ""), method=hf["tool"], stage=hf["name"]), **base}
+    reason = ("compile/lint clean (rungs 0-1)" if g["compile_ok"] is True
+              else f"no {lang} toolchain available")
+    return {**_unknown(reason, compile_ok=g["compile_ok"]), **base}
+
+
 def verify_formal_stats() -> dict[str, Any]:
     return {"model_available": _model_available(),
             "pool": (_pool.pool_stats() if _pool else {"mode": "absent"}),
