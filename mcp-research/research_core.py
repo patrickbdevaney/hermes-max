@@ -87,6 +87,17 @@ MAX_SUBGOALS = int(os.environ.get("RESEARCH_MAX_SUBGOALS", "5"))
 QUERIES_PER_SUBGOAL = int(os.environ.get("RESEARCH_QUERIES_PER_SUBGOAL", "4"))
 MAX_SOURCES_PER_QUERY = int(os.environ.get("RESEARCH_MAX_SOURCES_PER_QUERY", "3"))
 MAX_TOTAL_SOURCES = int(os.environ.get("RESEARCH_MAX_TOTAL_SOURCES", "8"))
+# Phase 4.1 — wide fan-out CEILINGS (the clamp limits, not the defaults). Now that
+# coverage-gating + the relevance cascade can exploit breadth, the env knobs can dial
+# retained sources to the 20–40 the spec targets and per-query candidates wider; the
+# real production numbers are set per-deployment (Thor) via env, defaults stay modest.
+_PER_QUERY_CEIL = int(os.environ.get("RESEARCH_PER_QUERY_CEIL", "16"))
+_TOTAL_CEIL = int(os.environ.get("RESEARCH_TOTAL_CEIL", "60"))
+# Candidate fan per query = per-query-cap × this (raises the 300–500 candidate pool).
+RESEARCH_CANDIDATE_FANOUT = int(os.environ.get("RESEARCH_CANDIDATE_FANOUT", "3"))
+# Bounded scrape-worker pool — concurrent page fetches (tune to backend throughput;
+# the spec's 10–16 sweet spot for Crawl4AI headless pages on the Thor). 1 = sequential.
+RESEARCH_SCRAPE_CONCURRENCY = max(1, int(os.environ.get("RESEARCH_SCRAPE_CONCURRENCY", "10")))
 # The loop is now scrape-bound (wider coverage), so the wall budget is larger.
 WALL_BUDGET_S = float(os.environ.get("RESEARCH_WALL_BUDGET_S", "900"))
 MIN_INDEPENDENT_SOURCES = int(os.environ.get("RESEARCH_MIN_SOURCES", "2"))
@@ -253,13 +264,63 @@ def _search(query: str, limit: int = 8, category: str | None = None) -> list[dic
     return res.get("results", []) if isinstance(res, dict) else []
 
 
-def _fetch(url: str) -> dict[str, Any]:
-    """Clean markdown via mcp-docs.fetch_clean (Crawl4AI -> trafilatura)."""
+def _fetch_docs(url: str) -> dict[str, Any]:
+    """RAW Crawl4AI rung: clean markdown via mcp-docs.fetch_clean (Crawl4AI ->
+    trafilatura inside mcp-docs). This is the browser tier — extract.py's crawl4ai
+    rung calls THIS (never _fetch) so the tiered ladder can't recurse into itself."""
     r = _mcp_call(DOCS_MCP_URL, "fetch_clean", {"url": url})
     if not r.get("ok"):
         return {"ok": False, "url": url, "error": r.get("error", "fetch failed")}
     res = r.get("result") or {}
     return res if isinstance(res, dict) else {"ok": False, "url": url}
+
+
+# Tiered fetch is on by default (Phase 4.3): browserless HTTP-first (Tier A), Chromium
+# only when static comes back thin. Set RESEARCH_TIERED_FETCH=0 to force the old
+# straight-to-Crawl4AI path. Either way _fetch_docs is the browser rung underneath.
+RESEARCH_TIERED_FETCH = os.environ.get("RESEARCH_TIERED_FETCH", "1") not in ("0", "false", "")
+
+
+def _fetch(url: str) -> dict[str, Any]:
+    """Fetch + clean a page. By default routes through the TIERED extraction ladder
+    (extract.extract_url): fast browserless static first, reserving Chromium for pages
+    that actually need JS — the biggest wall-clock win on a wide run. Falls back to the
+    raw Crawl4AI rung if the ladder import is unavailable or disabled. The `backend`
+    field carries which rung produced the body (observability)."""
+    if RESEARCH_TIERED_FETCH:
+        try:
+            import extract as _extract  # local import: avoids import-time circularity
+            res = _extract.extract_url(url)
+            if isinstance(res, dict) and res.get("ok"):
+                return {"ok": True, "url": url, "markdown": res.get("markdown", ""),
+                        "backend": res.get("method"), "thin": res.get("thin", False)}
+            # ladder exhausted -> fall through to the raw browser rung below
+        except Exception:  # noqa: BLE001
+            pass
+    return _fetch_docs(url)
+
+
+def _fetch_many(urls: list[str]) -> list[dict[str, Any]]:
+    """Fetch many URLs through a BOUNDED scrape-worker pool (Phase 4.1), preserving
+    input order. Concurrency is capped at RESEARCH_SCRAPE_CONCURRENCY so we exploit
+    breadth without melting Crawl4AI/SearXNG. Sequential when the cap is 1 or there is
+    a single URL. Calls the module-level `_fetch` (so test monkeypatches still apply);
+    any per-URL failure becomes a soft {ok:False} rather than sinking the batch."""
+    if not urls:
+        return []
+    workers = min(RESEARCH_SCRAPE_CONCURRENCY, len(urls))
+    if workers <= 1:
+        return [_fetch(u) for u in urls]
+    from concurrent.futures import ThreadPoolExecutor
+    out: list[dict[str, Any]] = [{"ok": False, "url": u} for u in urls]
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_fetch, u): i for i, u in enumerate(urls)}
+        for fut, i in futs.items():
+            try:
+                out[i] = fut.result()
+            except Exception:  # noqa: BLE001
+                out[i] = {"ok": False, "url": urls[i], "error": "fetch raised"}
+    return out
 
 
 # Current logical phase, set by the public pipeline functions, used only to LABEL
@@ -481,8 +542,8 @@ def explore(queries: list[str], seen_urls: list[str] | None = None,
     queries = [q for q in (queries or []) if q and q.strip()]
     if not queries:
         return {"ok": False, "error": "no queries", "sources": []}
-    max_sources_per_query = max(1, min(int(max_sources_per_query), 10))
-    max_total = max(1, min(int(max_total), 50))
+    max_sources_per_query = max(1, min(int(max_sources_per_query), _PER_QUERY_CEIL))
+    max_total = max(1, min(int(max_total), _TOTAL_CEIL))
 
     seen_norm: set[str] = {_normalize_url(u) for u in (seen_urls or [])}
     seen_shingles: list[set[str]] = []
@@ -495,7 +556,7 @@ def explore(queries: list[str], seen_urls: list[str] | None = None,
     for q in queries:
         if len(sources) >= max_total:
             break
-        candidates = _search(q, limit=max(max_sources_per_query * 3, 8), category=category)
+        candidates = _search(q, limit=max(max_sources_per_query * RESEARCH_CANDIDATE_FANOUT, 8), category=category)
         # COARSE relevance rung (Phase 3.2): near-free embedding cosine pre-filter.
         # Embed the candidate snippets + query in ONE call and drop the off-topic
         # tail BEFORE the cross-encoder/LLM ever sees them. Guarded: a None embed
@@ -511,9 +572,13 @@ def explore(queries: list[str], seen_urls: list[str] | None = None,
                          for i in order])
         if rr:  # blend: cross-encoder order, but keep authority as the primary key
             order = [order[j] for j in rr]
-        taken_this_query = 0
+        # SELECTION pass (no fetch): URL-dedup + authority-filter, pick up to this
+        # query's budget. URLs are reserved in seen_norm here so the concurrent batch
+        # (and later queries) never double-fetch the same page.
+        budget = min(max_total - len(sources), max_sources_per_query)
+        selected: list[dict[str, Any]] = []
         for i in order:
-            if len(sources) >= max_total or taken_this_query >= max_sources_per_query:
+            if len(selected) >= budget:
                 break
             cand = candidates[i]
             url = cand.get("url", "")
@@ -528,8 +593,17 @@ def explore(queries: list[str], seen_urls: list[str] | None = None,
                 low_authority_filtered += 1
                 continue
             seen_norm.add(nu)
-            fetch_attempts += 1
-            fetched = _fetch(url)
+            selected.append(cand)
+        if not selected:
+            continue
+        fetch_attempts += len(selected)
+        # CONCURRENT fetch through the bounded scrape pool, then process IN ORDER so
+        # content-shingle dedup + caps stay deterministic regardless of fetch timing.
+        fetched_all = _fetch_many([c["url"] for c in selected])
+        for cand, fetched in zip(selected, fetched_all):
+            if len(sources) >= max_total:
+                break
+            url = cand["url"]
             md = fetched.get("markdown", "") if fetched.get("ok") else ""
             sh = _shingles(md or cand.get("content", ""), n=3)
             if md and any(_jaccard(sh, prev) >= CONTENT_DUP_THRESHOLD for prev in seen_shingles):
@@ -549,7 +623,6 @@ def explore(queries: list[str], seen_urls: list[str] | None = None,
                 "markdown": md[:20000],
                 "chars": len(md),
             })
-            taken_this_query += 1
 
     otel_emit.record("sources_explored", {
         "queries": len(queries), "sources": len(sources), "fetch_attempts": fetch_attempts,
