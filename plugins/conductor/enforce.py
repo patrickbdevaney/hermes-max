@@ -55,6 +55,7 @@ ENF_CLASSIFY = _on("CONDUCTOR_ENFORCE_CLASSIFY")
 ENF_RAG = _on("CONDUCTOR_ENFORCE_RAG")
 ENF_PROFILE = _on("CONDUCTOR_ENFORCE_PROFILE")  # P1 cost attribution (enforced, post_llm_call)
 ENF_ROUTE = _on("CONDUCTOR_ENFORCE_ROUTE")      # P2 bandit route read (pre_llm_call) + write (post-run)
+ENF_DAG = _on("CONDUCTOR_ENFORCE_DAG")          # P5 DAG schedule hint (pre_llm_call, multi-file only)
 _MULTIFILE_HINT = ("multiple files", "across", "refactor", "rename", "move ", "each module",
                    "every file", "all the", "throughout", "codebase-wide", "multi-file")
 WRITE_MIN_BYTES = int(os.environ.get("CONDUCTOR_VERIFY_WRITE_MIN_BYTES", "64"))
@@ -350,6 +351,38 @@ def log_run_outcome(cwd: str, state: dict[str, Any], solved: bool,
     _emit("outcome_logged", {"task_class": tc, "backend": backend, "solved": solved})
 
 
+# P5 ── DAG schedule hint (default-on, multi-file only) ───────────────────────
+def dag_schedule_hint(state: dict[str, Any], plan: dict[str, Any]) -> Optional[str]:
+    """For a multi-file task, surface the DAG schedule: the independent ready wave, whether it
+    runs PARALLEL (off-local) or context-isolated-but-SERIAL (local), and any merge conflicts.
+    Steps before current_step are treated as done. Once per step. Off for single-file tasks."""
+    if not ENF_DAG:
+        return None
+    dag = _mod("dag_core")
+    steps = (plan or {}).get("steps", [])
+    if dag is None or not steps:
+        return None
+    nodes = dag.parse_dag(steps)["nodes"]
+    if not dag.is_multifile(nodes):
+        return None  # single-file → no DAG scheduling
+    step = int(state.get("current_step", 1))
+    if state.get("dag_step") == step:
+        return None
+    state["dag_step"] = step
+    done = list(range(1, step))  # steps before the current one are complete
+    sch = dag.schedule(nodes, done)
+    if not sch.get("wave"):
+        return None
+    _emit("dag_schedule", {"step": step, "wave": sch["wave"], "backend": sch.get("backend"),
+                           "parallel": sch.get("parallel"), "conflicts": len(sch.get("conflicts", []))})
+    line = (f"## DAG schedule (enforced)\nReady independent node(s): {sch['wave']}. "
+            f"{sch.get('note')}.")
+    if sch.get("conflicts"):
+        cs = "; ".join(f"nodes {c['a']}&{c['b']} both touch {c['files']}" for c in sch["conflicts"][:3])
+        line += f"\n⚠ Merge-conflict risk — serialize or reconcile: {cs}"
+    return line
+
+
 # P3 ── best-of-N dispatch hint on verify-failure ─────────────────────────────
 def best_of_n_hint(state: dict[str, Any]) -> Optional[str]:
     """On a verify failure, consult the parallelism dispatcher for WHERE a best-of-N fan-out
@@ -371,12 +404,14 @@ def best_of_n_hint(state: dict[str, Any]) -> Optional[str]:
         return None
     _emit("best_of_n_dispatch", {"step": step, "backend": tgt.get("backend"),
                                  "parallel": tgt.get("parallel"), "n": tgt.get("n")})
-    if tgt.get("backend") == "local-serial" and tgt.get("n", 1) <= 1:
-        return None  # no parallel backend + nothing to gain from serial fan-out
+    # HARD RULE: never suggest fanning out onto the single-stream local executor. Best-of-N
+    # is only surfaced when a PARALLEL backend (fabric/cloud) is the dispatch target.
+    if tgt.get("backend") == "local-serial" or not tgt.get("parallel"):
+        return None
     return (f"## Best-of-N available (enforced dispatch)\nThis step's verify failed. Repeated "
             f"sampling selected by EXECUTION is worthwhile here — fan out {tgt.get('n')} "
-            f"candidate(s) to **{tgt.get('backend')}** ({'parallel' if tgt.get('parallel') else 'serial, bounded'}) "
-            f"via mcp-search and keep the one that passes the verify gate. {tgt.get('reason')}")
+            f"candidate(s) IN PARALLEL to **{tgt.get('backend')}** via mcp-search and keep the "
+            f"one that passes the verify gate. {tgt.get('reason')}")
 
 
 # P1 ── cost/latency/backend attribution (enforced, post_llm_call) ────────────

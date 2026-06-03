@@ -49,10 +49,11 @@ def section_target() -> None:
         _fail(f"local + no verify-fail must be a SINGLE attempt (no fan-out): {t_no_fail}")
     _ok("local only + no verify-fail → ONE attempt (refuses blind fan-out)")
 
+    # STRICTER RULE: even on verify-fail, local NEVER becomes a (serial) fan-out target.
     t_fail = dc.target_for(5, verify_failed=True)
-    if t_fail["backend"] != "local-serial" or t_fail["parallel"] or t_fail["n"] != dc.LOCAL_BEST_OF_N_MAX:
-        _fail(f"local verify-fail → serial bounded to {dc.LOCAL_BEST_OF_N_MAX}: {t_fail}")
-    _ok(f"local + verify-fail → serial best-of-N bounded to {dc.LOCAL_BEST_OF_N_MAX}")
+    if t_fail["backend"] != "local-serial" or t_fail["parallel"] or t_fail["n"] != 1:
+        _fail(f"local must NEVER be a fan-out target, even on verify-fail (n must be 1): {t_fail}")
+    _ok("local + verify-fail → STILL one attempt (never a serial local fan-out)")
 
 
 def section_fanout() -> None:

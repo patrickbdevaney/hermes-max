@@ -371,7 +371,12 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
         "'complexity: HIGH'. For HIGH steps (novel concurrency invariants, atomicity "
         "guarantees, non-obvious property-test strategies, anything a small local model "
         "shouldn't design alone) add a one-line 'note:' with the key consideration — the "
-        "executor will call reasoning_escalation BEFORE attempting those steps.")
+        "executor will call reasoning_escalation BEFORE attempting those steps.\n"
+        "For MULTI-FILE tasks, annotate each step with the files it touches and its "
+        "dependencies so the conductor can schedule independent steps with fresh focused "
+        "context: append 'files: a.py, b.py' and 'depends_on: [1, 2]' (1-based earlier step "
+        "numbers) to the step line. Independent steps (no shared deps) get isolated contexts; "
+        "steps that touch the same file are serialized to avoid merge conflicts.")
     # synth chain already carries thinking_budget 8192 (see _THINKING_BUDGET["synth"]).
     res = run_role("synth", prompt=prompt, max_tokens=4096)
     if not (res.get("ok") and res.get("content")):

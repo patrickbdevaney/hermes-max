@@ -111,8 +111,17 @@ def _load_plan(cwd: str) -> dict[str, Any]:
         if m:
             desc = m.group(1).strip()
             complexity = "HIGH" if re.search(r"complexity\s*:\s*high", desc, re.I) else "standard"
-            desc = re.sub(r"\s*complexity\s*:\s*\w+\s*$", "", desc, flags=re.I).strip()
-            steps.append({"description": desc[:200], "complexity": complexity})
+            # P5 DAG annotations (optional, anywhere in the line): depends_on: [1, 2] · files: a.py, b.py
+            dep_m = re.search(r"depends_on\s*:\s*\[([0-9,\s]*)\]", desc, re.I)
+            depends_on = [int(x) for x in re.findall(r"\d+", dep_m.group(1))] if dep_m else []
+            file_m = re.search(r"files\s*:\s*([^\]]+?)(?:$|;|\s*depends_on)", desc, re.I)
+            files = [f.strip() for f in re.split(r"[,\s]+", file_m.group(1)) if f.strip().endswith(
+                (".py", ".rs", ".ts", ".js", ".go"))] if file_m else []
+            desc = re.sub(r"\s*(complexity\s*:\s*\w+|depends_on\s*:\s*\[[0-9,\s]*\]|files\s*:[^;]*)",
+                          "", desc, flags=re.I)
+            desc = re.sub(r"[,\s]+$", "", desc).strip()  # drop trailing separators left behind
+            steps.append({"description": desc[:200], "complexity": complexity,
+                          "depends_on": depends_on, "files": files})
     return {"steps": steps}
 
 
@@ -333,6 +342,13 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
                 g = None
             if g:
                 lines += ["", g]
+        # P5 — DAG schedule hint (multi-file only): ready wave + parallel/isolation + conflicts.
+        try:
+            dg = _enforce.dag_schedule_hint(state, plan)
+            if dg:
+                lines += ["", dg]
+        except Exception:  # noqa: BLE001
+            pass
     for g in (state.get("enforce_guidance") or []):
         lines += ["", str(g)]
     state["enforce_guidance"] = []

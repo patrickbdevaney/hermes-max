@@ -20,8 +20,6 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
-LOCAL_BEST_OF_N_MAX = int(os.environ.get("DISPATCH_LOCAL_BON_MAX", "3"))
-
 
 def _fabric():
     try:
@@ -42,21 +40,23 @@ def _cloud_available() -> bool:
 
 def target_for(n: int, verify_failed: bool = False) -> dict[str, Any]:
     """Decide WHERE a fan-out of `n` branches lands, honoring the asymmetry. Returns
-    {backend, parallel, n, reason}. Fabric first (free+parallel), then cloud (paid+parallel);
-    local only as a serial, bounded, verify-fail-gated fallback — never a blind N-way fan-out."""
+    {backend, parallel, n, reason}. Fabric first (free+parallel), then cloud (paid+parallel).
+
+    HARD RULE (stricter than the source spec's grudging allowance): fan-out NEVER lands on
+    the local executor. The Thor vLLM is single-stream; turning best-of-N into serial re-runs
+    there fights the loop and burns wall-clock, so when no parallel backend is available the
+    dispatcher returns n=1 (a single local attempt) — it does NOT serialize N on local. The
+    caller falls back to one attempt + (separately) the conductor's cloud escalation."""
     if _fabric() is not None:
         return {"backend": "fabric", "parallel": True, "n": max(1, n),
                 "reason": "fabric is free + parallel — preferred fan-out target"}
     if _cloud_available():
         return {"backend": "cloud-deepseek", "parallel": True, "n": max(1, n),
                 "reason": "fabric exhausted → cloud parallel (real $, flat wall-clock)"}
-    # local only: single-stream. Refuse a blind N-way fan-out.
-    if verify_failed:
-        return {"backend": "local-serial", "parallel": False, "n": min(max(1, n), LOCAL_BEST_OF_N_MAX),
-                "reason": f"local single-stream; serial best-of-N bounded to "
-                          f"{LOCAL_BEST_OF_N_MAX}, on verify-failure only"}
+    # local only: single-stream → NO fan-out (not even serial). One attempt.
     return {"backend": "local-serial", "parallel": False, "n": 1,
-            "reason": "local single-stream + no verify-failure → one attempt (no fan-out)"}
+            "reason": "no parallel backend; local is single-stream → ONE attempt, never a "
+                      "(serial) local fan-out. Escalate via the conductor for parallel help."}
 
 
 def fanout(prompts: list[str], system: Optional[str] = None, temperature: float = 0.4,
@@ -157,5 +157,5 @@ def best_of_n(task_spec: str, tests: dict[str, str], target_path: str = "solutio
 
 def dispatch_stats() -> dict[str, Any]:
     return {"fabric_available": _fabric() is not None, "cloud_available": _cloud_available(),
-            "local_best_of_n_max": LOCAL_BEST_OF_N_MAX,
-            "rule": "fan-out → fabric → cloud; never blind onto local-serial"}
+            "rule": "fan-out → fabric → cloud ONLY; local is single-stream → never a fan-out "
+                    "target (not even serial), one attempt instead"}

@@ -25,6 +25,7 @@ for _d in (_REPO, *(os.path.join(_REPO, d) for d in
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
+import dag_core
 import dispatch_core
 import router_core
 
@@ -127,6 +128,25 @@ def best_of_n(task_spec: str, tests: dict, target_path: str = "solution.py",
 def dispatch_stats() -> dict:
     """Report fabric/cloud availability + the local-serial fan-out rule."""
     return dispatch_core.dispatch_stats()
+
+
+@mcp.tool()
+@_threaded
+def dag_schedule(steps: list, done: list | None = None, repo_path: str = "") -> dict:
+    """Phase 5 — given parsed PLAN.md steps (each may carry depends_on + files), compute the
+    next wave of independent ready nodes, decide parallel (off-local) vs context-isolated-
+    but-serial (local) via the dispatcher, and flag merge conflicts (overlapping files).
+    Independent nodes parallelize ONLY off-local; on local the benefit is context isolation,
+    not wall-clock. Returns {wave, backend, parallel, conflicts, note}."""
+    parsed = dag_core.parse_dag(steps)
+    return dag_core.schedule(parsed["nodes"], done or [], repo_path)
+
+
+@mcp.tool()
+@_threaded
+def dag_stats() -> dict:
+    """Report the DAG scheduling rule (local = context-isolated serial, not parallel)."""
+    return dag_core.dag_stats()
 
 
 @mcp.tool()
