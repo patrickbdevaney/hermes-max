@@ -64,6 +64,40 @@ def part_a() -> None:
         _fail(f"raising rung should be caught, ladder continues: {r}")
     _ok("a rung raising is caught; ladder continues to next rung")
 
+    # Phase 4.3 thin-content floor: a static (trafilatura) body UNDER the floor must
+    # NOT win — the ladder falls through to the browser tier. The substantive browser
+    # body wins; trafilatura's attempt is flagged thin.
+    thin_body = "x" * (e.THIN_TEXT_CHARS - 1)
+    rich_body = "y" * (e.THIN_TEXT_CHARS + 200)
+    e._RUNGS = {"fast_http": lambda url: None,
+                "trafilatura": lambda url: thin_body,
+                "crawl4ai": lambda url: rich_body, "jina": lambda url: None}
+    r = e.extract_url("https://example.com/thin")
+    traf_attempt = next(a for a in r["attempts"] if a["rung"] == "trafilatura")
+    if not (r["ok"] and r["method"] == "crawl4ai" and traf_attempt.get("thin")):
+        _fail(f"thin static should fall through to browser: {r}")
+    _ok("thin static body (<floor) falls through to browser tier; thin flagged")
+
+    # ...but a thin static body still beats NOTHING: if the browser also fails, the
+    # thin body is returned (flagged) rather than discarded.
+    e._RUNGS = {"fast_http": lambda url: None,
+                "trafilatura": lambda url: thin_body,
+                "crawl4ai": lambda url: None, "jina": lambda url: None}
+    r = e.extract_url("https://example.com/onlythin")
+    if not (r["ok"] and r["method"] == "static_thin" and r.get("thin") and r["markdown"] == thin_body):
+        _fail(f"thin body should be the last-resort win: {r}")
+    _ok("thin static body is the last-resort win when every other rung fails")
+
+    # a static body ABOVE the floor wins immediately (browser never runs)
+    e._RUNGS = {"fast_http": lambda url: None,
+                "trafilatura": lambda url: rich_body,
+                "crawl4ai": lambda url: (_ for _ in ()).throw(AssertionError("browser should not run")),
+                "jina": lambda url: None}
+    r = e.extract_url("https://example.com/rich")
+    if not (r["ok"] and r["method"] == "trafilatura"):
+        _fail(f"rich static should win without the browser: {r}")
+    _ok("static body above floor wins on Tier A — browser stays cold")
+
 
 def part_b() -> None:
     print("[B] authority_rank (primary > blog)")

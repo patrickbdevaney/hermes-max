@@ -14,8 +14,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
 import sys
+import time
 from typing import Any
 
 import httpx
@@ -59,6 +61,11 @@ RAG_MCP_URL = os.environ.get("RAG_MCP_URL", "http://127.0.0.1:9102/mcp")
 KG_MCP_URL = os.environ.get("KG_MCP_URL", "http://127.0.0.1:9103/mcp")
 
 HTTP_TIMEOUT = float(os.environ.get("DOCS_HTTP_TIMEOUT", "60"))
+# Phase 4.2 SearXNG hardening — spread query bursts so the upstream engines (Google/
+# Bing) don't trip CAPTCHA storms under a wide fan-out. Both default to no-op so the
+# sovereign/smoke path is unchanged; operators dial them up for high-volume runs.
+SEARXNG_JITTER_S = float(os.environ.get("SEARXNG_JITTER_S", "0"))   # max random pre-query sleep
+SEARXNG_RETRIES = int(os.environ.get("SEARXNG_RETRIES", "1"))       # attempts on transient failure
 CRAWL_TIMEOUT = float(os.environ.get("DOCS_CRAWL_TIMEOUT", "90"))
 DISTILL_TIMEOUT = float(os.environ.get("DOCS_DISTILL_TIMEOUT", "300"))
 # The chat model is a reasoning model — it spends a big hidden budget before the
@@ -72,13 +79,23 @@ def search_docs(query: str, category: str | None = None, limit: int = 8) -> dict
     params: dict[str, str] = {"q": query, "format": "json"}
     if category:
         params["categories"] = category
-    try:
-        with httpx.Client(timeout=HTTP_TIMEOUT, headers={"User-Agent": "hermes-max-docs/1.0"}) as c:
-            r = c.get(f"{SEARXNG_URL}/search", params=params)
-            r.raise_for_status()
-            data = r.json()
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "query": query, "error": f"SearXNG unavailable: {type(e).__name__}: {e}",
+    if SEARXNG_JITTER_S > 0:                       # spread the burst (anti-CAPTCHA)
+        time.sleep(random.uniform(0, SEARXNG_JITTER_S))
+    data: dict[str, Any] | None = None
+    last_err: Exception | None = None
+    for attempt in range(max(1, SEARXNG_RETRIES)):
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT, headers={"User-Agent": "hermes-max-docs/1.0"}) as c:
+                r = c.get(f"{SEARXNG_URL}/search", params=params)
+                r.raise_for_status()
+                data = r.json()
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt + 1 < max(1, SEARXNG_RETRIES):   # exp backoff + jitter before retry
+                time.sleep(min(8.0, 0.5 * (2 ** attempt)) + random.uniform(0, 0.5))
+    if data is None:
+        return {"ok": False, "query": query, "error": f"SearXNG unavailable: {type(last_err).__name__}: {last_err}",
                 "hint": f"is SearXNG up with JSON enabled? ./searXNG.sh ({SEARXNG_URL})", "results": []}
     results = [
         {"title": x.get("title", ""), "url": x.get("url", ""), "content": x.get("content", "")}
