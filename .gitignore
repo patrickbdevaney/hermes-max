@@ -6,6 +6,8 @@ bin/
 # runtime config + state dir — the system reads live config from here (or
 # $HERMES_MAX_CONFIG_DIR); the repo ships only config/*.example.yaml. Never commit.
 .hermes-max/
+# conductor runtime scratch dir — local state, never committed.
+.hermes-conductor/
 .mypy_cache/
 __pycache__/
 .ruff_cache/
