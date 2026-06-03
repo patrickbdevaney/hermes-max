@@ -235,6 +235,23 @@ def verify_formal(path: str, language: str = "auto", task_spec: str = "",
 
 @mcp.tool()
 @_threaded
+def criticality_classify(path: str, language: str = "auto") -> dict:
+    """Classify a module's VERIFICATION criticality (Part A Phase 2). CRITICAL iff
+    pure/deterministic AND high blast-radius (money/ledger, memory/unsafe, auth/credentials,
+    data-integrity/persistence, or termination). Deterministic keyword/AST rules decide when
+    they fire; a cheap-LLM fallback runs only when rules are silent and degrades to
+    non-critical without a model. Returns {critical, dimensions, pure, concurrent, method}.
+    The router uses this to send only critical, non-concurrent code to the heavy rungs
+    (Kani/SMT) — never the whole codebase."""
+    try:
+        import criticality
+    except Exception as e:  # noqa: BLE001
+        return {"critical": False, "reason": f"criticality unavailable: {e}"}
+    return criticality.criticality_classify(path, language)
+
+
+@mcp.tool()
+@_threaded
 def formal_stats() -> dict:
     """Report the formal-verification ladder's configuration: whether a spec-generation
     model/pool is reachable, mutation budget, min kill-rate, and which languages have

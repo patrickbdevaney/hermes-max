@@ -398,6 +398,10 @@ def verify_formal(path: str, language: str = "auto", task_spec: str | None = Non
             r2 = (_unknown("directory target — ran smoke (pytest) only", method="smoke")
                   if sm.get("passed") else
                   _counterexample(None, sm.get("summary", "")[:1500], method="smoke", stage="tests"))
+    elif lang == "rust" and gate["compile_ok"] is True:
+        # Rung 3 (CRITICAL-only): route critical, non-concurrent Rust to Kani; else stop at
+        # rungs 0-1. Concurrent or non-critical Rust is not sent to the solver.
+        r2 = _rust_rung3(abspath)
     else:
         # Rungs 0-1 enforced for every language; rung-2 PBT for non-Python is honest TODO.
         if gate["compile_ok"] is True:
@@ -414,6 +418,39 @@ def verify_formal(path: str, language: str = "auto", task_spec: str | None = Non
         "method": result.get("method"), "rungs": "0,1" + (",2" if lang == "python" else ""),
         "elapsed_s": round(time.monotonic() - t0, 2)})
     return result
+
+
+def _rust_rung3(path: str) -> dict[str, Any]:
+    """Rung 3 router for Rust: classify criticality; route critical, non-concurrent crates
+    to Kani; degrade to proptest (honest `unknown` until proptest is wired) on Kani
+    timeout/absence; leave non-critical Rust at rungs 0-1 (`unknown`)."""
+    try:
+        import criticality
+        crit = criticality.criticality_classify(path, "rust")
+    except Exception:  # noqa: BLE001
+        crit = {"critical": False, "concurrent": False, "dimensions": []}
+    if not crit.get("critical"):
+        return _unknown("compile+lint passed; non-critical Rust → no solver rung "
+                        "(rung-2 proptest not yet wired)", method="compile-only",
+                        criticality=crit)
+    try:
+        import kani_verify
+        kr = kani_verify.kani_verify(path, concurrent=bool(crit.get("concurrent")))
+    except Exception as e:  # noqa: BLE001
+        return _unknown(f"kani router error: {type(e).__name__}", method="none", criticality=crit)
+    kind = kr.get("result")
+    if kind == "verified":
+        return _verified(kr.get("property", "kani"), kr.get("method", "kani"),
+                         criticality=crit, harness_fns=kr.get("harness_fns"))
+    if kind == "counterexample":
+        return _counterexample(kr.get("input"), kr.get("trace", ""), method="kani",
+                               criticality=crit)
+    if kind == "degrade":
+        # Kani unavailable/timeout → would fall to proptest; proptest-for-Rust not wired yet.
+        return _unknown(f"critical Rust, but Kani degraded ({kr.get('reason')}) and proptest "
+                        "for Rust is not yet wired", method="kani→proptest(unavailable)",
+                        criticality=crit)
+    return _unknown(kr.get("reason", "kani inconclusive"), method="kani", criticality=crit)
 
 
 def compile_gate(path: str, language: str = "auto") -> dict[str, Any]:
@@ -437,8 +474,15 @@ def compile_gate(path: str, language: str = "auto") -> dict[str, Any]:
 
 
 def verify_formal_stats() -> dict[str, Any]:
+    try:
+        import kani_verify
+        kani = kani_verify.kani_available()
+    except Exception:  # noqa: BLE001
+        kani = False
     return {"model_available": _model_available(),
             "pool": (_pool.pool_stats() if _pool else {"mode": "absent"}),
             "mutation_budget": FORMAL_MUTANTS, "min_kill_rate": FORMAL_MIN_KILL,
             "languages_rung01": ["python", "rust", "ts", "go"],
-            "languages_rung2": ["python"]}
+            "languages_rung2": ["python"],
+            "rung3_kani": {"language": "rust", "available": kani,
+                           "note": "critical, non-concurrent Rust only; degrades to proptest"}}
