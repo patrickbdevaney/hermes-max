@@ -252,6 +252,24 @@ def criticality_classify(path: str, language: str = "auto") -> dict:
 
 @mcp.tool()
 @_threaded
+def smt_verify(path: str, task_spec: str = "", agent_tests: str = "") -> dict:
+    """Rung 4 (Part A Phase 3) — SMT/contract verification for the pure CRITICAL FEW.
+    Gated on criticality (pure + high blast-radius); otherwise returns `unknown`. The cheap
+    pool proposes pre/post contracts; the result is trusted as `verified` ONLY after a TRIPLE
+    GUARD: (1) mutation cross-check (break the code — the contract must catch it), (2)
+    differential cross-check (the agent's passing tests must satisfy the contract), (3)
+    code↔spec consistency. Any guard fails → spec_rejected (downgrade to PBT; never a pass).
+    CrossHair does the symbolic check when installed; otherwise the mutation-guarded contract
+    stands in (flagged). Four-value result. Never raises."""
+    try:
+        import smt_contracts
+    except Exception as e:  # noqa: BLE001
+        return {"result": "unknown", "reason": f"smt_contracts unavailable: {e}"}
+    return smt_contracts.smt_verify(path, task_spec or None, agent_tests or None)
+
+
+@mcp.tool()
+@_threaded
 def formal_stats() -> dict:
     """Report the formal-verification ladder's configuration: whether a spec-generation
     model/pool is reachable, mutation budget, min kill-rate, and which languages have

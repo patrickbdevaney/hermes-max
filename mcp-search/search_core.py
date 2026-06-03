@@ -106,6 +106,51 @@ def _verify(path: str, language: str) -> dict[str, Any]:
     return {"reachable": True, "passed": bool(data.get("passed")), "result": data, "error": None}
 
 
+async def _call_verify_formal(path: str, language: str) -> dict[str, Any]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    url = f"http://{VERIFY_HOST}:{VERIFY_PORT}/mcp"
+    async with streamablehttp_client(url) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            res = await session.call_tool("verify_formal", {"path": path, "language": language})
+            text = getattr(res.content[0], "text", "") if res.content else ""
+            data = res.structuredContent or (json.loads(text) if text else {})
+            if isinstance(data, dict) and "result" in data and isinstance(data.get("result"), dict):
+                data = data["result"]
+            return data if isinstance(data, dict) else {}
+
+
+def _verify_formal(path: str, language: str) -> dict[str, Any]:
+    """Call mcp-verify's verify_formal tool; degrade to an `unknown` result if unreachable."""
+    def _runner() -> dict[str, Any]:
+        return asyncio.run(asyncio.wait_for(_call_verify_formal(path, language), timeout=VERIFY_CALL_TIMEOUT))
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_runner).result(timeout=VERIFY_CALL_TIMEOUT + 30)
+    except Exception as e:  # noqa: BLE001
+        return {"result": "unknown", "reason": f"verify_formal unreachable: {type(e).__name__}"}
+
+
+def _formal_rank(formal_result: dict[str, Any] | None) -> int:
+    """Rank the four-value formal verdict for best-of-N: verified beats unknown beats a
+    spec_rejected/counterexample. A proven candidate outranks a merely-green one."""
+    kind = (formal_result or {}).get("result")
+    return {"verified": 2, "unknown": 1}.get(kind, 0)
+
+
+def _main_source(files: dict[str, str], language: str) -> str | None:
+    """The primary non-test source file of a candidate (largest matching-extension file
+    that is not a test) — what the formal ladder should adjudicate."""
+    ext = {"python": ".py", "rust": ".rs", "ts": ".ts", "go": ".go"}.get(language, ".py")
+    cands = [(rel, c) for rel, c in (files or {}).items()
+             if rel.endswith(ext) and "test" not in Path(rel).name.lower()]
+    if not cands:
+        return None
+    return max(cands, key=lambda rc: len(rc[1]))[0]
+
+
 _TESTS_PASSED_RE = re.compile(r"(\d+)\s+passed")
 
 
@@ -121,7 +166,8 @@ def _tests_passed(verify_result: dict[str, Any] | None) -> int:
 # ── deterministic selector (the lossless core — no model calls) ──────────────
 def select_from_candidates(candidates: list[dict], tests: dict | None = None,
                            language: str = "python", base_files: dict | None = None,
-                           early_exit: bool = False) -> dict[str, Any]:
+                           early_exit: bool = False, formal: bool = False,
+                           critical: bool = False, formal_top_k: int = 0) -> dict[str, Any]:
     """Run each candidate through mcp-verify in isolation; select the green one.
 
     candidates: [{"id": str, "files": {relpath: content}}, ...]
@@ -185,11 +231,39 @@ def select_from_candidates(candidates: list[dict], tests: dict | None = None,
         return {"ok": True, "selected": None, "verdicts": verdicts,
                 "reason": "no candidate verified green — escalate or rethink the approach"}
 
-    # prefer most tests passed, then smallest diff (least code)
-    best = sorted(green, key=lambda vd: (-vd["tests_passed"], vd["size"]))[0]
+    # A3 — formal-pass best-of-N tiebreaker. ONLY on CRITICAL modules and ONLY for the
+    # top-k green survivors (passes tests → type/static → PBT+mutation → contract). Running
+    # the solver rungs on all N would let solver wall-clock dominate, so it is capped.
+    formal_used = False
+    if formal and critical and green:
+        k = formal_top_k or int(os.environ.get("SEARCH_FORMAL_TOPK", "3"))
+        topk = sorted(green, key=lambda vd: (-vd["tests_passed"], vd["size"]))[:max(1, k)]
+        for vd in topk:
+            files = next((c.get("files") for c in candidates if str(c.get("id")) == vd["id"]), {}) or {}
+            main = _main_source(files, language)
+            rank = 0
+            if main:
+                tmp = tempfile.mkdtemp(prefix=f"formal-{vd['id']}-")
+                try:
+                    for rel, content in {**(base_files or {}), **files, **(tests or {})}.items():
+                        fp = Path(tmp) / rel
+                        fp.parent.mkdir(parents=True, exist_ok=True)
+                        fp.write_text(content)
+                    rank = _formal_rank(_verify_formal(str(Path(tmp) / main), language))
+                finally:
+                    shutil.rmtree(tmp, ignore_errors=True)
+            vd["formal_rank"] = rank
+        formal_used = True
+        # select within the top-k by formal rank first, then the usual keys
+        best = sorted(topk, key=lambda vd: (-vd.get("formal_rank", 0), -vd["tests_passed"], vd["size"]))[0]
+    else:
+        # prefer most tests passed, then smallest diff (least code)
+        best = sorted(green, key=lambda vd: (-vd["tests_passed"], vd["size"]))[0]
     otel_emit.record("search_selected", {"selected": best["id"], "n": len(verdicts),
                                         "green": len(green), "tests_passed": best["tests_passed"],
-                                        "size": best["size"]}, status="ok")
+                                        "size": best["size"],
+                                        "formal_tiebreaker": formal_used,
+                                        "formal_rank": best.get("formal_rank")}, status="ok")
     otel_emit.record("best_of_n_result", {
         "candidates_generated": len(candidates), "candidates_verified": len(verdicts),
         "early_exit_fired": False, "selected": best["id"], "green_count": len(green)}, status="ok")
@@ -201,8 +275,11 @@ def select_from_candidates(candidates: list[dict], tests: dict | None = None,
         "green_count": len(green),
         "n": len(verdicts),
         "verdicts": verdicts,
-        "reason": f"selected '{best['id']}' (green, {best['tests_passed']} tests passed, "
-                  f"smallest diff among {len(green)} green of {len(verdicts)})",
+        "formal_tiebreaker": formal_used,
+        "reason": (f"selected '{best['id']}' (green, {best['tests_passed']} tests passed"
+                   + (f", formal_rank={best.get('formal_rank')} [formal tiebreaker on critical top-k]"
+                      if formal_used else ", smallest diff")
+                   + f" among {len(green)} green of {len(verdicts)})"),
     }
 
 
