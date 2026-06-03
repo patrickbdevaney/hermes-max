@@ -325,10 +325,13 @@ def compare_directives(a: dict, b: dict) -> dict:
 # ── invocation policy (Stage 5) ───────────────────────────────────────────────
 @mcp.tool()
 @_threaded
-def conductor_plan(signals: dict | None = None, verifiable: bool = False,
-                   blast_radius: str | None = None, synth_failures: int = 0,
-                   opinions_disagree: bool = False) -> dict:
+def conductor_advise(signals: dict | None = None, verifiable: bool = False,
+                     blast_radius: str | None = None, synth_failures: int = 0,
+                     opinions_disagree: bool = False) -> dict:
     """ADVISE which ladder rung a subtask should use (does NOT fire a cloud call).
+    (Named conductor_advise — distinct from conductor_plan, which FIRES the cloud
+    planner and writes a signed PLAN.md. A same-name collision previously made
+    FastMCP silently overwrite the planner with this advisor; keep the names split.)
     Routine (easy/medium) -> LOCAL. verifiable+hard -> parallel_draft -> synthesize.
     ambiguous+hard -> steer -> synthesize. Opus escalate ONLY if synth_failures>=2
     or (opinions_disagree AND high blast). Every rung is presence-gated and the

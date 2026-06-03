@@ -162,7 +162,8 @@ def research_gate(est_s: float = 0.0, sid: str | None = None) -> dict[str, Any]:
     """Budget + cooldown gate for deep_research (R-Stage 2). Returns
     {allowed, reason, cooldown_remaining_s, cumulative_s, budget_s, calls}.
     allowed=False when a call fired < RESEARCH_COOLDOWN_S ago, or the cumulative
-    research time this session would exceed RESEARCH_BUDGET_S."""
+    research time this session has already reached RESEARCH_BUDGET_S. (est_s is
+    accepted for call-site compatibility but no longer pre-charged — see below.)"""
     sid = sid or session_id()
     dr = _dr(load(sid))
     now = time.time()
@@ -176,7 +177,14 @@ def research_gate(est_s: float = 0.0, sid: str | None = None) -> dict[str, Any]:
         return {"allowed": False, "reason": "cooldown",
                 "cooldown_remaining_s": round(cooldown_remaining, 1),
                 "cumulative_s": round(cum, 1), "budget_s": RESEARCH_BUDGET_S, "calls": calls}
-    if cum + max(0.0, est_s) > RESEARCH_BUDGET_S:
+    # Block only once the budget is ACTUALLY spent — do NOT pre-charge est_s.
+    # Pre-charging the (full) wall budget meant any prior call leaving cumulative_s
+    # > 0 made `cum + est_s > budget` true forever, permanently locking out
+    # deep_research after the very first call (est_s defaults to the whole
+    # WALL_BUDGET_S == RESEARCH_BUDGET_S). Per-call wall time is independently
+    # capped inside deep_research; here we only enforce the cumulative-spend cap.
+    # Cooldown (above) handles spacing/re-fire; this handles total time.
+    if cum >= RESEARCH_BUDGET_S:
         return {"allowed": False, "reason": "budget_exhausted",
                 "cooldown_remaining_s": 0.0,
                 "cumulative_s": round(cum, 1), "budget_s": RESEARCH_BUDGET_S, "calls": calls}

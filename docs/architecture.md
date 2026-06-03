@@ -204,7 +204,7 @@ USER TASK
   │        → workflow-stuck-detect-reset
   │
   ├─ HARD subtask? conductor ladder (workflow-conductor): ← stingy, classifier-gated
-  │     conductor_plan(signals) →
+  │     conductor_advise(signals) →
   │        verifiable+hard → parallel_draft (verifier picks the winner)
   │        ambiguous+hard  → conductor_steer / conductor_synthesize → directive_verify (gate)
   │        frontier-novel + synth-failed×2 → frontier_escalate (Opus, 3-gated, compress-then-reason)

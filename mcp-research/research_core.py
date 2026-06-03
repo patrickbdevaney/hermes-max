@@ -1004,9 +1004,16 @@ _PARAMETRIC_ALGOS = (
     "two pointer", "sliding window", "kmp", "rabin-karp", "union-find", "topological sort",
     "newton's method", "gradient descent", "linear regression", "k-means",
 )
+# NOTE: bare definitional frames ("what is a/the X") are NOT listed here. A
+# definitional question only warrants Tier-0 when X is a KNOWN textbook algorithm
+# — and that case is already caught by _PARAMETRIC_ALGOS above. A generic "what is
+# a <topic>" may well be a novel/external subject outside pretraining (e.g. "what
+# is a Merkle tree in cryptography" is a legitimate, source-backable research ask),
+# so we must NOT hard-block it on the frame alone. Only implement-style frames —
+# where the model is asked to PRODUCE textbook code it already knows — stay here.
 _PARAMETRIC_FRAMES = (
     "how does", "how do i implement", "how to implement", "implement a", "implement the",
-    "explain the", "explain how", "what is a", "what is the", "write a function",
+    "explain how", "write a function",
     "standard way to", "common pattern", "textbook",
 )
 _TARGETED_SIGNALS = (

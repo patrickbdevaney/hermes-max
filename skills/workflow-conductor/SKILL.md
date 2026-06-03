@@ -14,7 +14,7 @@ reports genuine-stuck after local recovery already failed, or there's a major ar
 work stays local at $0 — do NOT reach up for it.
 
 ## Step 1 — ask the policy which rung (don't guess)
-Call `conductor_plan(signals, verifiable)` with the cheap signals you already have
+Call `conductor_advise(signals, verifiable)` with the cheap signals you already have
 (`file_count`, `novelty`, `prior_failures`, `lines_changed`, `cross_module`) and whether the subtask has
 an objective TEST ORACLE (`verifiable=true` iff you can write tests that decide success). It returns the
 ladder rung, presence-gated — it never fires a call. The ladder by subtask type:
