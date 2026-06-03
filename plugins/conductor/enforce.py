@@ -25,6 +25,7 @@ module runs inside the Hermes venv alongside the plugin.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -292,6 +293,78 @@ def rag_before_multifile(cwd: str, state: dict[str, Any], step_desc: str) -> Opt
             "match before editing across files:\n" + "\n".join(lines))
 
 
+# SG ── cost safeguards: run_id, SQLite ledger record, per-run cap, ratio alert ──
+HM_RUN_CAP = float(os.environ.get("HM_RUN_CAP", "0.10"))
+
+
+def run_id() -> str:
+    return (os.environ.get("WATCHDOG_TASK_ID") or os.environ.get("HERMES_TASK_ID")
+            or os.environ.get("HM_RUN_ID") or "default")
+
+
+def record_cost(backend: str, provider: str, model: str, in_tok: int, out_tok: int,
+                cost_usd: Optional[float], wall_ms: int) -> None:
+    """Safeguard 1 — record a call into the SQLite cost ledger (source of truth for the cap +
+    ratio alert). Local executor calls are $0; cloud escalations carry their real cost."""
+    cp = _mod("cost_profiler")
+    if cp is None:
+        return
+    try:
+        cp.record_call(run_id(), provider, model, backend, in_tok, out_tok, 0,
+                       cost_usd, wall_ms / 1000.0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def check_run_cap(state: dict[str, Any]) -> Optional[str]:
+    """Safeguard 2 — per-run hard spend cap (HM_RUN_CAP, default $0.10). When this run's spend
+    reaches the cap, set state['cloud_blocked'] so the conductor blocks further CLOUD calls and
+    falls back to fabric/local — NEVER aborting, NEVER blocking local/fabric. Logs ONCE. The
+    cap is a last-resort backstop; if it fires in normal use the classifier is miscalibrated."""
+    cp = _mod("cost_profiler")
+    if cp is None:
+        return None
+    try:
+        spent = cp.run_cost(run_id())
+    except Exception:  # noqa: BLE001
+        return None
+    if spent < HM_RUN_CAP:
+        return None
+    if state.get("cloud_blocked"):
+        return None  # already blocked + already warned this run
+    state["cloud_blocked"] = True
+    _emit("run_cap_reached", {"run_id": run_id(), "spent": round(spent, 6), "cap": HM_RUN_CAP})
+    try:  # mark a cap event for the 7-day ratio view (best-effort)
+        from pathlib import Path as _P
+        cap_log = os.path.expanduser(os.environ.get("HM_CAP_LOG", "~/.hermes-max/cap.jsonl"))
+        _P(cap_log).parent.mkdir(parents=True, exist_ok=True)
+        import time as _t
+        with open(cap_log, "a") as f:
+            f.write(json.dumps({"ts": _t.time(), "run_id": run_id(), "spent": round(spent, 6)}) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+    return (f"## Run spend cap reached (backstop)\nrun cap ${HM_RUN_CAP:.2f} reached "
+            f"(spent ${spent:.4f}) — cloud calls blocked for this run; continuing on "
+            "fabric/local. (This is a last-resort ceiling, not normal operation.)")
+
+
+def ratio_log_run(state: dict[str, Any]) -> Optional[str]:
+    """Safeguard 3 — at end of run, write the one-line ratio summary to ratio.log and return
+    it for the cockpit livelog. ALERT is visible, never blocking. Once per run."""
+    if state.get("ratio_logged"):
+        return None
+    state["ratio_logged"] = True
+    cp = _mod("cost_profiler")
+    if cp is None:
+        return None
+    try:
+        line = cp.ratio_log_line(run_id())
+    except Exception:  # noqa: BLE001
+        return None
+    _emit("ratio_check", {"line": line, "alert": "ALERT" in line})
+    return line
+
+
 # P2 ── bandit route (enforced read pre_llm_call, write post-run) ─────────────
 def route_task(state: dict[str, Any], task_text: str) -> Optional[str]:
     """ENFORCED READ: at task start, classify the task and pick a backend BEFORE the model
@@ -493,6 +566,8 @@ def profile_executor_call(state: dict[str, Any], toks: dict[str, int],
         _emit("cost_attributed", prof.span_attrs("local-serial", tc, in_tok, out_tok, 0.0, int(wall_ms)))
     except Exception:  # noqa: BLE001
         pass
+    # Safeguard 1 — also record into the SQLite cost ledger (the cap + ratio source of truth).
+    record_cost("local", "local_vllm", "", in_tok, out_tok, 0.0, int(wall_ms))
 
 
 def enforce_stats() -> dict[str, Any]:

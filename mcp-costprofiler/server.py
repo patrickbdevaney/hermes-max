@@ -23,6 +23,7 @@ _REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
+import cost_profiler
 import profiler_core
 
 PORT = int(os.environ.get("MCP_COSTPROFILER_PORT", "9116"))
@@ -81,6 +82,41 @@ def log_executor_call(task_class: str = "", in_tok: int = 0, out_tok: int = 0,
     backend = profiler_core.backend_of(provider, model)
     return profiler_core.log_call(backend, task_class, in_tok, out_tok, 0.0, wall_ms,
                                   provider, model, source="executor")
+
+
+@mcp.tool()
+@_threaded
+def record_call(run_id: str, provider: str, model: str = "", backend: str = "",
+                tokens_in: int = 0, tokens_out: int = 0, tokens_cached: int = 0,
+                cost_usd: float | None = None, wall_clock_s: float = 0.0) -> dict:
+    """Safeguard 1 — record one LLM call into the SQLite cost ledger (~/.hermes-max/cost.db).
+    backend is inferred from provider/model if blank; cost is computed from the rate table
+    when not supplied. The append-only source of truth for the spend cap + ratio alert."""
+    return cost_profiler.record_call(run_id, provider, model, backend, tokens_in, tokens_out,
+                                     tokens_cached, cost_usd, wall_clock_s)
+
+
+@mcp.tool()
+@_threaded
+def cost_summary(run_id: str) -> dict:
+    """Safeguard 1 — per-run cost breakdown {total_usd, by_backend:{local,fabric,cloud},
+    call_count} from the SQLite ledger."""
+    return cost_profiler.cost_summary(run_id)
+
+
+@mcp.tool()
+@_threaded
+def ratio_check() -> dict:
+    """Safeguard 1/3 — 7-day rolling {cost_per_task_7d, cloud_fraction_7d, alert, reason}.
+    alert=True if cloud_fraction>0.40 or cost_per_task_7d>$0.15. Observability only."""
+    return cost_profiler.ratio_check()
+
+
+@mcp.tool()
+@_threaded
+def cost_profiler_stats() -> dict:
+    """Report the SQLite ledger path, ratio.log path, rate table, and alert thresholds."""
+    return cost_profiler.cost_profiler_stats()
 
 
 @mcp.tool()

@@ -148,6 +148,11 @@ def _trigger_conductor(cwd: str, state: dict[str, Any], reason: str, step: int, 
     if int(budget.get(tier, 0)) <= 0:
         _emit("budget_exhausted", {"reason": reason, "tier": tier})
         return
+    # SG2 — the conductor escalation IS a cloud call; if the run spend cap blocked cloud, skip
+    # it (the run continues locally — never aborted, fabric/local never blocked).
+    if state.get("cloud_blocked"):
+        _emit("cloud_blocked", {"reason": reason, "step": step, "why": "run spend cap reached"})
+        return
     _emit("trigger", {"reason": reason, "step": step, "tier": tier})
     try:
         import conductor_core
@@ -170,6 +175,14 @@ def _trigger_conductor(cwd: str, state: dict[str, Any], reason: str, step: int, 
         _emit("guidance", {"reason": reason, "step": step, "model": r.get("model"),
                            "tier": r.get("tier"), "tokens": r.get("tokens", 0),
                            "cost": r.get("cost_usd", 0.0)})
+        # SG1 — record the cloud escalation cost into the SQLite ledger so the cap + ratio
+        # alert see real cloud spend (unless it was free-tier, cost 0).
+        if _enforce is not None:
+            try:
+                _enforce.record_cost("cloud-deepseek", r.get("provider", "cloud"), r.get("model", ""),
+                                     0, int(r.get("tokens", 0) or 0), float(r.get("cost_usd", 0.0) or 0.0), 0)
+            except Exception:  # noqa: BLE001
+                pass
         print(f"[conductor] ⚡ {reason} on step {step} ({r.get('model')}) — guidance ready, "
               "will inject next turn", flush=True)
     else:
@@ -331,6 +344,14 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
     if _enforce is not None:
         task_text = "; ".join(s.get("description", "") for s in plan.get("steps", []))[:1000]
         step_desc = sd.get("description", "")
+        # SG2 — per-run spend cap: set state['cloud_blocked'] when the run cap is reached so
+        # cloud escalation is blocked for the rest of the run (fabric/local still allowed).
+        try:
+            cap_warn = _enforce.check_run_cap(state)
+            if cap_warn:
+                lines += ["", cap_warn]
+        except Exception:  # noqa: BLE001
+            pass
         # P2 — enforced route read BEFORE the model sees the task (sets state['task_class']).
         try:
             rl = _enforce.route_task(state, task_text)
@@ -513,6 +534,10 @@ def _on_session_end(**kw: Any) -> None:
             # already logged solved=True, so this only fires for an unfinished run → unsolved).
             _enforce.log_run_outcome(cwd, state, solved=bool(state.get("done_condition_met")),
                                      failure_class="trajectory-fixable")
+            # SG3 — end-of-run ratio alert: write ratio.log + print OK/ALERT to the cockpit.
+            rl = _enforce.ratio_log_run(state)
+            if rl:
+                print(f"[conductor] ratio {rl}", flush=True)
         except Exception:  # noqa: BLE001
             pass
     _emit("session_end", {"total_turns": state.get("total_turns", 0),
