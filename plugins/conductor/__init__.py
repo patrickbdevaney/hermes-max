@@ -223,6 +223,12 @@ def _handle_done(cwd: str, state: dict[str, Any]) -> None:
     if passed:
         _emit("run_complete", {"turns": state.get("total_turns", 0),
                                "steps": state.get("current_step", 1)})
+        # B3.5 — KG task-close memory write (once per run): record what was decided + why.
+        if _enforce is not None:
+            try:
+                _enforce.kg_taskclose_write(cwd, state, f"completed & verified — {summary}")
+            except Exception:  # noqa: BLE001
+                pass
         print(f"\n[conductor] ✓ done condition met AND verified — {summary}", flush=True)
     else:
         state["done_condition_met"] = False
@@ -307,12 +313,17 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
     # guidance (verify/watchdog feedback queued by post_tool_call). Best-effort.
     if _enforce is not None:
         task_text = "; ".join(s.get("description", "") for s in plan.get("steps", []))[:1000]
-        try:
-            rg = _enforce.research_entry_gate(cwd, state, task_text)
-        except Exception:  # noqa: BLE001
-            rg = None
-        if rg:
-            lines += ["", rg]
+        step_desc = sd.get("description", "")
+        for fn, arg in ((_enforce.research_entry_gate, task_text),
+                        (_enforce.classify_step, step_desc),      # B3.6 classify in-hook
+                        (_enforce.rag_before_multifile, step_desc)):  # B3.7 RAG pre multi-file
+            try:
+                g = (fn(cwd, state, arg) if fn is not _enforce.classify_step
+                     else fn(state, arg))
+            except Exception:  # noqa: BLE001
+                g = None
+            if g:
+                lines += ["", g]
     for g in (state.get("enforce_guidance") or []):
         lines += ["", str(g)]
     state["enforce_guidance"] = []
@@ -446,6 +457,14 @@ def _on_session_end(**kw: Any) -> None:
         summary = conductor_core.escalation_summary()
     except Exception:  # noqa: BLE001
         pass
+    # B3.5 backstop — ensure a KG task-close write even if the run ended without a
+    # verified done (kg_taskclose_write is once-per-run; a prior _handle_done call no-ops).
+    if _enforce is not None:
+        try:
+            _enforce.kg_taskclose_write(cwd, state,
+                                        f"session ended at step {state.get('current_step', 1)}")
+        except Exception:  # noqa: BLE001
+            pass
     _emit("session_end", {"total_turns": state.get("total_turns", 0),
                           "final_step": state.get("current_step", 1),
                           "done": state.get("done_condition_met", False),

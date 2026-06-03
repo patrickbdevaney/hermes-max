@@ -33,7 +33,8 @@ from typing import Any, Optional
 # repo root + the cores we reach (sibling dirs). __init__.py already added repo root +
 # mcp-escalation + mcp-verify; add the rest here so a missing dir degrades to None.
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-for _d in ("mcp-verify", "mcp-checkpoint", "mcp-research", "mcp-watchdog"):
+for _d in ("mcp-verify", "mcp-checkpoint", "mcp-research", "mcp-watchdog",
+           "mcp-knowledge-graph", "mcp-codebase-rag"):
     _p = os.path.join(_REPO, _d)
     if _p not in sys.path:
         sys.path.append(_p)
@@ -47,6 +48,12 @@ ENF_VERIFY = _on("CONDUCTOR_ENFORCE_VERIFY")
 ENF_CHECKPOINT = _on("CONDUCTOR_ENFORCE_CHECKPOINT")
 ENF_RESEARCH = _on("CONDUCTOR_ENFORCE_RESEARCH")
 ENF_WATCHDOG = _on("CONDUCTOR_ENFORCE_WATCHDOG")
+# B3 soft-enforce (lifecycle point, not a hard gate)
+ENF_KG = _on("CONDUCTOR_ENFORCE_KG")
+ENF_CLASSIFY = _on("CONDUCTOR_ENFORCE_CLASSIFY")
+ENF_RAG = _on("CONDUCTOR_ENFORCE_RAG")
+_MULTIFILE_HINT = ("multiple files", "across", "refactor", "rename", "move ", "each module",
+                   "every file", "all the", "throughout", "codebase-wide", "multi-file")
 WRITE_MIN_BYTES = int(os.environ.get("CONDUCTOR_VERIFY_WRITE_MIN_BYTES", "64"))
 VERIFY_MAX_RETRIES = int(os.environ.get("CONDUCTOR_VERIFY_MAX_RETRIES", "2"))
 _SRC_EXT = (".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".go")
@@ -192,9 +199,95 @@ def watchdog_tick(cwd: str, state: dict[str, Any], reasoning_text: str = "") -> 
     return None
 
 
+# 5 ── KG task-close memory write (soft-enforce, run-complete) ────────────────
+def kg_taskclose_write(cwd: str, state: dict[str, Any], summary: str) -> None:
+    """At task CLOSE, record what was decided + why into the KG, regardless of whether the
+    model thought to. Captures the ambient 'we decided X about this codebase' facts the
+    model reliably misses. Fires at most once per run; degrades if mcp-knowledge-graph down."""
+    if not ENF_KG or state.get("kg_taskclose_done"):
+        return
+    state["kg_taskclose_done"] = True
+    kg = _mod("kg_core")
+    if kg is None:
+        _emit("kg_taskclose_write", {"skipped": "kg_core unavailable"})
+        return
+    try:
+        name = f"task:{Path(cwd).name}@step{state.get('current_step', 1)}"
+        kg.record_entity("task", name, props={
+            "summary": (summary or "")[:1000], "steps": state.get("current_step", 1),
+            "turns": state.get("total_turns", 0), "verified": state.get("last_verify_result", "")[:120]})
+    except Exception as e:  # noqa: BLE001
+        _emit("kg_taskclose_write", {"error": str(e)[:160]})
+        return
+    _emit("kg_taskclose_write", {"entity": name})
+
+
+# 6 ── classification in the hook (soft-enforce, pre_llm_call) ─────────────────
+def classify_step(state: dict[str, Any], step_desc: str) -> Optional[str]:
+    """Run the criticality/novelty classification IN THE HOOK before the model sees the
+    step, so it can't dodge the conductor by self-classifying a step as 'easy'. Once per
+    step. Returns a line to inject. Degrades to None without the classifier."""
+    if not ENF_CLASSIFY or not (step_desc or "").strip():
+        return None
+    step = int(state.get("current_step", 1))
+    if state.get("classified_step") == step:
+        return None
+    state["classified_step"] = step
+    crit = _mod("criticality")
+    if crit is None:
+        return None
+    try:
+        c = crit.criticality_classify(step_desc, "python")
+    except Exception:  # noqa: BLE001
+        return None
+    _emit("classification_prefired", {"step": step, "critical": c.get("critical"),
+                                      "dimensions": c.get("dimensions"), "method": c.get("method")})
+    if c.get("critical"):
+        return ("## Classification (enforced, in-hook)\nThis step is CRITICAL "
+                f"({', '.join(c.get('dimensions', []))}) — implement defensively and expect the "
+                "verify_formal gate to demand a strong, mutation-surviving property before done.")
+    return None
+
+
+# 7 ── RAG retrieval before a multi-file edit (soft-enforce, step start) ───────
+def rag_before_multifile(cwd: str, state: dict[str, Any], step_desc: str) -> Optional[str]:
+    """At the START of a step that looks like a multi-file edit, fire a RAG retrieval pass
+    to surface relevant prior patterns before implementation — even when the model 'knows
+    the codebase'. Once per step; degrades if mcp-codebase-rag is down."""
+    if not ENF_RAG or not (step_desc or "").strip():
+        return None
+    if not any(h in step_desc.lower() for h in _MULTIFILE_HINT):
+        return None
+    step = int(state.get("current_step", 1))
+    if state.get("rag_step") == step:
+        return None
+    state["rag_step"] = step
+    rag = _mod("rag_core")
+    if rag is None:
+        _emit("rag_pre_multifile", {"skipped": "rag_core unavailable", "step": step})
+        return None
+    try:
+        res = rag.search_code(step_desc, k=5)
+    except Exception as e:  # noqa: BLE001
+        _emit("rag_pre_multifile", {"error": str(e)[:160], "step": step})
+        return None
+    hits = res.get("results") or res.get("hits") or []
+    _emit("rag_pre_multifile", {"step": step, "hits": len(hits)})
+    if not hits:
+        return None
+    lines = []
+    for h in hits[:5]:
+        loc = h.get("path") or h.get("source") or h.get("symbol") or "?"
+        snip = (h.get("snippet") or h.get("text") or "")[:160].replace("\n", " ")
+        lines.append(f"- `{loc}`: {snip}")
+    return ("## Prior patterns (enforced RAG, multi-file edit)\nRelevant existing code to "
+            "match before editing across files:\n" + "\n".join(lines))
+
+
 def enforce_stats() -> dict[str, Any]:
     return {"verify": ENF_VERIFY, "checkpoint": ENF_CHECKPOINT, "research": ENF_RESEARCH,
-            "watchdog": ENF_WATCHDOG, "write_min_bytes": WRITE_MIN_BYTES,
-            "verify_max_retries": VERIFY_MAX_RETRIES,
+            "watchdog": ENF_WATCHDOG, "kg": ENF_KG, "classify": ENF_CLASSIFY, "rag": ENF_RAG,
+            "write_min_bytes": WRITE_MIN_BYTES, "verify_max_retries": VERIFY_MAX_RETRIES,
             "cores": {n: _mod(n) is not None for n in
-                      ("formal_core", "checkpoint_core", "research_core", "watchdog_core")}}
+                      ("formal_core", "checkpoint_core", "research_core", "watchdog_core",
+                       "kg_core", "criticality", "rag_core")}}

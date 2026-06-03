@@ -179,12 +179,92 @@ def section_watchdog() -> None:
         enforce._mod = real
 
 
+def section_kg() -> None:
+    print("[5] KG task-close write (once/run, soft-enforce)")
+    recorded = []
+
+    class _KG:
+        @staticmethod
+        def record_entity(type, name, props=None):
+            recorded.append((type, name, props))
+            return {"ok": True}
+
+    real = _fake_mod({"kg_core": _KG})
+    try:
+        state = {"current_step": 3, "total_turns": 9}
+        enforce.kg_taskclose_write("/tmp/proj", state, "built feature X; chose approach Y")
+        enforce.kg_taskclose_write("/tmp/proj", state, "again")  # once-only
+        if len(recorded) != 1 or recorded[0][0] != "task":
+            _fail(f"KG task-close must fire exactly once as a task entity: {recorded}")
+        if "feature X" not in (recorded[0][2] or {}).get("summary", ""):
+            _fail(f"KG write must carry the decision summary: {recorded[0]}")
+        _ok("KG task-close fires once/run, records the decision summary")
+    finally:
+        enforce._mod = real
+    real = _fake_mod({})
+    try:
+        enforce.kg_taskclose_write("/tmp", {}, "x")  # must not raise
+        _ok("KG task-close degrades cleanly when kg_core is down")
+    finally:
+        enforce._mod = real
+
+
+def section_classify() -> None:
+    print("[6] classification in-hook (once/step, soft-enforce)")
+    class _CR:
+        @staticmethod
+        def criticality_classify(text, language="python"):
+            return {"critical": "ledger" in text, "dimensions": ["money"] if "ledger" in text else [],
+                    "method": "rules"}
+
+    real = _fake_mod({"criticality": _CR})
+    try:
+        state: dict = {"current_step": 1}
+        g = enforce.classify_step(state, "implement the ledger transfer")
+        if not g or "CRITICAL" not in g:
+            _fail(f"critical step should inject a classification line: {g!r}")
+        if enforce.classify_step(state, "implement the ledger transfer") is not None:
+            _fail("classify must fire at most once per step")
+        _ok("critical step → in-hook classification injected, once per step")
+        if enforce.classify_step({"current_step": 2}, "rename a local variable") is not None:
+            _fail("non-critical step should inject nothing")
+        _ok("non-critical step → no classification noise")
+    finally:
+        enforce._mod = real
+
+
+def section_rag() -> None:
+    print("[7] RAG before multi-file edit (once/step, soft-enforce)")
+    class _RAG:
+        @staticmethod
+        def search_code(q, k=5):
+            return {"results": [{"path": "a/b.py", "snippet": "def helper(): ..."}]}
+
+    real = _fake_mod({"rag_core": _RAG})
+    try:
+        state: dict = {"current_step": 1}
+        g = enforce.rag_before_multifile("/tmp", state, "refactor the parser across all modules")
+        if not g or "Prior patterns" not in g:
+            _fail(f"multi-file step should inject RAG digest: {g!r}")
+        if enforce.rag_before_multifile("/tmp", state, "refactor across modules") is not None:
+            _fail("RAG pre-multifile must fire once per step")
+        _ok("multi-file step → RAG retrieval injected, once per step")
+        if enforce.rag_before_multifile("/tmp", {"current_step": 2}, "fix a typo in one file") is not None:
+            _fail("single-file step should not fire RAG")
+        _ok("single-file step → RAG not fired")
+    finally:
+        enforce._mod = real
+
+
 def main() -> None:
     section_write_gate()
     section_checkpoint()
     section_research()
     section_watchdog()
-    print("conductor enforcement (Part B B2) smoke PASSED")
+    section_kg()
+    section_classify()
+    section_rag()
+    print("conductor enforcement (Part B B2+B3) smoke PASSED")
 
 
 if __name__ == "__main__":

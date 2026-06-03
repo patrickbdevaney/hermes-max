@@ -28,9 +28,17 @@ never crashes the loop). Full per-MCP inventory: `../../MCP_ENFORCEMENT_AUDIT.md
 | **research entry** (B2.3) | `pre_llm_call` at task start | if the novelty classifier marks the task `synthesis`, fires `deep_research` ONCE before implementation (still corpus-first-gated inside) and injects a digest. |
 | **watchdog** (B2.4) | `post_tool_call`, every call | unconditional background-via-hook tick (spiral check); emits a span and nudges on a detected loop. Never a model tool call. |
 
-Soft-enforced (B3) and discretionary (B4) capabilities are listed in the audit. Toggle any
-enforced capability off for ablation with `CONDUCTOR_ENFORCE_{VERIFY,CHECKPOINT,RESEARCH,
-WATCHDOG}=0`.
+## What is soft-enforced (B3 — fired at a lifecycle point, not a hard gate)
+| Capability | Hook point | Behaviour |
+|-----------|-----------|-----------|
+| **knowledge-graph** (B3.5) | `_handle_done` success + `on_session_end` backstop | a KG task-close write once per run, recording what was decided + why (the ambient "we decided X about this codebase" facts the model misses). |
+| **classification** (B3.6) | `pre_llm_call` | the plan/execute split already authors a conductor-signed PLAN.md with per-step complexity BEFORE execution (hook-injected, not prompted); on top of that, criticality_classify runs in-hook on the current step so the model can't dodge the conductor by self-classifying a step as "easy". |
+| **codebase-rag** (B3.7) | `pre_llm_call` at the start of a multi-file step | a RAG retrieval pass surfaces relevant prior patterns before implementation, even when the model "knows the codebase". |
+
+Discretionary (B4) capabilities (docs, search, lsp, repomap, codegraph, scopemap,
+observability) stay prompt-driven — see the audit. Toggle any enforced capability off for
+ablation with `CONDUCTOR_ENFORCE_{VERIFY,CHECKPOINT,RESEARCH,WATCHDOG,KG,CLASSIFY,RAG}=0`.
 
 Spans emitted: `verify_enforced`, `checkpoint_enforced`, `research_entry_gate`,
-`watchdog_background` (plus the existing `conductor.*` events).
+`watchdog_background`, `kg_taskclose_write`, `classification_prefired`, `rag_pre_multifile`
+(plus the existing `conductor.*` events).
