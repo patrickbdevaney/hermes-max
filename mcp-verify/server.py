@@ -270,6 +270,34 @@ def smt_verify(path: str, task_spec: str = "", agent_tests: str = "") -> dict:
 
 @mcp.tool()
 @_threaded
+def author_contract(task_spec: str, signature: str = "") -> dict:
+    """Phase 4 — state the property/contract FIRST (before generation). Cheap pool authors a
+    Hypothesis property asserting the postcondition; degrades to using the agent's own tests
+    as the oracle when no model is available. Returns {contract, method}."""
+    try:
+        import vdg_core
+    except Exception as e:  # noqa: BLE001
+        return {"contract": None, "method": f"vdg_core unavailable: {e}"}
+    return vdg_core.author_contract(task_spec, signature)
+
+
+@mcp.tool()
+@_threaded
+def verify_driven_step(path: str, task_spec: str, tests: dict, contract: str = "") -> dict:
+    """Phase 4 — one verification-driven step: run the verify oracle (formal ladder + gate,
+    with `contract` as selection pressure) on a candidate and return {ok, critique}. The
+    `critique` is the counterexample to feed the next bounded-reflection iteration (the
+    conductor enforces the k≤3 bound across turns). Reuses the verify machinery; no new
+    verifier."""
+    try:
+        import vdg_core
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "critique": f"vdg_core unavailable: {e}"}
+    return vdg_core._oracle(path, tests, contract or None, task_spec)
+
+
+@mcp.tool()
+@_threaded
 def edge_contract_monitor(path: str, contracts: str = "") -> dict:
     """Part A Phase 4 — assume-guarantee contracts at module EDGES, installed as dependency-
     free RUNTIME MONITORS (pre/post assertions wrapping public functions) where static proof
