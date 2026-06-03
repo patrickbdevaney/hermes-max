@@ -30,6 +30,11 @@ try:
 except Exception:  # noqa: BLE001
     quality_core = None  # type: ignore
 
+try:
+    import formal_core  # Part A: the formal-verification ladder (verify_formal)
+except Exception:  # noqa: BLE001
+    formal_core = None  # type: ignore
+
 # Opt-in: property generation adds wall time and the 35B can hallucinate properties,
 # so the primary verify() gate runs it only when explicitly enabled.
 ENABLE_PROPERTY_TEST = os.environ.get("ENABLE_PROPERTY_TEST", "false").strip().lower() in ("1", "true", "yes")
@@ -201,6 +206,42 @@ def quality_check(path: str) -> dict:
     if quality_core is None:
         return {"ok": False, "reason": "quality_core unavailable"}
     return quality_core.quality_check(path)
+
+
+@mcp.tool()
+@_threaded
+def verify_formal(path: str, language: str = "auto", task_spec: str = "",
+                  sibling_files: list | None = None, agent_tests: str = "") -> dict:
+    """The formal-verification LADDER (Part A) — returns ONE of four values:
+    `verified{property,method}`, `counterexample{input,trace,mutant?}`, `unknown{reason}`,
+    or `spec_rejected{reason}`.
+
+    Runs cheapest→heaviest: Rung 0 compile/type (HARD gate — py_compile/mypy · cargo build
+    · tsc --strict · go build+vet), Rung 1 lint (advisory), Rung 2 cheap-LLM-proposed
+    property tests adjudicated by the pytest oracle and GUARDED by a mutation cross-check
+    (break the module; if the properties still pass they're too weak → spec_rejected) plus
+    a vacuity check. Python is complete at rung 2; Rust/TS/Go enforce rungs 0-1 and return
+    `unknown` for rung 2 (honest — never a false `verified`).
+
+    `agent_tests` (the agent's own passing tests, as source text) is the highest-trust
+    oracle for property generation; `task_spec` (NL) is the lowest. Sovereign/deterministic-
+    first: no model → rung 2 degrades to the smoke gate and returns `unknown`, never a
+    fabricated pass. Never raises. Use as the ground-truth gate before checkpointing."""
+    if formal_core is None:
+        return {"result": "unknown", "reason": "formal_core unavailable"}
+    return formal_core.verify_formal(path, language, task_spec or None, sibling_files,
+                                     agent_tests or None)
+
+
+@mcp.tool()
+@_threaded
+def formal_stats() -> dict:
+    """Report the formal-verification ladder's configuration: whether a spec-generation
+    model/pool is reachable, mutation budget, min kill-rate, and which languages have
+    rungs 0-1 vs rung 2 wired."""
+    if formal_core is None:
+        return {"ok": False, "reason": "formal_core unavailable"}
+    return formal_core.verify_formal_stats()
 
 
 if __name__ == "__main__":
