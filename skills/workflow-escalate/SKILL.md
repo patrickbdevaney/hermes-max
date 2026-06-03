@@ -36,7 +36,24 @@ hard daily USD cap enforced in the server.
 - Anything blocked on a **human decision** (use `workflow-stuck` → ping instead).
 - Repeatedly, to brute-force a vague problem — that just burns the cap.
 
-## How
+## Repeated stuck mid-run → rises to the CONDUCTOR
+
+The conductor planned the task; the escalation ladder rises back to it. When you are
+**stuck or an issue repeats mid-run** — a step failed twice, you hit an architectural
+decision PLAN.md didn't cover, or you're spinning — do **not** keep grinding locally and
+do **not** silently lower the bar. Rise to the conductor:
+
+- **A reasoning gap** (you can't resolve a design/algorithm question in budget, a step is
+  `complexity: HIGH`, or `verify` failed twice) → call `reasoning_escalation` — the SAME
+  conductor/frontier reasoner that wrote your plan. Act on its `## Frontier guidance`.
+- **A plan step is impossible as written** (a referenced API doesn't exist, the approach
+  can't work, `verify` failed 3+ times on one step) → call `review_and_adapt`; the
+  conductor REVISES PLAN.md from that step. Do not attempt impossible implementations.
+
+Both are run-capped (see `workflow-plan`). This is the rule: a *repeated* local failure
+escalates to the conductor, it does not get brute-forced or quietly dropped.
+
+## How (scoped one-off escalation)
 
 1. Assemble a self-contained prompt: problem statement, the minimal relevant
    code, constraints, and the exact success criterion.

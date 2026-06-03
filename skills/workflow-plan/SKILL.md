@@ -1,6 +1,6 @@
 ---
 name: workflow-plan
-description: "For tasks over ~5 files, plan and decompose before coding using native plan + kanban."
+description: "MANDATORY FIRST ACTION on EVERY task (except single-line factual lookups): call conductor_plan so the conductor authors the plan BEFORE you read, search, or write anything."
 version: 1.0.0
 author: Hermes Max
 license: MIT
@@ -12,7 +12,7 @@ metadata:
     related_skills: [workflow-task-start, workflow-task-finish]
 ---
 
-<!-- TRIGGERS WHEN: "For tasks over ~5 files, plan and decompose before coding using native plan + kanban." version: 1.0.0 author: Hermes Max license: MIT platforms: [linux, macos, -->
+<!-- TRIGGERS WHEN: any new task or multi-step request — the MANDATORY first action is conductor_plan, before reading/searching/writing anything. Only single-line factual lookups are exempt. -->
 
 # Plan — the conductor plans, you execute
 
@@ -83,11 +83,22 @@ cwd="…")` asks the conductor to REVISE PLAN.md from step N onward (your comple
 preserved). **Do not attempt impossible implementations and do not spin** — ask the
 conductor to revise, then execute the revision (re-read PLAN.md).
 
-## When
+## When — UNCONDITIONAL
 
-Always run the map+plan step on a new task. The full decompose (native kanban
-`auto_decompose`, planner/coder/reviewer delegation) is for tasks spanning **more
-than ~5 files** or with non-trivial architecture — don't free-solo large changes.
+Call `conductor_plan` **FIRST on every task**, with no size threshold: a one-file change
+still gets a (fast, idempotent — an existing signed PLAN.md is reused) plan before you
+touch anything. Do not let the task feel "too small to plan" — the call is cheap (free
+Kimi rung) and the plan is the contract verify checks against. The heavier full decompose
+(native kanban `auto_decompose`, planner/coder/reviewer delegation) is reserved for tasks
+spanning **more than ~5 files** or with non-trivial architecture — but the `conductor_plan`
+call itself is NEVER gated on size.
+
+## The only exception
+
+A single-line factual lookup — "what is X", "show me Y", "which file defines Z" — does
+not need a plan; answer it directly. **Everything else gets `conductor_plan` first. When
+in doubt, plan.** And mid-run, if you get stuck or an issue repeats, the ladder rises back
+to the conductor — see the escalation triggers above and `workflow-escalate`.
 
 ## Why
 
