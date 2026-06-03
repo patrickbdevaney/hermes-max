@@ -101,6 +101,11 @@ RESEARCH_SCRAPE_CONCURRENCY = max(1, int(os.environ.get("RESEARCH_SCRAPE_CONCURR
 # The loop is now scrape-bound (wider coverage), so the wall budget is larger.
 WALL_BUDGET_S = float(os.environ.get("RESEARCH_WALL_BUDGET_S", "900"))
 MIN_INDEPENDENT_SOURCES = int(os.environ.get("RESEARCH_MIN_SOURCES", "2"))
+# Per-wave early-exit coverage target (fraction of sub-goals each covered by >=
+# MIN_INDEPENDENT_SOURCES). Default 1.0 = the original "cover every sub-goal" behavior;
+# lower it (e.g. 0.85) to stop a wave earlier once most sub-goals are satisfied, trading
+# a little thoroughness for wall time. Saturation/source-cap/wall-budget breaks still apply.
+RESEARCH_COVERAGE_TARGET = max(0.0, min(1.0, float(os.environ.get("RESEARCH_COVERAGE_TARGET", "1.0"))))
 # Saturation thresholds (Phase 1, ported from banyan's intra-session signals).
 RESEARCH_MARGINAL_GAIN_FLOOR = float(os.environ.get("RESEARCH_MARGINAL_GAIN_FLOOR", "0.15"))
 RESEARCH_DRIFT_COSINE = float(os.environ.get("RESEARCH_DRIFT_COSINE", "0.93"))
@@ -1398,7 +1403,7 @@ def deep_research(question: str, max_loops: int = MAX_RESEARCH_LOOPS,
             "covered": sum(1 for d in cov.values() if len(d) >= MIN_INDEPENDENT_SOURCES),
             "subgoals": len(subgoals)})
         otel_emit.record("research_saturation", {"tool": "deep_research", "wave": waves, **sat})
-        if coverage >= 1.0:
+        if coverage >= RESEARCH_COVERAGE_TARGET:
             stop_reason = "covered"; break
         if saturated:
             stop_reason = "saturated"; break
