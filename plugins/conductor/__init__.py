@@ -141,6 +141,97 @@ def _emit(event: str, data: dict[str, Any]) -> None:
         pass
 
 
+# ── mandatory turn-1 conductor planning (in-process, no subprocess) ──────────
+_ENV_LOADED = False
+
+
+def _load_repo_env(repo: Path) -> None:
+    """Best-effort: load the repo .env provider keys into os.environ if absent, so the
+    conductor's synth chain has its keys even under bare `hermes` (which, unlike hm run /
+    hm native, does not source .env). Only sets keys not already present; expands ${VAR}
+    against what's loaded so far; runs once per process."""
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+    _ENV_LOADED = True
+    envf = repo / ".env"
+    if not envf.is_file():
+        return
+    try:
+        for line in envf.read_text(errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            if k and k not in os.environ:
+                os.environ[k] = os.path.expandvars(v.strip().strip('"').strip("'"))
+    except OSError:
+        pass
+
+
+def _is_trivial_lookup(task: str) -> bool:
+    """A single-line factual lookup doesn't warrant a plan (mirrors workflow-plan's only
+    exception). Conservative — only the clearest Q&A forms, so real tasks still plan."""
+    t = (task or "").strip().lower()
+    if not t:
+        return True
+    if len(t) <= 80 and t.endswith("?"):
+        return True
+    return t.startswith(("what is", "what's", "what are", "who is", "who's", "show me",
+                         "which file", "where is", "where's", "explain ", "define ",
+                         "list the", "how many", "how do i"))
+
+
+def _ensure_conductor_plan(cwd: str, task: str) -> Optional[str]:
+    """Author a signed PLAN.md in cwd via the conductor (in-process; conductor_plan writes
+    the file itself). Returns a short context note on success, else None. Never raises."""
+    repo = Path(__file__).resolve().parents[2]  # <repo>/plugins/conductor/__init__.py
+    _load_repo_env(repo)  # bare `hermes` doesn't source .env; the synth chain needs the keys
+    try:
+        import conductor_core
+    except Exception:  # noqa: BLE001 — not on hermes' path yet; add the repo MCP dirs + retry
+        try:
+            for sub in ("mcp-escalation", "mcp-scopemap"):  # planner + its repo-map dep
+                p = str(repo / sub)
+                if (repo / sub).is_dir() and p not in sys.path:
+                    sys.path.insert(0, p)
+            import conductor_core
+        except Exception as e:  # noqa: BLE001 — planner truly unavailable → model self-directs
+            _emit("plan_unavailable", {"why": f"import: {str(e)[:120]}"})
+            return None
+    _emit("plan_start", {"task": task[:160]})
+    try:
+        r = conductor_core.conductor_plan(task=task, cwd=cwd)
+    except Exception as e:  # noqa: BLE001 — conductor down → self-direct, never block hermes
+        _emit("plan_error", {"error": str(e)[:160]})
+        return None
+    if isinstance(r, dict) and r.get("ok") and r.get("signed"):
+        _emit("plan_written", {"model": r.get("model"), "wrote": bool(r.get("wrote"))})
+        return (f"## Conductor plan (enforced — read FIRST)\n"
+                f"A signed PLAN.md was written to {cwd}/PLAN.md by the conductor "
+                f"({r.get('model', '?')}). Read it now and execute against its Files / Steps / "
+                "DONE_CONDITION — do NOT replan or re-architect; the design is decided.")
+    _emit("plan_unavailable", {"reason": (r.get("reason") if isinstance(r, dict) else "no result")})
+    return None
+
+
+def _maybe_plan_turn1(cwd: str, plan: dict[str, Any], kw: dict[str, Any]) -> Optional[str]:
+    """Fire conductor planning ONLY on turn 1 of a new task with no PLAN.md and a
+    non-trivial request. Returns the context note to inject, or None to skip cleanly.
+    Kill-switch: CONDUCTOR_TURN1_PLAN=0."""
+    if os.environ.get("CONDUCTOR_TURN1_PLAN", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    if not kw.get("is_first_turn"):                            # continuation / mid-task → skip
+        return None
+    if plan.get("steps") or (Path(cwd) / "PLAN.md").exists():  # a plan already exists → skip
+        return None
+    task = (kw.get("user_message") or "").strip()
+    if not task or _is_trivial_lookup(task):                  # nothing to plan / trivial → skip
+        return None
+    return _ensure_conductor_plan(cwd, task)
+
+
 # ── the conductor trigger (in-process, no subprocess) ────────────────────────
 def _trigger_conductor(cwd: str, state: dict[str, Any], reason: str, step: int, context: str) -> None:
     tier = "deep" if reason == "verify_double_fail" else "standard"
@@ -275,6 +366,20 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
     cwd = os.getcwd()
     state = _load_state(cwd)
     plan = _load_plan(cwd)
+
+    # ── Mandatory conductor planning on turn 1 (deterministic, in-process) ───────
+    # On the FIRST turn of a task with no PLAN.md, the conductor authors a SIGNED
+    # PLAN.md (V4-Pro decomposition) BEFORE the model generates anything; the note is
+    # injected into this same {"context"} re-injection the contract already uses, so
+    # the model reads PLAN.md on its first pass. Best-effort: an existing PLAN.md, a
+    # continuation turn, a trivial lookup, or any failure → skip (model self-directs).
+    try:
+        plan_note = _maybe_plan_turn1(cwd, plan, kw)
+    except Exception as e:  # noqa: BLE001 — planning must NEVER drop the contract re-injection
+        _emit("plan_error", {"error": str(e)[:160]})
+        plan_note = None
+    if plan_note:
+        plan = _load_plan(cwd)  # re-read so the contract below reflects the new steps
     step = int(state.get("current_step", 1))
     total = len(plan.get("steps", []))
     sd = _get_step(plan, step)
@@ -309,6 +414,8 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
         f"Turns on this step: {turns_on}",
         f"Last verify: {state.get('last_verify_result', 'not run')}",
     ]
+    if plan_note:  # turn-1 conductor plan: lead with it so the model reads PLAN.md first
+        lines = [plan_note, ""] + lines
     if paused:
         lines = ["## ⏸ OPERATOR PAUSE",
                  "The operator has paused this run. Do NOT begin new work. Finish only the "
