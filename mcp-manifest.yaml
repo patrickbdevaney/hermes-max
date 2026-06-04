@@ -181,3 +181,23 @@ servers:
     profiles: [gpu_local, lean_cloud]
     requires: []
     degrades_to: deterministic UCB1 over a JSON bandit; classifier falls back to keyword rules; default route local-serial-free
+
+  - name: edit
+    dir: mcp-edit
+    port: 9118
+    port_env: MCP_EDIT_PORT
+    health: /health
+    register_as: hermes-max-edit
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: native write_file/edit_file (the validated whole-file/SEARCH-REPLACE checks are additive; pure stdlib, no model/network)
+
+  - name: security
+    dir: mcp-security
+    port: 9119
+    port_env: MCP_SECURITY_PORT
+    health: /health
+    register_as: hermes-max-security
+    profiles: [gpu_local, lean_cloud]
+    requires: []
+    degrades_to: warn-not-block when the advisory DB is absent/stale; egress classify is pattern-only; no model, offline-capable
