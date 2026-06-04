@@ -310,6 +310,22 @@ def _fabric_mode() -> str:
 _PLAN_SIGNATURE = "## Plan authored by:"   # must be followed by "<model> via conductor"
 
 
+def _ranked_repo_map(cwd: str, task: str) -> str:
+    """Mention-seeded, PageRank-ranked repo map (tools/repomap.py) — files the task mentions
+    rank first, fitted to a token budget. Best-effort: "" on any failure → caller falls back
+    to the scopemap structural map."""
+    try:
+        import os as _os
+        repo = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        if repo not in sys.path:
+            sys.path.insert(0, repo)
+        from tools import repomap
+        m = repomap.build_repomap(cwd, query=task, max_tokens=2500)
+        return m if "### " in m else ""  # require at least one ranked file
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _scopemap_repo_map(cwd: str) -> str:
     """Best-effort structural map via the scopemap core (added to path lazily)."""
     try:
@@ -324,19 +340,153 @@ def _scopemap_repo_map(cwd: str) -> str:
         return ""
 
 
-_FRONTIER_SIGNALS = (
-    "lock-free", "lockfree", "wait-free", "atomic", "compare-and-swap", "cas ", "concurren",
-    "mpmc", "spsc", "mpsc", "ring buffer", "allocator", "scheduler", "memory model", "ordering",
-    "parser", "compiler", "codec", "protocol", "b-tree", "lsm", "raft", "paxos", "consensus",
-    "zero-copy", "simd", "from scratch", "state machine", "interpreter", "bytecode",
+# ── PLANNER_PROMPT_SPEC §4 — frontier classifier (keyword CLASSES, never a problem
+# allowlist). Any class firing, OR a structural >3-file signal, routes to the frontier
+# planner: embedded invariants become mandatory and the synth budget is raised. The
+# example domains below are signal classes, not a hardcoded problem set.
+_FRONTIER_SIGNAL_CLASSES: dict[str, tuple[str, ...]] = {
+    "concurrency": ("lock-free", "lockfree", "wait-free", "atomic", "compare-and-swap", "cas ",
+                    "mutex", "semaphore", "data race", "memory model", "ordering", "mpmc", "spsc",
+                    "mpsc", "ring buffer", "concurren", "lock contention"),
+    "systems": ("allocator", "scheduler", "syscall", "mmap", "zero-copy", "simd", "page table",
+                "garbage collect", "kernel", "bytecode", "interpreter", "vm "),
+    "algorithmic_novelty": ("from scratch", "b-tree", "lsm tree", "skip list", "union-find",
+                            "novel algorithm", "parser", "compiler", "state machine"),
+    "crypto_numeric": ("crypto", "cipher", "merkle", "elliptic", "zk-snark", "snark", "zero-knowledge",
+                       "fixed-point", "numerical stability", "floating-point error"),
+    "distributed_protocol": ("raft", "paxos", "consensus", "protocol", "replication", "two-phase commit",
+                             "2pc", "gossip", "vector clock", "rpc framing", "codec"),
+}
+
+
+def classify_task(task: str, n_files: int = 0) -> dict[str, Any]:
+    """§4 classifier → {frontier, classes, structural, signals}. Frontier when any signal
+    class fires or the task spans >3 files; lightweight otherwise. Ambiguity is resolved
+    toward frontier elsewhere (conductor tokens are cheap; an executor spiral is not)."""
+    t = (task or "").lower()
+    fired: dict[str, list[str]] = {}
+    for cls, sigs in _FRONTIER_SIGNAL_CLASSES.items():
+        hit = [s.strip() for s in sigs if s in t]
+        if hit:
+            fired[cls] = hit
+    structural = n_files > 3
+    return {"frontier": bool(fired) or structural, "classes": list(fired),
+            "structural": structural, "signals": [s for h in fired.values() for s in h][:6]}
+
+
+def _is_frontier_task(task: str, n_files: int = 0) -> bool:
+    return classify_task(task, n_files)["frontier"]
+
+
+# ── PLANNER_PROMPT_SPEC §1 — the plan schema (section TYPES, never problem types) ─────
+PLAN_SCHEMA_SECTIONS: tuple[str, ...] = (
+    "CONTEXT", "ARCHITECTURE DECISIONS", "STEPS", "VERIFICATION", "REFERENCES")
+
+# §7 anti-patterns AP1–AP7: phrases that betray an un-committed plan. Banned ANYWHERE
+# except inside a 'BECAUSE …' justification clause (where naming the rejected alternative
+# is legitimate). The planner commits to one choice; it never hands the executor a menu of
+# options to resolve.
+_PLAN_BANNED = (
+    (re.compile(r"\bconsider\b", re.I), "AP1 'consider' — commit to a choice, don't offer one"),
+    (re.compile(r"\byou could\b", re.I), "AP2 'you could' — commit, don't suggest"),
+    (re.compile(r"\bdepending on\b", re.I), "AP3 'depending on' — resolve the condition now, don't defer"),
+    (re.compile(r"\beither\b", re.I), "AP4 'either' — pick one, don't leave a fork"),
+    (re.compile(r"\btests?\s+pass\b", re.I), "AP5 'tests pass' — give the exact command + exit code"),
+    (re.compile(r"\bworks?\s+correctly\b", re.I), "AP6 'works correctly' — give a mechanical check"),
 )
 
 
-def _is_frontier_task(task: str) -> bool:
-    """A novel-algorithm / concurrency-primitive / systems-level task the small local
-    executor must NOT design alone — the conductor commits every decision for it."""
-    t = (task or "").lower()
-    return any(s in t for s in _FRONTIER_SIGNALS)
+def _plan_system(frontier: bool) -> str:
+    """PLANNER_PROMPT_SPEC §2 — the load-bearing rules (no rationale/commentary)."""
+    s = (
+        "You are the PLANNER. You author PLAN.md — a CONTRACT a small local executor "
+        "TRANSCRIBES literally. The executor cannot design; YOU make every decision, here, now.\n\n"
+        "Output ONLY the markdown plan (no preamble, no code fences). It MUST contain these "
+        "sections, in THIS order, with these EXACT ## headings:\n\n"
+        "## CONTEXT\nOne paragraph: the goal and the binding constraints.\n\n"
+        "## ARCHITECTURE DECISIONS\nA numbered list. For EVERY non-trivial choice the task "
+        "implies (data structure, algorithm, concurrency/atomicity mechanism, error model, I/O "
+        "strategy), COMMIT to ONE specific named mechanism — each ending with 'BECAUSE <why this "
+        "over the main alternative>'. DECISIONS, not options.\n\n"
+        "## STEPS\nAn ordered, ATOMIC list. EACH step is exactly:\n"
+        "  - DO: one concrete action naming the exact file + function/signature.\n"
+        "  - DONE-WHEN: an exact command + expected exit code/output (a mechanical binary check).\n"
+        "  - LIKELY-FAILURE: the specific way this step tends to fail; PREEMPT: how to avoid it.\n"
+        "Mark a hard step 'complexity: HIGH'. Multi-file: append 'files: a.py,b.py' and "
+        "'depends_on: [1,2]' to the DO line.\n\n"
+        "## VERIFICATION\nThe exact commands that prove the WHOLE task done (lint + types + tests) "
+        "and their expected results.\n\n"
+        "## REFERENCES\nThe exact algorithm/paper/known implementation each decision follows — or "
+        "'none'. Reference NOTHING the executor has not been shown (no unseen files/APIs).\n\n"
+        "RULES (non-negotiable):\n"
+        "- COMMIT, do not offer. Never 'consider', 'you could', 'depending on', 'either', or an "
+        "unresolved 'A or B'. Pick one; justify with BECAUSE (only there may you name the rejected "
+        "alternative).\n"
+        "- DONE-WHEN is MECHANICAL. Never 'tests pass' / 'works correctly' — give the exact command "
+        "and exact expected exit code/output.\n"
+        "- ANTICIPATE the executor's failure: every step states LIKELY-FAILURE + PREEMPT.\n"
+        "- Steps are ATOMIC and ORDERED. PIN everything: exact signatures, versions, paths.\n")
+    if frontier:
+        s += ("\nFRONTIER TASK: the executor CANNOT design this. Commit every atomicity/ordering/"
+              "algorithmic INVARIANT with the precise named mechanism and a concrete reference to "
+              "follow verbatim; spell out the invariant each step must preserve. A deferred design "
+              "choice is a FAILED plan.\n")
+    return s
+
+
+def _plan_user(task: str, ctx: str, retry_context: str = "", research_context: str = "") -> str:
+    """PLANNER_PROMPT_SPEC §3 — XML-tagged user template. Long, stable context FIRST;
+    the instruction LAST (placement rationale: the model attends most to the tail)."""
+    return (
+        f"<repo_context>\n{ctx}\n</repo_context>\n\n"
+        f"<research_context>\n{research_context or 'none'}\n</research_context>\n\n"
+        f"<retry_context>\n{retry_context or 'none — this is the first plan'}\n</retry_context>\n\n"
+        f"<task>\n{task}\n</task>\n\n"
+        "<instruction>\nProduce PLAN.md for <task>, following the schema and rules EXACTLY. "
+        "Commit every decision; make every DONE-WHEN a mechanical check. Output only the plan.\n"
+        "</instruction>")
+
+
+def lint_plan(plan_md: str) -> list[str]:
+    """§6 determinism enforcer — the reason compliance does not depend on which model rung
+    answered. Returns a list of violations (empty = a clean, transcribable plan):
+      • a required §1 section is missing;
+      • a STEP lacks a mechanical 'DONE-WHEN:' line;
+      • a §7 banned phrase appears outside a BECAUSE clause (AP1–AP6);
+      • an unresolved 'A or B' choice appears in a decision/step line (AP7)."""
+    plan_md = plan_md or ""
+    violations: list[str] = []
+
+    for sec in PLAN_SCHEMA_SECTIONS:
+        if not re.search(rf"(?im)^\s*#+\s*{re.escape(sec)}\b", plan_md):
+            violations.append(f"missing required section: ## {sec}")
+
+    # STEPS: every 'DO:' must be matched by a 'DONE-WHEN:' (each step has both).
+    steps_block = ""
+    m = re.search(r"(?is)^#+\s*STEPS\b(.*?)(?:^#+\s|\Z)", plan_md, re.M)
+    if m:
+        steps_block = m.group(1)
+    n_do = len(re.findall(r"(?im)^\s*[-*\d.)\s]*DO:", steps_block))
+    n_done = len(re.findall(r"(?i)DONE[\s\-]?WHEN:", steps_block))
+    if n_done == 0:
+        violations.append("STEPS has no mechanical 'DONE-WHEN:' check")
+    elif n_do and n_done < n_do:
+        violations.append(f"{n_do - n_done} step(s) missing a 'DONE-WHEN:' line")
+
+    # Banned phrases / unresolved forks — line by line, skipping BECAUSE justifications.
+    for line in plan_md.splitlines():
+        if "BECAUSE" in line.upper():
+            continue
+        low = line.strip()
+        if not low or low.startswith(("#", ">", "```")):
+            continue
+        for rx, msg in _PLAN_BANNED:
+            if rx.search(line):
+                violations.append(f"{msg}: “{low[:70]}”")
+        # AP7: an unresolved 'X or Y' offered as a choice (not inside a justification).
+        if re.search(r"\b\w+\s+or\s+\w+\b", line, re.I) and re.search(r"(?i)\b(use|choose|pick|option|approach|either|maybe)\b", line):
+            violations.append(f"AP7 unresolved 'or' fork — commit to one: “{low[:70]}”")
+    return violations
 
 
 def _load_skills_md(cwd: str) -> str:
@@ -406,7 +556,9 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
         pass
 
     if not repo_map and cwd:
-        repo_map = _scopemap_repo_map(cwd)        # auto get_repo_map (spec point 4)
+        # Prefer the mention-seeded ranked map (task-relevant files first); fall back to the
+        # scopemap structural map when tools/repomap is unavailable or finds nothing.
+        repo_map = _ranked_repo_map(cwd, task) or _scopemap_repo_map(cwd)
     greenfield = (not repo_map) or "greenfield" in repo_map.lower()
     ctx = ("GREENFIELD — no existing code to map." if greenfield
            else f"Repository structure (one line per file):\n{repo_map[:8000]}")
@@ -416,54 +568,38 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
                 "test commands; do NOT modify protected files or reopen locked decisions):\n"
                 + skills)
     frontier = _is_frontier_task(task)
-    prompt = (
-        "You are the PLANNER. Produce a PLAN.md for the task. Output ONLY the markdown plan "
-        "(no preamble). It is a CONTRACT the executor TRANSCRIBES literally — the executor is "
-        "a small local model that must NOT invent architecture, so YOU make every design "
-        "decision here; leave nothing to its judgment. Be concrete and gap-free.\n\n"
-        f"{ctx}\n\nTASK:\n{task}\n\n"
-        "The plan MUST contain these markdown sections, in order:\n"
-        "- a one-paragraph **approach**;\n"
-        "- '## Architecture Decisions' — a numbered list. For EVERY non-trivial choice the "
-        "task implies (data structure, algorithm, concurrency/atomicity mechanism, error "
-        "model, I/O strategy), COMMIT to ONE specific named mechanism with a one-line WHY "
-        "(over the main alternative). These are DECISIONS, not options — the executor follows "
-        "them verbatim and must NOT reopen them. Cite the algorithm/paper/known implementation "
-        "to follow where one exists;\n"
-        "- '## Files' — a FILE SPEC per file: key functions/classes with EXACT signatures + "
-        "return types;\n"
-        "- '## Steps' — an ordered list; each step is a SINGLE concrete action naming the exact "
-        "file/function, and ENDS with 'DONE WHEN: <exact command + expected output/exit code>' "
-        "— a mechanical, binary check (e.g. 'DONE WHEN: pytest -x test_q.py::test_cross_process "
-        "exits 0'). No vague steps;\n"
-        "- '## Failure Modes' — the specific way each risky step is likely to fail and how to "
-        "avoid it, so the executor RECOGNIZES a failure instead of diagnosing from scratch;\n"
-        "- a 'DONE_CONDITION:' line with the exact verifiable gate (e.g. 'pytest green, N tests "
-        "pass').\n"
-        "Mark EACH step with a complexity flag: 'complexity: standard' or 'complexity: HIGH'. "
-        "For HIGH steps (novel concurrency invariants, atomicity guarantees, non-obvious "
-        "property-test strategies) add a one-line 'note:' with the key consideration — the "
-        "executor will call reasoning_escalation BEFORE attempting those steps.\n"
-        "For MULTI-FILE tasks, annotate each step with the files it touches and its "
-        "dependencies: append 'files: a.py, b.py' and 'depends_on: [1, 2]' (1-based earlier step "
-        "numbers) to the step line. Independent steps (no shared deps) get isolated contexts; "
-        "steps that touch the same file are serialized to avoid merge conflicts.")
-    if frontier:
-        prompt += (
-            "\n\nFRONTIER IMPLEMENTATION: this is a novel algorithm / concurrency primitive / "
-            "systems-level task. The executor CANNOT design it. Every atomicity/ordering/"
-            "algorithmic decision MUST be committed above with the precise named mechanism and a "
-            "concrete reference to follow verbatim (e.g. 'Vyukov bounded MPMC queue: per-cell "
-            "sequence numbers, CAS on the tail index'). Spell out the invariant each step must "
-            "preserve. If you leave a design choice to the executor, the plan has failed.")
-    # synth chain already carries thinking_budget 8192 (see _THINKING_BUDGET["synth"]).
-    # Frontier specs need more room than a routine plan.
-    res = run_role("synth", prompt=prompt, max_tokens=6144 if frontier else 4096)
+    system = _plan_system(frontier)
+    user = _plan_user(task, ctx)
+    # synth chain carries thinking_budget 8192; frontier specs need more output room.
+    _mt = 6144 if frontier else 4096
+
+    def _gen(extra_user: str = "") -> dict[str, Any]:
+        return run_role("synth", messages=[{"role": "system", "content": system},
+                                           {"role": "user", "content": user + extra_user}],
+                        max_tokens=_mt)
+
+    res = _gen()
     if not (res.get("ok") and res.get("content")):
         return {"ok": False, "plan": "", "signed": False, "wrote": False,
                 "path": plan_path, "reason": res.get("reason", "no synth rung available")}
-    model = res.get("model", "unknown")
     body = res["content"].strip()
+
+    # ── §6 determinism gate: lint, and on violations re-generate ONCE with the exact
+    # violations appended as a hard correction. Keep whichever plan lints cleaner. A
+    # plan that still trips the linter is shipped with the residual surfaced (warn),
+    # never silently — the executor's verify gate is the final backstop.
+    violations = lint_plan(body)
+    if violations:
+        _otel("plan_lint_retry", {"violations": len(violations)})
+        correction = ("\n\n<correction>\nYour previous plan violated the contract. FIX ALL of "
+                      "these and re-output the COMPLETE plan (every section), nothing else:\n"
+                      + "\n".join(f"- {v}" for v in violations[:12]) + "\n</correction>")
+        res2 = _gen(correction)
+        if res2.get("ok") and res2.get("content"):
+            body2 = res2["content"].strip()
+            if len(lint_plan(body2)) < len(violations):
+                res, body, violations = res2, body2, lint_plan(body2)
+    model = res.get("model", "unknown")
     # strip any header the model emitted, then prepend the canonical signature
     signed = f"## Plan authored by: {model} via conductor\n\n{body}\n"
     _archive_existing_plan(cwd)  # preserve the prior plan to plans/PLAN_NNN.md before overwrite
@@ -475,7 +611,74 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
                 "path": plan_path, "reason": f"write failed: {e}"}
     return {"ok": True, "plan": signed, "signed": True, "wrote": True, "path": plan_path,
             "model": model, "provider": res.get("provider"),
-            "thinking_tok": res.get("thinking_tok", 0)}
+            "thinking_tok": res.get("thinking_tok", 0),
+            "lint_violations": violations, "frontier": frontier}
+
+
+# ── PLANNER_PROMPT_SPEC §5 — mid-run escalation / replanning callback ──────────────────
+_ESCALATION_DECISIONS = ("patch-step", "pivot-approach", "abort-and-resummarize")
+
+_ESCALATE_SYSTEM = (
+    "You are the CONDUCTOR handling a mid-run failure. A small executor is following a PLAN.md "
+    "you authored and a step has FAILED its DONE-WHEN. Diagnose the ROOT CAUSE and choose the "
+    "MINIMAL intervention — touch only the failing step or the single decision that was wrong; "
+    "do NOT rewrite the plan.\n\n"
+    "Output EXACTLY three lines, nothing else:\n"
+    "DIAGNOSIS: <one sentence — the root cause>\n"
+    "DECISION: <exactly one of: patch-step | pivot-approach | abort-and-resummarize>\n"
+    "PATCH: <the minimal change — the corrected step text, or the one replacement decision, or "
+    "(for abort-and-resummarize) a 2-line STUCK SUMMARY of what is verifiably true and what failed>\n\n"
+    "patch-step = the step is salvageable with a concrete fix. pivot-approach = the decision "
+    "behind the step was wrong; give the replacement. abort-and-resummarize = the context is "
+    "polluted or the approach is dead; summarize for a clean restart.")
+
+
+def _parse_escalation(text: str) -> dict[str, str] | None:
+    """Strict parse of the §5 three-field output. None if it does not match (caller re-asks)."""
+    if not text:
+        return None
+    d = re.search(r"(?im)^\s*DIAGNOSIS:\s*(.+?)\s*$", text)
+    dec = re.search(r"(?im)^\s*DECISION:\s*([a-z][a-z\-]+)", text)
+    p = re.search(r"(?ism)^\s*PATCH:\s*(.+)$", text)
+    if not (d and dec and p):
+        return None
+    decision = dec.group(1).strip().lower()
+    if decision not in _ESCALATION_DECISIONS:
+        return None
+    return {"diagnosis": d.group(1).strip(), "decision": decision, "patch": p.group(1).strip()}
+
+
+def conductor_escalate(plan_md: str, failing_step: str, error_output: str,
+                       completed_steps: list[str] | None = None) -> dict[str, Any]:
+    """Mid-run replanning: when a step repeatedly fails its DONE-WHEN (or a tool errors past
+    the consecutive-failure threshold), the executor calls this INSTEAD of blind retry. The
+    conductor returns a strict {diagnosis, decision ∈ patch-step|pivot-approach|
+    abort-and-resummarize, patch}. Strict-parsed; re-asked once; falls back to
+    abort-and-resummarize. Never raises."""
+    completed = "; ".join(completed_steps or []) or "none"
+    user = (f"<plan>\n{(plan_md or '')[:6000]}\n</plan>\n\n"
+            f"<failing_step>\n{failing_step}\n</failing_step>\n\n"
+            f"<error_output>\n{(error_output or '')[:3000]}\n</error_output>\n\n"
+            f"<completed_steps>\n{completed}\n</completed_steps>\n\n"
+            "<instruction>Diagnose and decide. Output ONLY the three DIAGNOSIS/DECISION/PATCH "
+            "lines.</instruction>")
+    extra = ""
+    for _ in range(2):
+        res = run_role("synth", messages=[{"role": "system", "content": _ESCALATE_SYSTEM},
+                                          {"role": "user", "content": user + extra}], max_tokens=2048)
+        if not (res.get("ok") and res.get("content")):
+            return {"ok": False, "reason": res.get("reason", "no synth rung available"),
+                    "decision": "abort-and-resummarize", "diagnosis": "", "patch": ""}
+        parsed = _parse_escalation(res["content"])
+        if parsed:
+            _otel("conductor_escalate", {"decision": parsed["decision"]})
+            return {"ok": True, "model": res.get("model", "unknown"), **parsed}
+        extra = ("\n\n<correction>Your response did not match the required format. Output EXACTLY "
+                 "three lines: 'DIAGNOSIS: …', then 'DECISION: <patch-step|pivot-approach|"
+                 "abort-and-resummarize>', then 'PATCH: …'. Nothing else.</correction>")
+    _otel("conductor_escalate", {"decision": "abort-and-resummarize", "parse": "failed"})
+    return {"ok": True, "model": "unknown", "diagnosis": "(unparseable conductor response)",
+            "decision": "abort-and-resummarize", "patch": ""}
 
 
 # ── escalation economic guard (per-run call budget) ───────────────────────────

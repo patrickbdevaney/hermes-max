@@ -180,6 +180,22 @@ def review_and_adapt(issue: str, current_step: int, completed_steps: list | None
 
 @mcp.tool()
 @_threaded
+def conductor_escalate(plan_md: str, failing_step: str, error_output: str,
+                       completed_steps: list | None = None) -> dict:
+    """Mid-run replanning: when a PLAN.md step REPEATEDLY fails its DONE-WHEN (or a tool
+    errors past the consecutive-failure threshold), call this INSTEAD of blind retry. The
+    conductor diagnoses the root cause and returns a strict, minimal intervention:
+      {diagnosis, decision, patch}  where decision ∈
+        patch-step          — the step is salvageable; `patch` is the corrected step,
+        pivot-approach      — the decision behind the step was wrong; `patch` is the replacement,
+        abort-and-resummarize — context polluted / approach dead; `patch` is a STUCK SUMMARY.
+    Pass the current PLAN.md, the failing step text, the error/verify output, and the list of
+    completed step descriptions. Apply the patch and resume; do NOT keep retrying the same way."""
+    return conductor_core.conductor_escalate(plan_md, failing_step, error_output, completed_steps)
+
+
+@mcp.tool()
+@_threaded
 def reasoning_escalation(question: str, context: str = "", budget: str = "standard",
                          trigger: str = "self_declared") -> dict:
     """Ask a LARGER reasoning model a TARGETED question — frontier reasoning on demand.
