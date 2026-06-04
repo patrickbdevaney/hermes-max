@@ -526,6 +526,72 @@ def _archive_existing_plan(cwd: str) -> str | None:
         return None
 
 
+def _conventions():
+    """Import the conventions module from mcp-knowledge-graph (added to path lazily). None
+    if unavailable — callers degrade silently (no KG, no decision memory, no crash)."""
+    try:
+        import os as _os
+        kg = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                           "mcp-knowledge-graph")
+        if kg not in sys.path:
+            sys.path.insert(0, kg)
+        import conventions
+        return conventions
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _save_plan_decisions(plan_md: str, cwd: str) -> int:
+    """Extract '## ARCHITECTURE DECISIONS' items (each a committed 'X BECAUSE …' line) from a
+    plan and upsert them to convention memory (category='decision', scope=cwd basename) — the
+    *why* behind each decision, queryable in a later plan. Idempotent by content hash; silent
+    on KG absence. Returns the count newly saved."""
+    cv = _conventions()
+    if cv is None:
+        return 0
+    m = re.search(r"##\s*ARCHITECTURE DECISIONS\s*\n(.*?)(?=\n##|\Z)", plan_md or "",
+                  re.DOTALL | re.IGNORECASE)
+    if not m:
+        return 0
+    import os as _os
+    scope = _os.path.basename(cwd.rstrip("/")) if cwd else "global"
+    n = 0
+    for line in m.group(1).splitlines():
+        line = line.strip().lstrip("0123456789.-) *").strip()
+        if len(line) < 20 or "because" not in line.lower():
+            continue
+        try:
+            if cv.save_convention(category="decision", data=line,
+                                  tags=["auto", "plan"], scope=scope).get("saved"):
+                n += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return n
+
+
+def _past_decisions(cwd: str) -> str:
+    """Past committed decisions for this repo, formatted for injection into the planner
+    context so the conductor reuses (not re-derives) them and sees what a pivot already
+    rejected. "" when none / KG down. Capped ~600 chars."""
+    cv = _conventions()
+    if cv is None or not cwd:
+        return ""
+    try:
+        import os as _os
+        decisions = cv.get_conventions(category="decision", scope=_os.path.basename(cwd.rstrip("/")))
+    except Exception:  # noqa: BLE001
+        return ""
+    if not decisions:
+        return ""
+    lines = ["## Past decisions (do not revisit these)"]
+    for d in decisions[:8]:
+        row = f"- {d.get('data', '')[:120]}"
+        if "pivot" in (d.get("tags") or []):
+            row += "  [PIVOT — prior approach failed]"
+        lines.append(row)
+    return "\n".join(lines)[:600]
+
+
 def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, Any]:
     """THE planner entrypoint (the guaranteed first step on any new task). The CONDUCTOR
     authors PLAN.md — not the executor's internal chain-of-thought. It maps the repo
@@ -567,6 +633,9 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
         ctx += ("\n\nPROJECT SKILLS.md (respect these — locked decisions, protected files, "
                 "test commands; do NOT modify protected files or reopen locked decisions):\n"
                 + skills)
+    past = _past_decisions(cwd)  # prior committed decisions (+ what a pivot rejected)
+    if past:
+        ctx += "\n\n" + past
     frontier = _is_frontier_task(task)
     system = _plan_system(frontier)
     user = _plan_user(task, ctx)
@@ -609,6 +678,9 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
     except OSError as e:
         return {"ok": False, "plan": signed, "signed": True, "wrote": False,
                 "path": plan_path, "reason": f"write failed: {e}"}
+    # Capture the committed ARCHITECTURE DECISIONS (the 'why') into convention memory so a
+    # later plan reuses them instead of re-deriving. Best-effort; silent on KG absence.
+    _save_plan_decisions(signed, cwd)
     return {"ok": True, "plan": signed, "signed": True, "wrote": True, "path": plan_path,
             "model": model, "provider": res.get("provider"),
             "thinking_tok": res.get("thinking_tok", 0),
@@ -649,7 +721,7 @@ def _parse_escalation(text: str) -> dict[str, str] | None:
 
 
 def conductor_escalate(plan_md: str, failing_step: str, error_output: str,
-                       completed_steps: list[str] | None = None) -> dict[str, Any]:
+                       completed_steps: list[str] | None = None, cwd: str = "") -> dict[str, Any]:
     """Mid-run replanning: when a step repeatedly fails its DONE-WHEN (or a tool errors past
     the consecutive-failure threshold), the executor calls this INSTEAD of blind retry. The
     conductor returns a strict {diagnosis, decision ∈ patch-step|pivot-approach|
@@ -672,6 +744,18 @@ def conductor_escalate(plan_md: str, failing_step: str, error_output: str,
         parsed = _parse_escalation(res["content"])
         if parsed:
             _otel("conductor_escalate", {"decision": parsed["decision"]})
+            # A pivot-approach PATCH is a NEW architecture decision that supersedes a failed
+            # one — record it (tagged 'pivot') so future plans see what was tried and rejected.
+            if parsed["decision"] == "pivot-approach" and "because" in (parsed.get("patch", "")).lower():
+                cv = _conventions()
+                if cv is not None:
+                    import os as _os
+                    try:
+                        cv.save_convention(category="decision", data=parsed["patch"].strip(),
+                                           tags=["auto", "pivot", "escalation"],
+                                           scope=_os.path.basename(cwd.rstrip("/")) if cwd else "global")
+                    except Exception:  # noqa: BLE001 - never block escalation on a KG write
+                        pass
             return {"ok": True, "model": res.get("model", "unknown"), **parsed}
         extra = ("\n\n<correction>Your response did not match the required format. Output EXACTLY "
                  "three lines: 'DIAGNOSIS: …', then 'DECISION: <patch-step|pivot-approach|"

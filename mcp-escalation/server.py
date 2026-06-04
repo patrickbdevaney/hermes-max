@@ -181,7 +181,7 @@ def review_and_adapt(issue: str, current_step: int, completed_steps: list | None
 @mcp.tool()
 @_threaded
 def conductor_escalate(plan_md: str, failing_step: str, error_output: str,
-                       completed_steps: list | None = None) -> dict:
+                       completed_steps: list | None = None, cwd: str = "") -> dict:
     """Mid-run replanning: when a PLAN.md step REPEATEDLY fails its DONE-WHEN (or a tool
     errors past the consecutive-failure threshold), call this INSTEAD of blind retry. The
     conductor diagnoses the root cause and returns a strict, minimal intervention:
@@ -191,7 +191,7 @@ def conductor_escalate(plan_md: str, failing_step: str, error_output: str,
         abort-and-resummarize — context polluted / approach dead; `patch` is a STUCK SUMMARY.
     Pass the current PLAN.md, the failing step text, the error/verify output, and the list of
     completed step descriptions. Apply the patch and resume; do NOT keep retrying the same way."""
-    return conductor_core.conductor_escalate(plan_md, failing_step, error_output, completed_steps)
+    return conductor_core.conductor_escalate(plan_md, failing_step, error_output, completed_steps, cwd)
 
 
 @mcp.tool()

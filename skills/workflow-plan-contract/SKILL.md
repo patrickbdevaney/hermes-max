@@ -94,6 +94,18 @@ steer-tier prices for execution; that's the wrong split.
   `directive_verify`, which gates a JSON directive against repo state — don't call
   `directive_verify` on a PLAN.md.
 
+## Decision memory
+
+Before writing ARCHITECTURE DECISIONS, call `get_conventions(category="decision")` to see
+whether this ground was already settled or previously tried and rejected. If a past decision
+covers it, REUSE it — don't re-derive. If you are overriding one, say so in the BECAUSE clause:
+`BECAUSE <rationale> — prior approach (<prior>) failed because <reason>`.
+
+You do NOT call `save_convention` manually while planning: once the plan passes `plan_lint`,
+the conductor automatically upserts each committed `… BECAUSE …` decision to convention memory,
+and a mid-run `pivot-approach` escalation is saved too (tagged `[PIVOT]`). Those facts are
+auto-injected into the next plan's context under "## Past decisions", so the *why* compounds.
+
 ## The principle
 
 The executor must never face a design decision the planner didn't already make.
