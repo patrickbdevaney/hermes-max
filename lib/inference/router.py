@@ -46,6 +46,13 @@ def _apply_thinking(provider: str, kind: str, budget: int,
         return {"reasoning": {"max_tokens": budget}}, messages
     if kind == "anthropic":
         return {"thinking": {"type": "enabled", "budget_tokens": budget}}, messages
+    if config.tier(provider) == "local":
+        # Local vLLM (Qwen3): cap CoT at the TOKEN level via the server's
+        # chat_template_kwargs (enable_thinking + thinking_budget) instead of a prompt
+        # hint, so reasoning can't spiral unbounded before output. vLLM accepts these
+        # as known params (ignored if the chat template doesn't wire them), so it never
+        # 400s. Server must be launched with thinking enabled for the budget to bite.
+        return {"chat_template_kwargs": {"enable_thinking": True, "thinking_budget": budget}}, messages
     # non-native: instruct via a prepended system message (don't mutate the caller's list)
     instr = {"role": "system",
              "content": f"Think step by step, using up to {budget} tokens of "

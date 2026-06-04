@@ -437,6 +437,17 @@ def _pre_llm_call(**kw: Any) -> dict[str, Any]:
     if sd.get("complexity") == "HIGH" and turns_on == 0:
         lines.append("⚠ This step is HIGH complexity — call reasoning_escalation before "
                      "writing code, or set conductor_requested=true in EXECUTION_STATE.json.")
+    # CoT-spiral guard: N consecutive LLM turns with NO tool call / file write / verify
+    # (reset in _post_tool_call) means the model is reasoning in circles across turns —
+    # the cross-turn complement to the per-call thinking_budget. Nudge it to commit to disk.
+    cot = int(state.get("reasoning_only_turns", 0)) + 1
+    state["reasoning_only_turns"] = cot
+    if cot >= int(os.environ.get("HM_COT_SPIRAL_TURNS", "4")):
+        _emit("cot_spiral", {"turns": cot, "step": step})
+        lines += ["", (f"## ⚠ Reasoning spiral — {cot} turns with no tool call or file write\n"
+                       "STOP analyzing. Write your current best implementation to disk NOW and "
+                       "run the verifier (pytest). Iterate from the TEST OUTPUT, not from further "
+                       "reasoning — a failing test is more useful than more thinking.")]
     lines += [
         "", "After this turn, update EXECUTION_STATE.json in the cwd:",
         '  {"current_step": N, "step_status": "complete"|"in_progress",',
@@ -549,6 +560,7 @@ def _post_tool_call(tool_name: str = "", args: Optional[dict] = None, result: An
     """Detect file writes + verify results; fire the conductor on stuck-detection."""
     cwd = os.getcwd()
     state = _load_state(cwd)
+    state["reasoning_only_turns"] = 0  # a tool/file/verify fired → not a CoT spiral
     args = args if isinstance(args, dict) else {}
     step = int(state.get("current_step", 1))
     result_text = str(result)[:2000]
