@@ -146,12 +146,24 @@ def thinking_budget(role: str, mode_name: Optional[str] = None) -> int:
     """Role-aware reasoning/thinking-token ceiling (Fix 3). Reads the top-level
     `thinking_budget:` map in roles.yaml (role → tokens); an active mode may override
     via its `thinking_budget` block. 0 = no extended thinking requested. The budget
-    is a CEILING, not a floor — the model uses less on a simple task."""
+    is a CEILING, not a floor — the model uses less on a simple task.
+
+    Precedence: HM_THINKING_BUDGET_<ROLE> env override > active-mode override > roles.yaml
+    > HM_THINKING_BUDGET_DEFAULT (only for a role configured nowhere) > 0."""
+    role_env = os.environ.get(f"HM_THINKING_BUDGET_{role.upper()}")
+    if role_env is not None:
+        try:
+            return max(0, int(role_env))
+        except ValueError:
+            pass
     base = (_load("roles.yaml").get("thinking_budget") or {})
     name = mode_name or active_mode_name()
     over = ((_modes_doc().get("modes") or {}).get(name) or {}).get("thinking_budget") or {}
+    val = over.get(role, base.get(role))
+    if val is None:  # role configured nowhere → optional global default knob
+        val = os.environ.get("HM_THINKING_BUDGET_DEFAULT", 0)
     try:
-        return int(over.get(role, base.get(role, 0)) or 0)
+        return max(0, int(val or 0))
     except (TypeError, ValueError):
         return 0
 

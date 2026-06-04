@@ -10,6 +10,9 @@ bin/*
 .hermes-max/
 # conductor runtime scratch dir — local state, never committed.
 .hermes-conductor/
+# conductor-authored plan + archived history (runtime artifacts of a task run here)
+/PLAN.md
+/plans/
 .mypy_cache/
 __pycache__/
 .ruff_cache/

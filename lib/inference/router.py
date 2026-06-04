@@ -46,6 +46,13 @@ def _apply_thinking(provider: str, kind: str, budget: int,
         return {"reasoning": {"max_tokens": budget}}, messages
     if kind == "anthropic":
         return {"thinking": {"type": "enabled", "budget_tokens": budget}}, messages
+    if config.tier(provider) == "local":
+        # Local vLLM (Qwen3): cap CoT at the TOKEN level via the server's
+        # chat_template_kwargs (enable_thinking + thinking_budget) instead of a prompt
+        # hint, so reasoning can't spiral unbounded before output. vLLM accepts these
+        # as known params (ignored if the chat template doesn't wire them), so it never
+        # 400s. Server must be launched with thinking enabled for the budget to bite.
+        return {"chat_template_kwargs": {"enable_thinking": True, "thinking_budget": budget}}, messages
     # non-native: instruct via a prepended system message (don't mutate the caller's list)
     instr = {"role": "system",
              "content": f"Think step by step, using up to {budget} tokens of "
@@ -98,6 +105,14 @@ def run_role(role: str, messages: list[dict[str, str]], *, max_tokens: int = 204
         budget = roles.thinking_budget(role, mode_name)
         extra_body, call_msgs = _apply_thinking(provider, kind, budget, messages)
 
+        # HARD cap for LOCAL HTTP endpoints: the local vLLM ignores the soft
+        # thinking_budget field, but max_tokens IS enforced — so bound total output at
+        # budget + ANSWER_BUDGET. The model stops at `length` instead of spiralling.
+        # Cloud rungs (all HTTPS) pass through with their full max_tokens unchanged.
+        call_max_tokens = max_tokens
+        if budget > 0 and config._is_local_endpoint(config.base_url(provider, env)):
+            call_max_tokens = min(max_tokens, budget + config.ANSWER_BUDGET)
+
         # Surface the LLM call in the live activity stream (cockpit + UI). The
         # planner/synth calls flow through here, so this is where "LLM·plan kimi …
         # thinking: N" lines come from. Guarded — never breaks the call.
@@ -111,7 +126,7 @@ def run_role(role: str, messages: list[dict[str, str]], *, max_tokens: int = 204
         t0 = time.time()
         res = _CALL(kind, config.base_url(provider),
                     config.api_key(provider, env), model_id, call_msgs,
-                    max_tokens=max_tokens, extra_body=extra_body)
+                    max_tokens=call_max_tokens, extra_body=extra_body)
         wall_ms = int((time.time() - t0) * 1000)
         buckets.note_request(provider, model_key,
                              res.get("in_tok", 0) + res.get("out_tok", 0))
