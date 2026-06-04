@@ -339,6 +339,43 @@ def _is_frontier_task(task: str) -> bool:
     return any(s in t for s in _FRONTIER_SIGNALS)
 
 
+def _load_skills_md(cwd: str) -> str:
+    """Project-level agent context (SKILLS.md at the repo root): locked design decisions,
+    protected files, and test commands. Injected into the planning context so the plan
+    respects what the project has already settled instead of relitigating it each session."""
+    import os as _os
+    p = _os.path.join(cwd, "SKILLS.md")
+    try:
+        if _os.path.isfile(p):
+            return open(p, encoding="utf-8", errors="replace").read()[:1500]
+    except OSError:
+        pass
+    return ""
+
+
+def _archive_existing_plan(cwd: str) -> str | None:
+    """Before the conductor OVERWRITES PLAN.md, preserve the prior plan to
+    plans/PLAN_NNN.md (auto-incrementing) so the plan history isn't lost. Best-effort —
+    a failure here never blocks writing the new plan."""
+    import os as _os
+    plan_path = _os.path.join(cwd, "PLAN.md")
+    if not _os.path.isfile(plan_path):
+        return None
+    try:
+        plans_dir = _os.path.join(cwd, "plans")
+        _os.makedirs(plans_dir, exist_ok=True)
+        n = sum(1 for f in _os.listdir(plans_dir)
+                if f.startswith("PLAN_") and f.endswith(".md")) + 1
+        dest = _os.path.join(plans_dir, f"PLAN_{n:03d}.md")
+        with open(plan_path, encoding="utf-8", errors="replace") as src:
+            prior = src.read()
+        with open(dest, "w", encoding="utf-8") as dst:
+            dst.write(prior)
+        return dest
+    except OSError:
+        return None
+
+
 def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, Any]:
     """THE planner entrypoint (the guaranteed first step on any new task). The CONDUCTOR
     authors PLAN.md — not the executor's internal chain-of-thought. It maps the repo
@@ -373,6 +410,11 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
     greenfield = (not repo_map) or "greenfield" in repo_map.lower()
     ctx = ("GREENFIELD — no existing code to map." if greenfield
            else f"Repository structure (one line per file):\n{repo_map[:8000]}")
+    skills = _load_skills_md(cwd) if cwd else ""
+    if skills:
+        ctx += ("\n\nPROJECT SKILLS.md (respect these — locked decisions, protected files, "
+                "test commands; do NOT modify protected files or reopen locked decisions):\n"
+                + skills)
     frontier = _is_frontier_task(task)
     prompt = (
         "You are the PLANNER. Produce a PLAN.md for the task. Output ONLY the markdown plan "
@@ -424,6 +466,7 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
     body = res["content"].strip()
     # strip any header the model emitted, then prepend the canonical signature
     signed = f"## Plan authored by: {model} via conductor\n\n{body}\n"
+    _archive_existing_plan(cwd)  # preserve the prior plan to plans/PLAN_NNN.md before overwrite
     try:
         with open(plan_path, "w") as f:
             f.write(signed)
