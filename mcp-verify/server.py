@@ -402,5 +402,27 @@ def formal_stats() -> dict:
     return formal_core.verify_formal_stats()
 
 
+@mcp.tool()
+@_threaded
+def run_done_when(command: str, expected_output: str = "", expected_exit_code: int = 0,
+                  timeout: int = 60, cwd: str = "") -> dict:
+    """Execute a plan step's DONE-WHEN command and assert exit code + expected output — the
+    mechanical, self-checking half of the planner's per-step DONE-WHEN contract.
+
+    Runs under the SAME safety envelope as the verify gate: a destructive + network/install
+    blocklist (rm -rf /, curl|bash, pip/npm install, apt/brew, docker run, …), cwd
+    confinement (pass `cwd` = the project dir; falls back to $AGENT_WORK_DIR / server cwd),
+    a hard 60s cap, and 4000-char output truncation. A DONE-WHEN is a LOCAL assertion only.
+
+    Args: command (the exact DONE-WHEN command); expected_output (substring that must appear,
+    quote-lenient; "" = don't check); expected_exit_code (default 0); timeout (≤60s); cwd.
+    Returns {passed, exit_code, output, reason, verdict} where verdict is the literal
+    'VERDICT: PASS' | 'VERDICT: FAIL' (uniform with the verification skill). For a
+    test-runner DONE-WHEN it also sets recommend_formal=True — a green exit proves the test
+    ran, not that the logic is correct; route the target through verify_formal/property_test."""
+    import done_when
+    return done_when.run_done_when(command, expected_output or None, expected_exit_code, timeout, cwd)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

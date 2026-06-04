@@ -125,5 +125,43 @@ def core_memory_replace(old: str | None = None, new: str | None = None,
     return kg_core.core_memory_replace(old, new, block)
 
 
+@mcp.tool()
+@_threaded
+def save_convention(category: str, data: str, tags: list | None = None,
+                    scope: str = "global") -> dict:
+    """Save a PROJECT CONVENTION fact (an architectural rule, not code): an
+    'architecture decision that must not be revisited', a 'protected file', a
+    'test command', an 'entry point', a 'workflow' preference, or 'custom'. Pass the
+    category, the fact text, optional tags, and scope ('global' or a namespace).
+    Idempotent on content. Use proactively when the operator states a locked decision /
+    a don't-touch file / how to verify. (propose_skill saves reusable CODE; this saves
+    rules.) Returns {saved, hash, reason}."""
+    import conventions
+    return conventions.save_convention(category, data, tags, scope)
+
+
+@mcp.tool()
+@_threaded
+def get_conventions(category: str = "*", scope: str = "*", tags: list | None = None) -> dict:
+    """Retrieve project conventions (most-recent first). category='*' returns ALL
+    categories; otherwise one of decision|protected_file|test_command|entry_point|
+    workflow|custom. scope!='*' returns that scope PLUS global. Optional tag filter.
+    Call at task start to load the project's locked decisions, protected files, and test
+    commands before acting. Returns {conventions: [...], count}."""
+    import conventions
+    facts = conventions.get_conventions(category, scope, tags)
+    return {"conventions": facts, "count": len(facts)}
+
+
+@mcp.tool()
+@_threaded
+def sync_skills_md(cwd: str, scope: str = "global") -> dict:
+    """Parse the SKILLS.md at <cwd> and upsert its items as typed convention facts
+    (idempotent by content hash) so they become queryable via get_conventions. Run at
+    bootstrap. Returns {written, total, path}."""
+    import conventions
+    return conventions.sync_skills_md(cwd, scope)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
