@@ -16,6 +16,23 @@ import re
 from functools import lru_cache
 from typing import Any, Optional
 
+# ── thinking-budget HARD cap (local HTTP endpoints only) ──────────────────────
+# The Qwen3 vLLM ignores the soft `thinking_budget` field, so we ALSO bound the
+# call with max_tokens = role_budget + ANSWER_BUDGET. max_tokens IS enforced (the
+# model stops at `length`), so this is the real spiral guard. Applied ONLY to local
+# HTTP endpoints — every cloud provider is HTTPS and either ignores the field or
+# handles thinking differently, so they pass through unchanged.
+ANSWER_BUDGET: int = int(os.environ.get("HM_ANSWER_BUDGET", "2048"))
+
+
+def _is_local_endpoint(url: Optional[str]) -> bool:
+    """True for a plain-HTTP (non-TLS) endpoint — local vLLM over Tailscale, a laptop
+    llama-server, any LAN node. False for all cloud providers (always HTTPS). Zero-
+    maintenance gate: stays correct if the local IP changes or a second node is added.
+    (If vLLM is ever fronted by a TLS terminator, add an explicit override here.)"""
+    return bool(url) and url.startswith("http://")
+
+
 _ENV_RE = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
 
 
