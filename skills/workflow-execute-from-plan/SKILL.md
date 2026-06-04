@@ -109,6 +109,34 @@ A frequent need for revisions on a simple task means the **plan** was thin — t
 planner-quality bug for [[workflow-plan-contract]] to fix, not a reason to start
 guessing here.
 
+## Execution discipline (cross-model failure modes)
+
+**Act, don't narrate.** If your turn says you will do something, do it in that same turn with
+the tool call — don't close a turn on "next I'll run the tests". Each turn either advances the
+work with a tool call or returns a verified result.
+
+**No invented results.** Ship real tool output, not a description of what it would say. If a
+command failed or you couldn't run it, say so plainly — never write the output it "should" have
+produced.
+
+**A stub is not done.** Hardcoding a return so a test passes, or leaving a TODO, does not
+complete a step. If you can't finish one, mark it blocked and `request_plan_revision` /
+escalate — don't fake completion.
+
+**Validated edits (when `mcp-edit` is connected).** For an edit to an EXISTING file prefer
+`validated_edit(path, search, replace)` — the SEARCH block must be unique, and on a miss you get
+the nearest candidate instead of a silent wrong patch. For a NEW or fully-rewritten file use
+`validated_write(path, content)`, which refuses a partial file with `...` / placeholder gaps —
+send the whole file. If `mcp-edit` is not connected, use the native `edit_file`/`write_file`.
+
+**Supply-chain + egress safety (when `mcp-security` is connected).** Before any install
+(`pip install`, `npm install`, `uvx`, `npx`, `cargo add`, `go get`) call
+`check_install(ecosystem, package)`: `action="block"` → do NOT install, report the advisory and
+escalate (never route around a block); `action="warn"` → surface it and proceed only if the task
+needs the package; `action="allow"` → proceed. Before any command that makes a network
+connection, call `classify_egress(command)` and include the summary in your step output
+(observability, not a gate). If `mcp-security` is not connected, proceed without these checks.
+
 ## Don't
 
 - Don't redesign what the FILE SPEC already specifies.
