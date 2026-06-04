@@ -324,6 +324,21 @@ def _scopemap_repo_map(cwd: str) -> str:
         return ""
 
 
+_FRONTIER_SIGNALS = (
+    "lock-free", "lockfree", "wait-free", "atomic", "compare-and-swap", "cas ", "concurren",
+    "mpmc", "spsc", "mpsc", "ring buffer", "allocator", "scheduler", "memory model", "ordering",
+    "parser", "compiler", "codec", "protocol", "b-tree", "lsm", "raft", "paxos", "consensus",
+    "zero-copy", "simd", "from scratch", "state machine", "interpreter", "bytecode",
+)
+
+
+def _is_frontier_task(task: str) -> bool:
+    """A novel-algorithm / concurrency-primitive / systems-level task the small local
+    executor must NOT design alone — the conductor commits every decision for it."""
+    t = (task or "").lower()
+    return any(s in t for s in _FRONTIER_SIGNALS)
+
+
 def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, Any]:
     """THE planner entrypoint (the guaranteed first step on any new task). The CONDUCTOR
     authors PLAN.md — not the executor's internal chain-of-thought. It maps the repo
@@ -358,27 +373,50 @@ def conductor_plan(task: str, cwd: str = "", repo_map: str = "") -> dict[str, An
     greenfield = (not repo_map) or "greenfield" in repo_map.lower()
     ctx = ("GREENFIELD — no existing code to map." if greenfield
            else f"Repository structure (one line per file):\n{repo_map[:8000]}")
+    frontier = _is_frontier_task(task)
     prompt = (
-        "You are the PLANNER. Produce a PLAN.md for the task. Output ONLY the markdown "
-        "plan (no preamble). It is a contract the executor follows literally — concrete "
-        "and gap-free.\n\n"
+        "You are the PLANNER. Produce a PLAN.md for the task. Output ONLY the markdown plan "
+        "(no preamble). It is a CONTRACT the executor TRANSCRIBES literally — the executor is "
+        "a small local model that must NOT invent architecture, so YOU make every design "
+        "decision here; leave nothing to its judgment. Be concrete and gap-free.\n\n"
         f"{ctx}\n\nTASK:\n{task}\n\n"
-        "The plan MUST contain: a one-paragraph approach; a '## Files' list with a FILE "
-        "SPEC (key functions/classes + signatures) per file; a '## Steps' ordered list; "
-        "and a 'DONE_CONDITION:' line with the exact verifiable gate (e.g. 'pytest "
-        "green, N tests pass').\n"
-        "Mark EACH step with a complexity flag: 'complexity: standard' or "
-        "'complexity: HIGH'. For HIGH steps (novel concurrency invariants, atomicity "
-        "guarantees, non-obvious property-test strategies, anything a small local model "
-        "shouldn't design alone) add a one-line 'note:' with the key consideration — the "
+        "The plan MUST contain these markdown sections, in order:\n"
+        "- a one-paragraph **approach**;\n"
+        "- '## Architecture Decisions' — a numbered list. For EVERY non-trivial choice the "
+        "task implies (data structure, algorithm, concurrency/atomicity mechanism, error "
+        "model, I/O strategy), COMMIT to ONE specific named mechanism with a one-line WHY "
+        "(over the main alternative). These are DECISIONS, not options — the executor follows "
+        "them verbatim and must NOT reopen them. Cite the algorithm/paper/known implementation "
+        "to follow where one exists;\n"
+        "- '## Files' — a FILE SPEC per file: key functions/classes with EXACT signatures + "
+        "return types;\n"
+        "- '## Steps' — an ordered list; each step is a SINGLE concrete action naming the exact "
+        "file/function, and ENDS with 'DONE WHEN: <exact command + expected output/exit code>' "
+        "— a mechanical, binary check (e.g. 'DONE WHEN: pytest -x test_q.py::test_cross_process "
+        "exits 0'). No vague steps;\n"
+        "- '## Failure Modes' — the specific way each risky step is likely to fail and how to "
+        "avoid it, so the executor RECOGNIZES a failure instead of diagnosing from scratch;\n"
+        "- a 'DONE_CONDITION:' line with the exact verifiable gate (e.g. 'pytest green, N tests "
+        "pass').\n"
+        "Mark EACH step with a complexity flag: 'complexity: standard' or 'complexity: HIGH'. "
+        "For HIGH steps (novel concurrency invariants, atomicity guarantees, non-obvious "
+        "property-test strategies) add a one-line 'note:' with the key consideration — the "
         "executor will call reasoning_escalation BEFORE attempting those steps.\n"
         "For MULTI-FILE tasks, annotate each step with the files it touches and its "
-        "dependencies so the conductor can schedule independent steps with fresh focused "
-        "context: append 'files: a.py, b.py' and 'depends_on: [1, 2]' (1-based earlier step "
+        "dependencies: append 'files: a.py, b.py' and 'depends_on: [1, 2]' (1-based earlier step "
         "numbers) to the step line. Independent steps (no shared deps) get isolated contexts; "
         "steps that touch the same file are serialized to avoid merge conflicts.")
+    if frontier:
+        prompt += (
+            "\n\nFRONTIER IMPLEMENTATION: this is a novel algorithm / concurrency primitive / "
+            "systems-level task. The executor CANNOT design it. Every atomicity/ordering/"
+            "algorithmic decision MUST be committed above with the precise named mechanism and a "
+            "concrete reference to follow verbatim (e.g. 'Vyukov bounded MPMC queue: per-cell "
+            "sequence numbers, CAS on the tail index'). Spell out the invariant each step must "
+            "preserve. If you leave a design choice to the executor, the plan has failed.")
     # synth chain already carries thinking_budget 8192 (see _THINKING_BUDGET["synth"]).
-    res = run_role("synth", prompt=prompt, max_tokens=4096)
+    # Frontier specs need more room than a routine plan.
+    res = run_role("synth", prompt=prompt, max_tokens=6144 if frontier else 4096)
     if not (res.get("ok") and res.get("content")):
         return {"ok": False, "plan": "", "signed": False, "wrote": False,
                 "path": plan_path, "reason": res.get("reason", "no synth rung available")}
