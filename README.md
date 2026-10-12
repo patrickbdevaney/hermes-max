@@ -129,4 +129,4 @@ in [archive/specs/](archive/specs/) — you do not need them to use hermes-max.
 
 ## License
 
-No license is declared yet. Add a `LICENSE` file at the repo root to set terms.
+MIT. See [`LICENSE`](LICENSE). Third-party tools this harness installs or calls (Hermes Agent, MCP servers, model providers) keep their own licenses and terms.
